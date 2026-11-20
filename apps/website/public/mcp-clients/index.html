@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MCP computer use on macOS: client setup | Agent Screen</title>
+<meta name="description" content="Connect Claude Code, Codex, Cursor, Gemini CLI, OpenCode, Claude Desktop, VS Code and Zed to Agent Screen's local stdio MCP server on macOS 15 or later.">
+<link rel="canonical" href="https://agentscreen.app/mcp-clients/">
+<meta name="theme-color" content="#0a0a0c">
+<meta name="color-scheme" content="dark">
+
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Agent Screen">
+<meta property="og:url" content="https://agentscreen.app/mcp-clients/">
+<meta property="og:title" content="MCP computer use on macOS in the background: client setup">
+<meta property="og:description" content="Local stdio MCP setup for Claude Code, Codex, Cursor, Gemini CLI, Claude Desktop, VS Code, OpenCode, and Zed on macOS 15+.">
+<meta property="og:image" content="https://agentscreen.app/og.png?v=84fb39608e">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Agent Screen: Agent Displays working around your own screen.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="MCP computer use on macOS in the background: client setup">
+<meta name="twitter:description" content="Local stdio MCP setup for Claude Code, Codex, Cursor, Gemini CLI, Claude Desktop, VS Code, OpenCode, and Zed on macOS 15+.">
+<meta name="twitter:image" content="https://agentscreen.app/og.png?v=84fb39608e">
+<meta name="twitter:site" content="@fanzzzd_x">
+<meta name="twitter:creator" content="@fanzzzd_x">
+<meta name="twitter:image:alt" content="Agent Screen: Agent Displays working around your own screen.">
+
+<link rel="icon" href="/favicon.ico" sizes="32x32">
+<link rel="icon" href="/favicon-64.png" type="image/png" sizes="64x64">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="stylesheet" href="/styles.css">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "BreadcrumbList",
+      "itemListElement": [
+        { "@type": "ListItem", "position": 1, "name": "Agent Screen", "item": "https://agentscreen.app/" },
+        { "@type": "ListItem", "position": 2, "name": "MCP Clients", "item": "https://agentscreen.app/mcp-clients/" }
+      ]
+    },
+    {
+      "@type": "TechArticle",
+      "headline": "MCP computer use on macOS in the background: client setup",
+      "description": "Configuration reference for connecting Claude Code, Codex, Cursor, Gemini CLI, Claude Desktop, VS Code, OpenCode, and Zed to Agent Screen's local stdio MCP server.",
+      "url": "https://agentscreen.app/mcp-clients/",
+      "mainEntityOfPage": "https://agentscreen.app/mcp-clients/",
+      "image": "https://agentscreen.app/og.png?v=84fb39608e",
+      "datePublished": "2026-11-20",
+      "dateModified": "2026-11-20",
+      "author": { "@type": "Organization", "name": "Agent Screen", "url": "https://agentscreen.app/" },
+      "publisher": { "@type": "Organization", "name": "Agent Screen", "url": "https://agentscreen.app/" }
+    }
+  ]
+}
+</script>
+</head>
+<body>
+
+<header class="top">
+  <div class="top-in">
+    <a class="brand" href="/"><img src="/logo-dark.svg" alt="" width="26" height="25"><span>Agent Screen</span></a>
+    <nav>
+      <a href="/#features">Features</a>
+      <a class="nav-install" href="/#install">Install</a>
+      <a class="nav-sec" href="/claude-code/">Claude Code</a>
+      <a class="nav-sec" href="/virtual-display/">How it works</a>
+      <a class="gh" aria-label="GitHub" href="https://github.com/Fanzzzd/agent-screen"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg><span>GitHub</span></a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <article>
+    <header class="doc-hero">
+      <nav class="breadcrumb" aria-label="Breadcrumb">
+        <a href="/">Agent Screen</a>
+        <span aria-hidden="true">/</span>
+        <span aria-current="page">MCP clients</span>
+      </nav>
+      <h1>MCP computer use on macOS in the background.</h1>
+      <p class="doc-lede">Agent Screen ships a local stdio Model Context Protocol server inside the macOS app bundle. Any MCP client can open Mac apps, read the accessibility tree, click, type, and record video on its own virtual display without API keys or network calls.</p>
+      <div class="doc-meta">
+        <span>Local stdio transport</span>
+        <span>No API keys or cloud proxy</span>
+        <span>Command: <code>AgentScreen mcp</code></span>
+      </div>
+    </header>
+
+    <div class="doc-body">
+      <nav class="doc-toc" aria-label="On this page">
+        <p class="doc-toc-title">On this page</p>
+        <ul>
+          <li><a href="#automatic">Automatic setup (Claude Code and Codex)</a></li>
+          <li><a href="#clients">Configuration by MCP client</a></li>
+          <li><a href="#skill">Install the Agent Screen skill</a></li>
+          <li><a href="#sessions">How Agent Screen keeps client sessions apart</a></li>
+          <li><a href="#tools">MCP tools reference</a></li>
+        </ul>
+      </nav>
+
+      <section id="automatic">
+        <h2>Automatic setup (Claude Code and Codex)</h2>
+        <p>First install Agent Screen via Homebrew (<code>brew tap fanzzzd/agent-screen &amp;&amp; brew trust fanzzzd/agent-screen &amp;&amp; brew install --cask agent-screen</code>) or the <a href="https://github.com/Fanzzzd/agent-screen/releases/latest">DMG</a>, open it, and allow Screen Recording and Accessibility in Settings.</p>
+        <p>Press <strong>Connect…</strong> in Settings or run:</p>
+        <div class="code">
+          <div class="code-bar"><span>Claude Code + Codex</span><button class="copy" type="button" data-copy="&quot;/Applications/Agent Screen.app/Contents/MacOS/AgentScreen&quot; mcp install">Copy</button></div>
+          <pre><code>"/Applications/<wbr>Agent Screen.app/<wbr>Contents/<wbr>MacOS/<wbr>AgentScreen" mcp install</code></pre>
+        </div>
+        <p>In <code>v0.1.41</code>, if Agent Screen is not already open, the agent's first tool call starts it automatically (the upcoming release on <code>main</code> starts it as soon as the client connects). Start a new session or restart your client after editing its MCP configuration.</p>
+      </section>
+
+      <section id="clients">
+        <h2>Configuration by MCP client</h2>
+        <p>Every client runs the same local binary (<code>/Applications/Agent Screen.app/Contents/MacOS/AgentScreen</code>) with the single argument <code>mcp</code>. No environment variables or tokens are required. See <a href="https://github.com/Fanzzzd/agent-screen/blob/main/docs/clients.md">docs/clients.md</a> on GitHub for the latest notes.</p>
+
+        <div class="client-grid">
+          <div class="client-card">
+            <h3>Claude Code</h3>
+            <p>Configured automatically by <code>AgentScreen mcp install</code>, or add manually for all projects:</p>
+            <div class="code">
+              <div class="code-bar"><span>Terminal</span><button class="copy" type="button" data-copy="claude mcp add --scope user agent-screen -- &quot;/Applications/Agent Screen.app/Contents/MacOS/AgentScreen&quot; mcp">Copy</button></div>
+              <pre><code>claude mcp add --scope user agent-screen -- "/Applications/Agent Screen.app/Contents/MacOS/AgentScreen" mcp</code></pre>
+            </div>
+          </div>
+
+          <div class="client-card">
+            <h3>Codex (CLI, IDE extension, and desktop app)</h3>
+            <p>All three share <code>~/.codex/config.toml</code> (also written by <code>AgentScreen mcp install</code>):</p>
+            <div class="code">
+              <div class="code-bar"><span>~/.codex/config.toml</span><button class="copy" type="button" data-copy="[mcp_servers.agent-screen]&#10;command = &quot;/Applications/Agent Screen.app/Contents/MacOS/AgentScreen&quot;&#10;args = [&quot;mcp&quot;]">Copy</button></div>
+              <pre><code>[mcp_servers.agent-screen]
+command = "/Applications/Agent Screen.app/Contents/MacOS/AgentScreen"
+args = ["mcp"]</code></pre>
+            </div>
+          </div>
+
+          <div class="client-card">
+            <h3>Cursor (editor and CLI)</h3>
+            <p>Add to <code>~/.cursor/mcp.json</code> globally or <code>.cursor/mcp.json</code> per project. In Cursor's CLI, enable a project server with <code>cursor-agent mcp enable agent-screen</code>.</p>
+            <div class="code">
+              <div class="code-bar"><span>~/.cursor/mcp.json</span><button class="copy" type="button" data-copy="{&#10;  &quot;mcpServers&quot;: {&#10;    &quot;agent-screen&quot;: {&#10;      &quot;command&quot;: &quot;/Applications/Agent Screen.app/Contents/MacOS/AgentScreen&quot;,&#10;      &quot;args&quot;: [&quot;mcp&quot;]&#10;    }&#10;  }&#10;}">Copy</button></div>
+              <pre><code>{
+  "mcpServers": {
+    "agent-screen": {
+      "command": "/Applications/Agent Screen.app/Contents/MacOS/AgentScreen",
+      "args": ["mcp"]
+    }
+  }
+}</code></pre>
+            </div>
+          </div>
+
+          <div class="client-card">
+            <h3>Gemini CLI and Claude Desktop</h3>
+            <p>Use the same <code>mcpServers</code> JSON block above in <code>~/.gemini/settings.json</code> (or <code>.gemini/settings.json</code>) for Gemini CLI, or in <code>~/Library/Application Support/Claude/claude_desktop_config.json</code> for Claude Desktop (quit and reopen Claude Desktop afterward).</p>
+          </div>
+
+          <div class="client-card">
+            <h3>VS Code with Copilot</h3>
+            <p>Add to <code>~/.copilot/mcp-config.json</code> or workspace <code>.mcp.json</code> with <code>"type": "stdio"</code>:</p>
+            <div class="code">
+              <div class="code-bar"><span>.mcp.json</span><button class="copy" type="button" data-copy="{&#10;  &quot;mcpServers&quot;: {&#10;    &quot;agent-screen&quot;: {&#10;      &quot;type&quot;: &quot;stdio&quot;,&#10;      &quot;command&quot;: &quot;/Applications/Agent Screen.app/Contents/MacOS/AgentScreen&quot;,&#10;      &quot;args&quot;: [&quot;mcp&quot;]&#10;    }&#10;  }&#10;}">Copy</button></div>
+              <pre><code>{
+  "mcpServers": {
+    "agent-screen": {
+      "type": "stdio",
+      "command": "/Applications/Agent Screen.app/Contents/MacOS/AgentScreen",
+      "args": ["mcp"]
+    }
+  }
+}</code></pre>
+            </div>
+          </div>
+
+          <div class="client-card">
+            <h3>OpenCode</h3>
+            <p>Add to project or global <code>opencode.jsonc</code>:</p>
+            <div class="code">
+              <div class="code-bar"><span>opencode.jsonc</span><button class="copy" type="button" data-copy="{&#10;  &quot;mcp&quot;: {&#10;    &quot;servers&quot;: {&#10;      &quot;agent-screen&quot;: {&#10;        &quot;type&quot;: &quot;local&quot;,&#10;        &quot;command&quot;: [&quot;/Applications/Agent Screen.app/Contents/MacOS/AgentScreen&quot;, &quot;mcp&quot;]&#10;      }&#10;    }&#10;  }&#10;}">Copy</button></div>
+              <pre><code>{
+  "mcp": {
+    "servers": {
+      "agent-screen": {
+        "type": "local",
+        "command": ["/Applications/Agent Screen.app/Contents/MacOS/AgentScreen", "mcp"]
+      }
+    }
+  }
+}</code></pre>
+            </div>
+          </div>
+
+          <div class="client-card">
+            <h3>Zed</h3>
+            <p>Add under <code>context_servers</code> in Zed's <code>settings.json</code>:</p>
+            <div class="code">
+              <div class="code-bar"><span>settings.json</span><button class="copy" type="button" data-copy="{&#10;  &quot;context_servers&quot;: {&#10;    &quot;agent-screen&quot;: {&#10;      &quot;command&quot;: &quot;/Applications/Agent Screen.app/Contents/MacOS/AgentScreen&quot;,&#10;      &quot;args&quot;: [&quot;mcp&quot;],&#10;      &quot;env&quot;: {}&#10;    }&#10;  }&#10;}">Copy</button></div>
+              <pre><code>{
+  "context_servers": {
+    "agent-screen": {
+      "command": "/Applications/Agent Screen.app/Contents/MacOS/AgentScreen",
+      "args": ["mcp"],
+      "env": {}
+    }
+  }
+}</code></pre>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="skill">
+        <h2>Install the Agent Screen skill</h2>
+        <p>For Cursor, Gemini CLI, and other agents that read Agent Skills, install the companion skill so the agent reaches for its virtual display automatically instead of running <code>open -a</code> on your main screen:</p>
+        <div class="code">
+          <div class="code-bar"><span>Agent Skills installer</span><button class="copy" type="button" data-copy="npx skills add Fanzzzd/agent-screen -g">Copy</button></div>
+          <pre class="cmds"><code><span class="ln">npx skills add <span class="arg">Fanzzzd/agent-screen</span> <span class="arg">-g</span></span></code></pre>
+        </div>
+        <p>For agents without a skill loader, copy <a href="https://github.com/Fanzzzd/agent-screen/blob/main/docs/agents/AGENTS.md">docs/agents/AGENTS.md</a> into your project's <code>AGENTS.md</code> or <code>CLAUDE.md</code>.</p>
+      </section>
+
+      <section id="sessions">
+        <h2>How Agent Screen keeps client sessions apart</h2>
+        <p>Each Agent Session owns its displays, Window Authorization, and Help Requests. In <code>v0.1.41</code>, Agent Screen identifies a tool call's session from the first matching source:</p>
+        <ol>
+          <li><strong>Claude Code session variable:</strong> Claude Code passes <code>CLAUDE_CODE_SESSION_ID</code> to stdio servers. (The upcoming release on <code>main</code> checks Codex metadata first and scopes <code>CLAUDE_CODE_SESSION_ID</code> strictly to clients identifying as <code>claude-code</code>, so a child client launched from a Claude Code shell gets its own session.)</li>
+          <li><strong>Codex per-call metadata:</strong> Codex sends <code>x-codex-turn-metadata</code> on each tool call, so multiple Codex conversations sharing one server process stay on separate displays.</li>
+          <li><strong>Per-process connection:</strong> Clients that send no session hint (such as Cursor, Gemini CLI, OpenCode, Zed, VS Code, and Claude Desktop) get one session per started <code>AgentScreen mcp</code> process. Note that Claude Desktop launches one MCP server process at startup, so its conversations share that session.</li>
+        </ol>
+        <p>When a client restarts or closes its MCP process, Agent Screen waits a 2-second grace period so reconnecting clients can rebind their displays before closing empty displays or marking remaining windows for review.</p>
+      </section>
+
+      <section id="tools">
+        <h2>MCP tools reference</h2>
+        <div class="table-wrap">
+          <table class="doc-table">
+            <thead>
+              <tr>
+                <th>Tools</th>
+                <th>Purpose</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>create_display</code>, <code>end_display</code></td>
+                <td>Create or reuse the session's Agent Display (up to four with <code>new: true</code>), returning a display handle and a read-only local <code>preview_url</code>.</td>
+              </tr>
+              <tr>
+                <td><code>launch_app</code>, <code>place_window</code>, <code>list_windows</code></td>
+                <td>Open apps by name, bundle ID, or <code>.app</code> path onto the display, list windows or strays, and set exact window frames.</td>
+              </tr>
+              <tr>
+                <td><code>computer</code></td>
+                <td>Anthropic-style display actions (click, move, drag, scroll, type, key, screenshot). Every action except <code>wait</code> and <code>cursor_position</code> returns a screenshot.</td>
+              </tr>
+              <tr>
+                <td><code>get_window_state</code>, <code>act_on_element</code></td>
+                <td>Read one window's screenshot and numbered macOS accessibility tree; press buttons, choose menu items, set or insert text, and read text by element number.</td>
+              </tr>
+              <tr>
+                <td><code>wait_for_change</code></td>
+                <td>Wait until a window or element subtree changes, or a matching role/text appears or disappears, returning only the delta instead of polling screenshots.</td>
+              </tr>
+              <tr>
+                <td><code>request_help</code>, <code>wait_for_control</code>, <code>request_control</code></td>
+                <td>Ask the user to step in for logins or captchas, wait out a Takeover, or request control back.</td>
+              </tr>
+              <tr>
+                <td><code>input_queue</code></td>
+                <td>Inspect, wait for, withdraw, or finish user-approved pointer operations when background input cannot run a drag or click.</td>
+              </tr>
+              <tr>
+                <td><code>window_access</code>, <code>set_disposition</code></td>
+                <td>Manage session window authorization, return handed-over windows, and mark whether windows should be kept or closed at review.</td>
+              </tr>
+              <tr>
+                <td><code>record_display</code>, <code>get_diagnostics</code></td>
+                <td>Record an Agent Display to MP4 in <code>~/Movies/Agent Screen</code> with app audio and action timeline, or collect build diagnostics.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <div class="doc-cta">
+        <h2>Ready to connect your MCP client?</h2>
+        <p>Install Agent Screen on macOS 15 or later and keep your cursor free while agents run real Mac apps.</p>
+        <div class="actions">
+          <a class="button primary dmg" href="https://github.com/Fanzzzd/agent-screen/releases/latest">Download the DMG</a>
+          <a class="button gh-button" href="https://github.com/Fanzzzd/agent-screen/blob/main/docs/clients.md">Read docs/clients.md</a>
+        </div>
+        <p class="on-mac">Agent Screen runs on a Mac. Star it on GitHub to find it later.</p>
+      </div>
+
+      <section class="related-guides">
+        <h2>Related guides</h2>
+        <div class="related-grid">
+          <a class="guide-card" href="/claude-code/">
+            <div>
+              <span class="guide-kicker">Claude Code</span>
+              <h3>Let Claude Code use your Mac without taking your mouse</h3>
+              <p>Step-by-step setup with the Claude Code plugin, Peek, Help Cards, and parallel sessions.</p>
+            </div>
+            <span class="guide-more">Read Claude Code guide &rarr;</span>
+          </a>
+          <a class="guide-card" href="/virtual-display/">
+            <div>
+              <span class="guide-kicker">Architecture</span>
+              <h3>AI agent virtual display for Mac: SkyLight vs VMs</h3>
+              <p>Why Agent Screen uses CGVirtualDisplay and SkyLight, when a VM is better, and how ColorSync stays fast.</p>
+            </div>
+            <span class="guide-more">Read architecture guide &rarr;</span>
+          </a>
+        </div>
+      </section>
+    </div>
+  </article>
+</main>
+
+<footer>
+  <div class="foot">
+    <span>Agent Screen is MIT licensed. Its background input recipe is ported from <a href="https://github.com/trycua/cua">trycua/cua</a>.</span>
+    <nav>
+      <a href="/">Home</a>
+      <a href="/claude-code/">Claude Code</a>
+      <a href="/mcp-clients/">MCP Clients</a>
+      <a href="/virtual-display/">Virtual Display</a>
+      <a href="https://github.com/Fanzzzd/agent-screen">GitHub</a>
+      <a href="https://github.com/Fanzzzd/agent-screen/releases/latest">Releases</a>
+      <a href="https://github.com/Fanzzzd/agent-screen/issues">Issues</a>
+      <a href="/llms.txt">llms.txt</a>
+    </nav>
+  </div>
+</footer>
+
+<p class="sr-only" id="copy-status" aria-live="polite"></p>
+<script>
+  const mac = /mac/i.test(navigator.userAgentData?.platform || navigator.platform) && navigator.maxTouchPoints < 2;
+  const status = document.getElementById('copy-status');
+  const announce = (text) => { status.textContent = ''; setTimeout(() => (status.textContent = text), 50); };
+  for (const b of document.querySelectorAll('.copy')) {
+    let reset = 0;
+    b.addEventListener('click', async () => {
+      clearTimeout(reset);
+      try {
+        await navigator.clipboard.writeText(b.dataset.copy);
+        b.textContent = 'Copied';
+        announce('Copied to the clipboard.');
+      } catch {
+        getSelection().selectAllChildren(b.closest('.code').querySelector('pre'));
+        b.textContent = mac ? 'Press ⌘C to copy' : 'Select and copy';
+        announce(mac ? "Couldn't copy. The command is selected; press Command-C." : "Couldn't copy. The command is selected; copy it from there.");
+      }
+      reset = setTimeout(() => (b.textContent = 'Copy'), 2400);
+    });
+  }
+</script>
+</body>
+</html>

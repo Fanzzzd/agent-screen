@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Agent Screen: give each AI agent its own Mac screen</title>
-<meta name="description" content="Agent Screen is a macOS menu bar app that gives each Claude Code or Codex session its own virtual display. The agent opens apps, clicks and types there while your cursor, keyboard and windows stay yours.">
+<meta name="description" content="Free, open-source macOS 15+ menu bar app that gives Claude Code, Codex, and MCP agents virtual displays, so they drive apps while your mouse stays yours.">
 <link rel="canonical" href="https://agentscreen.app/">
 <meta name="theme-color" content="#0a0a0c">
 <meta name="color-scheme" content="dark">
@@ -13,14 +13,14 @@
 <meta property="og:site_name" content="Agent Screen">
 <meta property="og:url" content="https://agentscreen.app/">
 <meta property="og:title" content="Agent Screen: give each AI agent its own Mac screen">
-<meta property="og:description" content="Claude Code or Codex opens apps, clicks and types on a virtual display, while your cursor, keyboard and windows stay yours.">
+<meta property="og:description" content="Claude Code, Codex, or any MCP agent opens apps, clicks and types on a virtual display, while your cursor, keyboard and windows stay yours.">
 <meta property="og:image" content="https://agentscreen.app/og.png?v=84fb39608e">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta property="og:image:alt" content="Agent Screen: Agent Displays working around your own screen.">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="Agent Screen: give each AI agent its own Mac screen">
-<meta name="twitter:description" content="Claude Code or Codex opens apps, clicks and types on a virtual display, while your cursor, keyboard and windows stay yours.">
+<meta name="twitter:description" content="Claude Code, Codex, or any MCP agent opens apps, clicks and types on a virtual display, while your cursor, keyboard and windows stay yours.">
 <meta name="twitter:image" content="https://agentscreen.app/og.png?v=84fb39608e">
 <meta name="twitter:site" content="@fanzzzd_x">
 <meta name="twitter:creator" content="@fanzzzd_x">
@@ -32,6 +32,100 @@
 <link rel="preload" as="image" href="/media/hero.webp?v=fcb02548e0" type="image/webp" media="(min-width: 601px)" fetchpriority="high">
 <link rel="preload" as="image" href="/media/hero-m.webp?v=8085a60bce" type="image/webp" media="(max-width: 600px)" fetchpriority="high">
 <link rel="stylesheet" href="/styles.css">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "WebSite",
+      "name": "Agent Screen",
+      "url": "https://agentscreen.app/"
+    },
+    {
+      "@type": ["SoftwareApplication", "SoftwareSourceCode"],
+      "name": "Agent Screen",
+      "applicationCategory": "DeveloperApplication",
+      "operatingSystem": "macOS 15 or later",
+      "softwareVersion": "0.1.41",
+      "url": "https://agentscreen.app/",
+      "downloadUrl": "https://github.com/Fanzzzd/agent-screen/releases/latest",
+      "installUrl": "https://agentscreen.app/#install",
+      "codeRepository": "https://github.com/Fanzzzd/agent-screen",
+      "license": "https://github.com/Fanzzzd/agent-screen/blob/main/LICENSE",
+      "isAccessibleForFree": true,
+      "offers": {
+        "@type": "Offer",
+        "price": "0",
+        "priceCurrency": "USD"
+      },
+      "screenshot": "https://agentscreen.app/og.png?v=84fb39608e",
+      "description": "Free, MIT-licensed macOS 15+ menu bar app that gives each AI agent session its own virtual display so Claude Code, Codex, and other MCP clients can drive real Mac apps in the background without taking the user's mouse, keyboard, or focus.",
+      "featureList": [
+        "One virtual display per AI agent session, up to four per session",
+        "Background clicks and keyboard input through SkyLight without moving the user's cursor",
+        "Peek live menu bar thumbnails and read-only local Web Preview",
+        "One-click Takeover, Help Request cards, Window Handover, and Input Queue",
+        "Accessibility tree element actions and change waiting",
+        "Local MP4 display recording with app audio and action timeline",
+        "Local stdio MCP server for Claude Code, Codex, Cursor, Gemini CLI, OpenCode, Claude Desktop, VS Code, and Zed"
+      ]
+    },
+    {
+      "@type": "FAQPage",
+      "mainEntity": [
+        {
+          "@type": "Question",
+          "name": "How can Claude Code or Codex use my Mac without taking my mouse?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Agent Screen creates a virtual display per agent session with CGVirtualDisplay and sends clicks and keys straight to the target app process in the background through SkyLight, plus macOS Accessibility actions. Your real pointer, keyboard focus, and windows stay on your own screen."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Which MCP clients work with Agent Screen?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Agent Screen works with any MCP client that runs a local stdio server. AgentScreen mcp install sets up Claude Code and Codex automatically, including the Agent Screen skill. Cursor, Gemini CLI, Claude Desktop, VS Code with Copilot, OpenCode, and Zed connect with the same stdio command."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "How is Agent Screen different from a macOS virtual machine or built-in computer use?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Built-in computer use drives your real pointer and keyboard, so you cannot work while the agent works. A virtual machine isolates the agent, but requires setting up apps and logins again inside each VM. Agent Screen uses the real Mac apps and logins you already have on a separate virtual display, with one-click Takeover from the menu bar, though it is not a security sandbox."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "What happens when an AI agent hits a login screen or captcha?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "The agent calls request_help, which drops a Help Card under the menu bar icon with the display image and reason, and pauses. You can press Take Over to sign in yourself and hand control back, press Continue if you handled it elsewhere, send a Reply, or give the agent one of your windows."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Is Agent Screen private, and is it a security sandbox?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Agent Screen runs locally on your Mac, collects no telemetry, and checks GitHub once a day for updates via Sparkle. Web Preview listens on 127.0.0.1 only, and agents connect over a user-only local socket. It is not a security sandbox: the agent drives your real apps with your accounts. Use a VM if you need OS isolation."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Why does Agent Screen require macOS 15 or later and use private APIs?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Sending clicks and keys to background apps on a virtual display without warping the user's cursor relies on private macOS SkyLight APIs and CGVirtualDisplay. Because of those private APIs, Agent Screen cannot be listed on the Mac App Store and a future macOS release may break it. The app is Developer ID signed, notarized by Apple, and MIT licensed."
+          }
+        }
+      ]
+    }
+  ]
+}
+</script>
 </head>
 <body>
 
@@ -40,21 +134,22 @@
     <a class="brand" href="/"><img src="/logo-dark.svg" alt="" width="26" height="25"><span>Agent Screen</span></a>
     <nav>
       <a href="#features">Features</a>
-      <a href="#install">Install</a>
+      <a class="nav-install" href="#install">Install</a>
+      <a class="nav-sec" href="#guides">Guides</a>
       <div class="peek-wrap">
         <button class="peek-btn" type="button" aria-expanded="false" aria-controls="peek" ><svg viewBox="0 0 20 18" aria-hidden="true"><path d="M7.277 4.969L15.471 4.969Q18.218 4.969 18.218 7.717L18.218 11.766L16.520 10.144L16.520 7.717Q16.520 6.668 15.471 6.668L12.879 6.668L12.414 6.223Q11.220 5.083 10.080 6.277Q9.906 6.459 9.799 6.668L7.277 6.668Q6.228 6.668 6.228 7.717L6.228 11.914Q6.228 12.963 7.277 12.963L9.623 12.963L9.623 14.661L7.277 14.661Q4.529 14.661 4.529 11.914L4.529 7.717Q4.529 4.969 7.277 4.969ZM11.022 7.417Q11.022 7.316 11.092 7.243Q11.266 7.061 11.448 7.235L17.953 13.446Q18.031 13.520 18.031 13.628Q18.031 13.880 17.779 13.880L15.311 13.880L16.582 16.758Q16.583 16.759 16.583 16.760Q16.683 16.992 16.451 17.091L14.982 17.720Q14.754 17.818 14.653 17.591L13.326 14.597L11.445 16.331Q11.372 16.398 11.274 16.398Q11.022 16.398 11.022 16.146ZM4.230 2.221L11.024 2.221Q13.236 2.221 13.449 4.220L11.672 4.220Q11.498 3.920 11.024 3.920L4.230 3.920Q3.480 3.920 3.480 4.669L3.480 8.966Q3.480 9.440 3.780 9.614L3.780 11.376Q3.051 11.249 2.499 10.697Q1.782 9.980 1.782 8.966L1.782 4.669Q1.782 3.655 2.499 2.938Q3.216 2.221 4.230 2.221Z"/></svg><span class="peek-label">Peek</span><span class="ping" aria-hidden="true"></span></button>
         <div class="peek" id="peek" tabindex="-1">
           <div class="tiles">
-            <figure><video muted loop playsinline preload="none" poster="/media/tile-checkout.webp?v=051b6561fb" data-src="/media/tile-checkout.mp4?v=1288f1959f"></video><figcaption><b>Agent 1 · Checkout</b><span>Controlled by Agent 1</span></figcaption></figure>
-            <figure><video muted loop playsinline preload="none" poster="/media/tile-kanban.webp?v=6111b17acc" data-src="/media/tile-kanban.mp4?v=ed4120870f"></video><figcaption><b>Agent 2 · Launch board</b><span>Controlled by Agent 2</span></figcaption></figure>
-            <figure><video muted loop playsinline preload="none" poster="/media/tile-booking.webp?v=10e7b188c4" data-src="/media/tile-booking.mp4?v=47b281a3c7"></video><figcaption><b>Agent 3 · Book a demo</b><span>Controlled by Agent 3</span></figcaption></figure>
+            <figure><video width="416" height="260" muted loop playsinline preload="none" poster="/media/tile-checkout.webp?v=051b6561fb" data-src="/media/tile-checkout.mp4?v=1288f1959f"></video><figcaption><b>Agent 1 · Checkout</b><span>Controlled by Agent 1</span></figcaption></figure>
+            <figure><video width="416" height="260" muted loop playsinline preload="none" poster="/media/tile-kanban.webp?v=6111b17acc" data-src="/media/tile-kanban.mp4?v=ed4120870f"></video><figcaption><b>Agent 2 · Launch board</b><span>Controlled by Agent 2</span></figcaption></figure>
+            <figure><video width="416" height="260" muted loop playsinline preload="none" poster="/media/tile-booking.webp?v=10e7b188c4" data-src="/media/tile-booking.mp4?v=47b281a3c7"></video><figcaption><b>Agent 3 · Book a demo</b><span>Controlled by Agent 3</span></figcaption></figure>
             <figure class="asks"><img src="/media/tile-help.webp?v=c6e2822d7c" alt="" loading="lazy" width="416" height="252"><figcaption><b>Agent 4 · Release PR</b><span>Needs help: Sign in to GitHub</span></figcaption></figure>
           </div>
           <p class="peek-note">The tiles replay scripted test sessions. In the app, Peek drops from the menu bar icon.</p>
         </div>
       </div>
       <a class="gh" aria-label="GitHub" href="https://github.com/Fanzzzd/agent-screen"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg><span>GitHub</span></a>
-      <button class="motion" type="button" aria-label="Pause films" title="Pause films" hidden><svg class="i-pause" viewBox="0 0 16 16" aria-hidden="true"><rect x="3.5" y="2.5" width="3" height="11" rx="1"/><rect x="9.5" y="2.5" width="3" height="11" rx="1"/></svg><svg class="i-play" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 2.9v10.2a.8.8 0 0 0 1.2.7l8-5.1a.8.8 0 0 0 0-1.4l-8-5.1a.8.8 0 0 0-1.2.7z"/></svg></button>
+      <button class="motion" type="button" aria-label="Pause films" title="Pause films"><svg class="i-pause" viewBox="0 0 16 16" aria-hidden="true"><rect x="3.5" y="2.5" width="3" height="11" rx="1"/><rect x="9.5" y="2.5" width="3" height="11" rx="1"/></svg><svg class="i-play" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 2.9v10.2a.8.8 0 0 0 1.2.7l8-5.1a.8.8 0 0 0 0-1.4l-8-5.1a.8.8 0 0 0-1.2.7z"/></svg></button>
     </nav>
   </div>
 </header>
@@ -75,11 +170,11 @@
       </div>
       <p class="on-mac">Agent Screen runs on a Mac. <a href="#install">Install it with Homebrew or the DMG</a>, or star it on GitHub to find it later.</p>
       <p class="fine">macOS 15 or later. MIT licensed. Try <button class="try" type="button">Peek</button> in the top bar.</p>
-      <p class="version"><a href="https://github.com/Fanzzzd/agent-screen/releases">v0.1.38 · What's new</a></p>
+      <p class="version"><a href="https://github.com/Fanzzzd/agent-screen/releases/tag/v0.1.41">v0.1.41 · What's new</a></p>
     </div>
     <figure class="film">
       <div class="backscreen" aria-hidden="true"></div>
-      <video id="hero" muted loop playsinline preload="none"
+      <video id="hero" width="1920" height="1080" muted loop playsinline preload="none"
         data-poster="/media/hero.webp?v=fcb02548e0" data-src="/media/hero.mp4?v=34117d2088" data-av1="/media/hero.av1.mp4?v=3fae162fe9" data-src-m="/media/hero-m.mp4?v=573e5bd3b3" data-av1-m="/media/hero-m.av1.mp4?v=3bc27619f4" data-poster-m="/media/hero-m.webp?v=8085a60bce"
         aria-label="An animation built from Agent Screen's interface and recordings of test sessions. You work in your editor and spreadsheet. Test sessions labelled Agent 1 to Agent 4 take over your pointer, then Agent Screen moves each session onto a display of its own while your pointer stays put. One session asks for help with a sign-in; you take over, sign in and hand it back."></video>
       <script>{const v=document.getElementById('hero');v.poster=matchMedia('(max-width: 600px)').matches?v.dataset.posterM:v.dataset.poster;}</script>
@@ -122,7 +217,7 @@
         </dl>
       </div>
     </div>
-    <p class="how"><strong>How it works.</strong> Each session gets a virtual display, and Agent Screen sends the agent's clicks and keys straight to the app's process in the background through SkyLight, a private macOS framework, so your cursor never moves. <a href="https://github.com/Fanzzzd/agent-screen/blob/main/docs/adr/0001-background-input-through-skylight.md">Why SkyLight (ADR 0001)</a></p>
+    <p class="how"><strong>How it works.</strong> Each session gets a virtual display, and Agent Screen sends the agent's clicks and keys straight to the app's process in the background through SkyLight, a private macOS framework, so your cursor never moves. <a href="/virtual-display/">Read the virtual display architecture</a> or <a href="https://github.com/Fanzzzd/agent-screen/blob/main/docs/adr/0001-background-input-through-skylight.md">ADR 0001</a>.</p>
   </section>
 
   <section class="features" id="features">
@@ -204,13 +299,13 @@
           <div class="code-bar"><span>Terminal</span><button class="copy" type="button" data-copy="&quot;/Applications/Agent Screen.app/Contents/MacOS/AgentScreen&quot; mcp install">Copy</button></div>
           <pre><code>"/Applications/<wbr>Agent Screen.app/<wbr>Contents/<wbr>MacOS/<wbr>AgentScreen" mcp install</code></pre>
         </div>
-        <p>This registers the MCP server with Claude Code for all projects and adds it to <code>~/.codex/config.toml</code>. It also installs the Agent Screen skill for both, which tells agents when a task needs a screen, so they use their display instead of <code class="nw">open -a</code> or AppleScript on yours. Each update of the app brings the skill up to date. For any other MCP client, such as Gemini CLI or OpenCode, add a stdio server with the command <code>/Applications/<wbr>Agent Screen.app/<wbr>Contents/<wbr>MacOS/<wbr>AgentScreen</code> and the argument <code>mcp</code>.</p>
+        <p>This registers the MCP server with Claude Code for all projects and adds it to <code>~/.codex/config.toml</code>. It also installs the Agent Screen skill for both, which tells agents when a task needs a screen, so they use their display instead of <code class="nw">open -a</code> or AppleScript on yours. Each update of the app brings the skill up to date. For Cursor, Gemini CLI, Claude Desktop, VS Code, OpenCode or Zed, see the <a href="/mcp-clients/">MCP client setup guide</a> for copy-paste configs.</p>
         <p>For Cursor, Gemini CLI and other agents that read Agent Skills, add the skill with:</p>
         <div class="code">
           <div class="code-bar"><span>Terminal</span><button class="copy" type="button" data-copy="npx skills add Fanzzzd/agent-screen -g">Copy</button></div>
           <pre class="cmds"><code><span class="ln">npx skills add <span class="arg">Fanzzzd/agent-screen</span> <span class="arg">-g</span></span></code></pre>
         </div>
-        <p>In Claude Code you can install the skill as a plugin instead. <a href="https://github.com/Fanzzzd/agent-screen#install">The README has the command.</a></p>
+        <p>In Claude Code you can install the skill as a plugin instead. See the <a href="/claude-code/">Claude Code guide</a> or <a href="https://github.com/Fanzzzd/agent-screen#install">the README</a> for the command.</p>
       </li>
       <li>
         <h3>Ask for something</h3>
@@ -237,6 +332,84 @@
     </div>
   </section>
 
+  <section class="guides" id="guides" aria-labelledby="guides-h">
+    <div class="guides-head">
+      <h2 id="guides-h">Guides and architecture</h2>
+      <p>Setup instructions for each MCP client and how Agent Screen handles virtual displays, background input, and macOS quirks.</p>
+    </div>
+    <div class="guides-grid">
+      <a class="guide-card" href="/claude-code/">
+        <div>
+          <span class="guide-kicker">Claude Code</span>
+          <h3>Let Claude Code use your Mac without taking your mouse</h3>
+          <p>Register the MCP server and skill, watch sessions from Peek, and handle logins with Takeover and Help Cards.</p>
+        </div>
+        <span class="guide-more">Read guide &rarr;</span>
+      </a>
+      <a class="guide-card" href="/mcp-clients/">
+        <div>
+          <span class="guide-kicker">MCP Clients</span>
+          <h3>MCP computer use on macOS for eight clients</h3>
+          <p>Copy-paste local stdio configs for Claude Code, Codex, Cursor, Gemini CLI, Claude Desktop, VS Code, OpenCode, and Zed.</p>
+        </div>
+        <span class="guide-more">Read guide &rarr;</span>
+      </a>
+      <a class="guide-card" href="/virtual-display/">
+        <div>
+          <span class="guide-kicker">Architecture</span>
+          <h3>AI agent virtual display: SkyLight vs VMs and built-in computer use</h3>
+          <p>How CGVirtualDisplay, SkyLight input, window ownership rules, and ColorSync cleanup work under the hood.</p>
+        </div>
+        <span class="guide-more">Read guide &rarr;</span>
+      </a>
+    </div>
+  </section>
+
+  <section class="faq" id="faq" aria-labelledby="faq-h">
+    <div class="faq-head">
+      <h2 id="faq-h">Frequently asked questions</h2>
+      <p>Short answers on how Agent Screen works, which agents it supports, and where a virtual machine is a better fit.</p>
+    </div>
+    <div class="faq-list">
+      <details class="faq-item">
+        <summary>How can Claude Code or Codex use my Mac without taking my mouse?</summary>
+        <div class="faq-body">
+          <p>Agent Screen creates a virtual display per agent session with <code>CGVirtualDisplay</code> and sends clicks and keys straight to the target app process in the background through SkyLight, plus macOS Accessibility actions. Your real pointer, keyboard focus, and windows stay on your own screen. <a href="/virtual-display/">See how it works.</a></p>
+        </div>
+      </details>
+      <details class="faq-item">
+        <summary>Which MCP clients work with Agent Screen?</summary>
+        <div class="faq-body">
+          <p>Agent Screen works with any MCP client that runs a local stdio server. <code>AgentScreen mcp install</code> sets up Claude Code and Codex automatically, including the Agent Screen skill. Cursor, Gemini CLI, Claude Desktop, VS Code with Copilot, OpenCode, and Zed connect with the same stdio command. <a href="/mcp-clients/">View all client configs.</a></p>
+        </div>
+      </details>
+      <details class="faq-item">
+        <summary>How is Agent Screen different from a macOS virtual machine or built-in computer use?</summary>
+        <div class="faq-body">
+          <p>Built-in computer use drives your real pointer and keyboard, so you cannot work while the agent works. A virtual machine isolates the agent, but requires setting up apps and logins again inside each VM. Agent Screen uses the real Mac apps and logins you already have on a separate virtual display, with one-click Takeover from the menu bar, though it is not a security sandbox.</p>
+        </div>
+      </details>
+      <details class="faq-item">
+        <summary>What happens when an AI agent hits a login screen or captcha?</summary>
+        <div class="faq-body">
+          <p>The agent calls <code>request_help</code>, which drops a Help Card under the menu bar icon with the display image and reason, and pauses. You can press <strong>Take Over</strong> to sign in yourself and hand control back, press <strong>Continue</strong> if you handled it elsewhere, send a <strong>Reply</strong>, or give the agent one of your windows.</p>
+        </div>
+      </details>
+      <details class="faq-item">
+        <summary>Is Agent Screen private, and is it a security sandbox?</summary>
+        <div class="faq-body">
+          <p>Agent Screen runs locally on your Mac, collects no telemetry, and checks GitHub once a day for updates via Sparkle. Web Preview listens on <code>127.0.0.1</code> only, and agents connect over a user-only local socket. It is not a security sandbox: the agent drives your real apps with your accounts. Use a VM if you need OS isolation.</p>
+        </div>
+      </details>
+      <details class="faq-item">
+        <summary>Why does Agent Screen require macOS 15 or later and use private APIs?</summary>
+        <div class="faq-body">
+          <p>Sending clicks and keys to background apps on a virtual display without warping the user's cursor relies on private macOS SkyLight APIs and <code>CGVirtualDisplay</code>. Because of those private APIs, Agent Screen cannot be listed on the Mac App Store and a future macOS release may break it. The app is Developer ID signed, notarized by Apple, and MIT licensed.</p>
+        </div>
+      </details>
+    </div>
+  </section>
+
   <section class="end">
     <img src="/logo-dark.svg" alt="" width="56" height="54">
     <h2>Give your agents their own screens.</h2>
@@ -252,9 +425,13 @@
   <div class="foot">
     <span>Agent Screen is MIT licensed. Its background input recipe is ported from <a href="https://github.com/trycua/cua">trycua/cua</a>.</span>
     <nav>
+      <a href="/claude-code/">Claude Code</a>
+      <a href="/mcp-clients/">MCP Clients</a>
+      <a href="/virtual-display/">Virtual Display</a>
       <a href="https://github.com/Fanzzzd/agent-screen">GitHub</a>
       <a href="https://github.com/Fanzzzd/agent-screen/releases/latest">Releases</a>
       <a href="https://github.com/Fanzzzd/agent-screen/issues">Issues</a>
+      <a href="/llms.txt">llms.txt</a>
     </nav>
   </div>
 </footer>
@@ -363,8 +540,9 @@
     const looping = [...inView, ...(wrap.classList.contains('open') ? tiles : [])];
     for (const v of looping) if (on) v.pause(); else start(v);
   }
-  if (!still) {
-    motion.hidden = false;
+  if (still) {
+    motion.hidden = true;
+  } else {
     motion.addEventListener('click', () => setPaused(!paused));
   }
 

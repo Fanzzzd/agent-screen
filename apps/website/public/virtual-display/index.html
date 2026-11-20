@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI agent virtual display for Mac: how it works | Agent Screen</title>
+<meta name="description" content="How Agent Screen gives each AI agent a macOS virtual display using CGVirtualDisplay and SkyLight background input, compared with VMs and built-in tools.">
+<link rel="canonical" href="https://agentscreen.app/virtual-display/">
+<meta name="theme-color" content="#0a0a0c">
+<meta name="color-scheme" content="dark">
+
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Agent Screen">
+<meta property="og:url" content="https://agentscreen.app/virtual-display/">
+<meta property="og:title" content="AI agent virtual display for Mac: how Agent Screen works">
+<meta property="og:description" content="CGVirtualDisplay, SkyLight background input, window ownership rules, and ColorSync performance compared against macOS VMs and built-in computer use.">
+<meta property="og:image" content="https://agentscreen.app/og.png?v=84fb39608e">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Agent Screen: Agent Displays working around your own screen.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="AI agent virtual display for Mac: how Agent Screen works">
+<meta name="twitter:description" content="CGVirtualDisplay, SkyLight background input, window ownership rules, and ColorSync performance compared against macOS VMs and built-in computer use.">
+<meta name="twitter:image" content="https://agentscreen.app/og.png?v=84fb39608e">
+<meta name="twitter:site" content="@fanzzzd_x">
+<meta name="twitter:creator" content="@fanzzzd_x">
+<meta name="twitter:image:alt" content="Agent Screen: Agent Displays working around your own screen.">
+
+<link rel="icon" href="/favicon.ico" sizes="32x32">
+<link rel="icon" href="/favicon-64.png" type="image/png" sizes="64x64">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="stylesheet" href="/styles.css">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "BreadcrumbList",
+      "itemListElement": [
+        { "@type": "ListItem", "position": 1, "name": "Agent Screen", "item": "https://agentscreen.app/" },
+        { "@type": "ListItem", "position": 2, "name": "Virtual display architecture", "item": "https://agentscreen.app/virtual-display/" }
+      ]
+    },
+    {
+      "@type": "TechArticle",
+      "headline": "AI agent virtual display for Mac: how Agent Screen works",
+      "description": "Architecture of Agent Screen on macOS 15+: CGVirtualDisplay, SkyLight background input, window ownership, ColorSync cleanup, and trade-offs vs VMs.",
+      "url": "https://agentscreen.app/virtual-display/",
+      "mainEntityOfPage": "https://agentscreen.app/virtual-display/",
+      "image": "https://agentscreen.app/og.png?v=84fb39608e",
+      "datePublished": "2026-11-20",
+      "dateModified": "2026-11-20",
+      "author": { "@type": "Organization", "name": "Agent Screen", "url": "https://agentscreen.app/" },
+      "publisher": { "@type": "Organization", "name": "Agent Screen", "url": "https://agentscreen.app/" }
+    }
+  ]
+}
+</script>
+</head>
+<body>
+
+<header class="top">
+  <div class="top-in">
+    <a class="brand" href="/"><img src="/logo-dark.svg" alt="" width="26" height="25"><span>Agent Screen</span></a>
+    <nav>
+      <a href="/#features">Features</a>
+      <a class="nav-install" href="/#install">Install</a>
+      <a class="nav-sec" href="/claude-code/">Claude Code</a>
+      <a class="nav-sec" href="/mcp-clients/">MCP clients</a>
+      <a class="gh" aria-label="GitHub" href="https://github.com/Fanzzzd/agent-screen"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg><span>GitHub</span></a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <article>
+    <header class="doc-hero">
+      <nav class="breadcrumb" aria-label="Breadcrumb">
+        <a href="/">Agent Screen</a>
+        <span aria-hidden="true">/</span>
+        <span aria-current="page">Virtual display architecture</span>
+      </nav>
+      <h1>How an AI agent virtual display works on macOS.</h1>
+      <p class="doc-lede">Giving an AI agent a Mac screen without taking over your own requires solving four macOS problems: creating virtual displays, delivering background input without warping the cursor, attributing new windows, and keeping ColorSync from stuttering.</p>
+      <div class="doc-meta">
+        <span>Written in Rust</span>
+        <span>Open Architecture Decision Records in <code>docs/adr/</code></span>
+      </div>
+    </header>
+
+    <div class="doc-body">
+      <nav class="doc-toc" aria-label="On this page">
+        <p class="doc-toc-title">On this page</p>
+        <ul>
+          <li><a href="#compare">Virtual display vs built-in computer use vs VM</a></li>
+          <li><a href="#skylight">Background input through SkyLight and Accessibility</a></li>
+          <li><a href="#windows">Deciding which windows belong to the agent</a></li>
+          <li><a href="#colorsync">Preventing macOS ColorSync stutter with many displays</a></li>
+          <li><a href="#tradeoffs">Honest trade-offs and limits</a></li>
+        </ul>
+      </nav>
+
+      <section id="compare">
+        <h2>Virtual display vs built-in computer use vs VM</h2>
+        <p>Every way to let an AI agent drive GUI apps on a Mac trades off convenience, concurrency, and isolation differently. Pick the one that matches the risk and workflow of your task.</p>
+        <div class="table-wrap">
+          <table class="doc-table">
+            <thead>
+              <tr>
+                <th>Criterion</th>
+                <th>Agent Screen</th>
+                <th>Built-in computer use</th>
+                <th>macOS VM / cloud desktop</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>You keep your mouse and keyboard</td>
+                <td>Yes, agent works on a virtual display</td>
+                <td>No, drives your real pointer</td>
+                <td>Yes, inside the VM window</td>
+              </tr>
+              <tr>
+                <td>Uses your real Mac apps and logins</td>
+                <td>Yes, nothing to reinstall</td>
+                <td>Yes</td>
+                <td>No, set up apps and accounts per VM</td>
+              </tr>
+              <tr>
+                <td>Several agents working at once</td>
+                <td>Yes, one display per session (up to 4 each)</td>
+                <td>No, one shared cursor</td>
+                <td>One VM per agent (high RAM and disk cost)</td>
+              </tr>
+              <tr>
+                <td>Human takeover for logins or captchas</td>
+                <td>Menu bar Peek and one-click Takeover</td>
+                <td>Watch your own screen</td>
+                <td>Open the VM window</td>
+              </tr>
+              <tr>
+                <td>Security isolation from your Mac</td>
+                <td>No (drives your real apps)</td>
+                <td>No</td>
+                <td>Yes, full OS boundary</td>
+              </tr>
+              <tr>
+                <td>API stability / distribution</td>
+                <td>Private macOS APIs, notarized DMG / Homebrew</td>
+                <td>Vendor-supported, no install</td>
+                <td>Public virtualization frameworks</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p><strong>When to choose a VM instead:</strong> if you are running untrusted code, need OS-level sandboxing, or need Linux or Windows apps. <strong>When to choose Agent Screen:</strong> when you want Claude Code, Codex, or another MCP agent to work with the macOS apps, local dev servers, and accounts already on your Mac without interrupting your own work.</p>
+      </section>
+
+      <section id="skylight">
+        <h2>Background input through SkyLight and Accessibility</h2>
+        <p>Creating a virtual monitor with Apple's private <code>CGVirtualDisplay</code> API is only half the problem. Sending clicks with public cursor-warping APIs still moves your real mouse pointer onto the virtual display and activates the target app.</p>
+        <p>Agent Screen delivers clicks and keystrokes straight to the target application process using SkyLight's private <code>SLEventPostToPid</code> along with a focus-without-raise handshake (ported from <a href="https://github.com/trycua/cua">trycua/cua</a>, MIT). Because no real cursor warp occurs, your pointer and active window stay put (<a href="https://github.com/Fanzzzd/agent-screen/blob/main/docs/adr/0001-background-input-through-skylight.md">ADR 0001</a>).</p>
+        <p>Alongside coordinate input, agents can inspect a window's macOS Accessibility tree (<code>get_window_state</code>) and press buttons, choose menu items, step sliders, or write text fields by numbered element (<code>act_on_element</code>). Because those actions address controls by identity rather than pixel location, a button press still lands if the window moved or resized.</p>
+        <p>When macOS does not permit a background route, such as dragging a file from Finder into a browser or triggering certain Electron menu shortcuts, Agent Screen places the operation in the visible <strong>Input Queue</strong>. A card shows the exact path or click point on the display preview, and nothing touches your pointer until you press <strong>Allow</strong>.</p>
+      </section>
+
+      <section id="windows">
+        <h2>Deciding which windows belong to the agent</h2>
+        <p>An app started by an agent stays running after <code>launch_app</code> returns, and you might open a window in the same app yourself. Agent Screen hooks <code>AXWindowCreated</code> notifications to place each new window accurately (<a href="https://github.com/Fanzzzd/agent-screen/blob/main/docs/adr/0007-who-owns-a-new-window.md">ADR 0007</a>):</p>
+        <ul>
+          <li>A new window of an app the agent started moves to the agent's display if that display was driven in the last 3 seconds (30 seconds during cold start) and you did not click or type in that app, Finder, the Dock, or a launcher meanwhile.</li>
+          <li>A window you open stays on your screen. If an agent opens a new window in an app that is already running, it may briefly flash on your screen for about 30 ms (140 ms at most in tests) before moving.</li>
+          <li>Windows you hand over to an agent always remember where they came from and return to your screen when the agent ends its display or disconnects (<a href="https://github.com/Fanzzzd/agent-screen/blob/main/docs/adr/0004-display-lifecycle.md">ADR 0004</a>).</li>
+          <li>If you use AeroSpace, Agent Screen ignores AeroSpace's closet display everywhere (<a href="https://github.com/Fanzzzd/agent-screen/blob/main/docs/aerospace.md">docs/aerospace.md</a>).</li>
+        </ul>
+      </section>
+
+      <section id="colorsync">
+        <h2>Preventing macOS ColorSync stutter with many displays</h2>
+        <p>Every time a virtual display connects or disconnects, macOS WindowServer asks <code>colorsync.displayservices</code> for every online display's color profile with a 50 ms deadline, retrying every 5 seconds when late. Internally, <code>colorsyncd</code> parses <code>/Library/Caches/ColorSync/com.apple.colorsync.devices</code> five times per online display, and macOS keeps a record for every display ever seen, storing display names in 39 languages.</p>
+        <p>On a test Mac documented in <a href="https://github.com/Fanzzzd/agent-screen/blob/main/docs/adr/0009-colorsync-registry-reclaim.md">ADR 0009</a>, 84 historical records with 4 displays online took 66 to 91 ms per read, triggering hundreds of retry loops per minute and making the Mac stutter. Agent Screen includes an optional <strong>Smooth Display Changes</strong> helper (<code>AgentScreen colorsync setup</code>) that removes offline factory-only records and trims display names to English and your preferred languages, preserving any custom color profiles. With the helper enabled on the same Mac, 13 displays online read in 23 ms.</p>
+      </section>
+
+      <section id="tradeoffs">
+        <h2>Honest trade-offs and limits</h2>
+        <div class="callout">
+          <p>All code, architecture decision records, and test scripts are public in <a href="https://github.com/Fanzzzd/agent-screen">github.com/Fanzzzd/agent-screen</a> under the MIT license.</p>
+        </div>
+        <ul>
+          <li><strong>macOS 15+ and private APIs:</strong> Relies on SkyLight and <code>CGVirtualDisplay</code>. Cannot ship on the Mac App Store, and future macOS updates could require patches.</li>
+          <li><strong>Copy, paste, and undo shortcuts:</strong> Require a focused app on macOS, so agents read and insert text via Accessibility instead.</li>
+          <li><strong>Canvas apps and games:</strong> Apps that ignore per-process events may not respond to background clicks.</li>
+          <li><strong>Locked screen:</strong> macOS blocks screenshots and input on all displays while the screen is locked.</li>
+          <li><strong>Viewer scaling:</strong> The live Viewer scales the display at one pixel per point, so small text can look soft in the preview window; agents' own screenshots are unaffected.</li>
+        </ul>
+      </section>
+
+      <div class="doc-cta">
+        <h2>Inspect the code or install on macOS 15+</h2>
+        <p>Read the ADRs, check the Rust source, or install the notarized app in under a minute.</p>
+        <div class="actions">
+          <a class="button primary dmg" href="https://github.com/Fanzzzd/agent-screen/releases/latest">Download the DMG</a>
+          <a class="button gh-button" href="https://github.com/Fanzzzd/agent-screen/tree/main/docs/adr">Read the ADRs</a>
+        </div>
+        <p class="on-mac">Agent Screen runs on a Mac. Star it on GitHub to find it later.</p>
+      </div>
+
+      <section class="related-guides">
+        <h2>Related guides</h2>
+        <div class="related-grid">
+          <a class="guide-card" href="/claude-code/">
+            <div>
+              <span class="guide-kicker">Claude Code</span>
+              <h3>Let Claude Code use your Mac without taking your mouse</h3>
+              <p>Install the MCP server and skill, watch with Peek, and take over on logins or captchas.</p>
+            </div>
+            <span class="guide-more">Read Claude Code guide &rarr;</span>
+          </a>
+          <a class="guide-card" href="/mcp-clients/">
+            <div>
+              <span class="guide-kicker">MCP Setup</span>
+              <h3>MCP computer use on macOS for eight clients</h3>
+              <p>Copyable stdio configs for Claude Code, Codex, Cursor, Gemini CLI, OpenCode, Claude Desktop, VS Code, and Zed.</p>
+            </div>
+            <span class="guide-more">Read MCP client guide &rarr;</span>
+          </a>
+        </div>
+      </section>
+    </div>
+  </article>
+</main>
+
+<footer>
+  <div class="foot">
+    <span>Agent Screen is MIT licensed. Its background input recipe is ported from <a href="https://github.com/trycua/cua">trycua/cua</a>.</span>
+    <nav>
+      <a href="/">Home</a>
+      <a href="/claude-code/">Claude Code</a>
+      <a href="/mcp-clients/">MCP Clients</a>
+      <a href="/virtual-display/">Virtual Display</a>
+      <a href="https://github.com/Fanzzzd/agent-screen">GitHub</a>
+      <a href="https://github.com/Fanzzzd/agent-screen/releases/latest">Releases</a>
+      <a href="https://github.com/Fanzzzd/agent-screen/issues">Issues</a>
+      <a href="/llms.txt">llms.txt</a>
+    </nav>
+  </div>
+</footer>
+</body>
+</html>

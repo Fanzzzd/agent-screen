@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude Code on macOS without taking your mouse | Agent Screen</title>
+<meta name="description" content="Run Claude Code computer use on a macOS virtual display in the background. Your mouse, keyboard and windows stay yours with Peek, Takeover and Help Cards.">
+<link rel="canonical" href="https://agentscreen.app/claude-code/">
+<meta name="theme-color" content="#0a0a0c">
+<meta name="color-scheme" content="dark">
+
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Agent Screen">
+<meta property="og:url" content="https://agentscreen.app/claude-code/">
+<meta property="og:title" content="Let Claude Code use your Mac without taking your mouse">
+<meta property="og:description" content="Give every Claude Code session its own virtual Mac screen so it can open apps, click, and type in the background while you keep working.">
+<meta property="og:image" content="https://agentscreen.app/og.png?v=84fb39608e">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Agent Screen: Agent Displays working around your own screen.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Let Claude Code use your Mac without taking your mouse">
+<meta name="twitter:description" content="Give every Claude Code session its own virtual Mac screen so it can open apps, click, and type in the background while you keep working.">
+<meta name="twitter:image" content="https://agentscreen.app/og.png?v=84fb39608e">
+<meta name="twitter:site" content="@fanzzzd_x">
+<meta name="twitter:creator" content="@fanzzzd_x">
+<meta name="twitter:image:alt" content="Agent Screen: Agent Displays working around your own screen.">
+
+<link rel="icon" href="/favicon.ico" sizes="32x32">
+<link rel="icon" href="/favicon-64.png" type="image/png" sizes="64x64">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="stylesheet" href="/styles.css">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "BreadcrumbList",
+      "itemListElement": [
+        { "@type": "ListItem", "position": 1, "name": "Agent Screen", "item": "https://agentscreen.app/" },
+        { "@type": "ListItem", "position": 2, "name": "Claude Code on macOS", "item": "https://agentscreen.app/claude-code/" }
+      ]
+    },
+    {
+      "@type": "TechArticle",
+      "headline": "Let Claude Code use your Mac without taking your mouse",
+      "description": "How to connect Claude Code to Agent Screen on macOS 15 or later so each session gets its own virtual display and operates apps in the background.",
+      "url": "https://agentscreen.app/claude-code/",
+      "mainEntityOfPage": "https://agentscreen.app/claude-code/",
+      "image": "https://agentscreen.app/og.png?v=84fb39608e",
+      "datePublished": "2026-11-20",
+      "dateModified": "2026-11-20",
+      "author": { "@type": "Organization", "name": "Agent Screen", "url": "https://agentscreen.app/" },
+      "publisher": { "@type": "Organization", "name": "Agent Screen", "url": "https://agentscreen.app/" }
+    },
+    {
+      "@type": "FAQPage",
+      "mainEntity": [
+        {
+          "@type": "Question",
+          "name": "Why does Claude Code need the Agent Screen skill in addition to the MCP server?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Claude Code loads MCP tools only when it searches for them. Without the Agent Screen skill, it often falls back to open -a or AppleScript on your own screen. AgentScreen mcp install registers both the MCP server and the skill automatically."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Can two Claude Code sessions run GUI apps at the same time?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Yes. Claude Code passes CLAUDE_CODE_SESSION_ID to its stdio MCP server, so Agent Screen gives each Claude Code session its own Agent Display. Subagents inside one session share that session's display, and a session can request up to four displays at once."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "What if Claude Code needs me to sign in or pass a captcha?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Claude Code calls request_help, which drops a Help Card from the menu bar icon and pauses. Click Take Over to sign in inside the Viewer, then press Let Claude Code Continue or tell it in chat to resume."
+          }
+        }
+      ]
+    }
+  ]
+}
+</script>
+</head>
+<body>
+
+<header class="top">
+  <div class="top-in">
+    <a class="brand" href="/"><img src="/logo-dark.svg" alt="" width="26" height="25"><span>Agent Screen</span></a>
+    <nav>
+      <a href="/#features">Features</a>
+      <a class="nav-install" href="/#install">Install</a>
+      <a class="nav-sec" href="/mcp-clients/">MCP clients</a>
+      <a class="nav-sec" href="/virtual-display/">How it works</a>
+      <a class="gh" aria-label="GitHub" href="https://github.com/Fanzzzd/agent-screen"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg><span>GitHub</span></a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <article>
+    <header class="doc-hero">
+      <nav class="breadcrumb" aria-label="Breadcrumb">
+        <a href="/">Agent Screen</a>
+        <span aria-hidden="true">/</span>
+        <span aria-current="page">Claude Code on macOS</span>
+      </nav>
+      <h1>Let Claude Code use your Mac without taking your mouse.</h1>
+      <p class="doc-lede">When Claude Code drives a GUI app with built-in computer use or AppleScript, it moves your real cursor and steals window focus. Agent Screen gives each Claude Code session its own virtual display on macOS 15 or later, so it clicks and types in the background while you keep working.</p>
+      <div class="doc-meta">
+        <span>macOS 15 (Sequoia) or later</span>
+        <span>Free, MIT licensed</span>
+        <span>Works with Claude Code, Codex, and other MCP clients</span>
+      </div>
+    </header>
+
+    <div class="doc-body">
+      <nav class="doc-toc" aria-label="On this page">
+        <p class="doc-toc-title">On this page</p>
+        <ul>
+          <li><a href="#setup">1. Install and connect Claude Code</a></li>
+          <li><a href="#skill">2. Why the Agent Screen skill matters for Claude Code</a></li>
+          <li><a href="#workflow">3. Watch, step in, and hand windows over</a></li>
+          <li><a href="#sessions">4. Running several Claude Code sessions at once</a></li>
+          <li><a href="#limits">5. What it does not do</a></li>
+          <li><a href="#faq">6. Frequently asked questions</a></li>
+        </ul>
+      </nav>
+
+      <section id="setup">
+        <h2>1. Install and connect Claude Code</h2>
+        <p>Agent Screen is a free, Apple-notarized macOS menu bar app. Install it with Homebrew or download the DMG from <a href="https://github.com/Fanzzzd/agent-screen/releases/latest">GitHub Releases</a>.</p>
+        <div class="code">
+          <div class="code-bar"><span>Homebrew</span><button class="copy" type="button" data-copy="brew tap fanzzzd/agent-screen&#10;brew trust fanzzzd/agent-screen&#10;brew install --cask agent-screen">Copy</button></div>
+          <pre class="cmds"><code><span class="ln">brew tap <span class="arg">fanzzzd/agent-screen</span></span><span class="ln">brew trust <span class="arg">fanzzzd/agent-screen</span></span><span class="ln">brew install <span class="arg">--cask</span> <span class="arg">agent-screen</span></span></code></pre>
+        </div>
+        <p>Open Agent Screen and grant <strong>Screen &amp; System Audio Recording</strong> and <strong>Accessibility</strong> in its Settings window. Both permissions stay on your Mac; Agent Screen sends no telemetry.</p>
+        <p>Then press <strong>Connect…</strong> in Settings, or run one command in Terminal:</p>
+        <div class="code">
+          <div class="code-bar"><span>Register MCP server + skill for Claude Code</span><button class="copy" type="button" data-copy="&quot;/Applications/Agent Screen.app/Contents/MacOS/AgentScreen&quot; mcp install">Copy</button></div>
+          <pre><code>"/Applications/<wbr>Agent Screen.app/<wbr>Contents/<wbr>MacOS/<wbr>AgentScreen" mcp install</code></pre>
+        </div>
+        <p>This registers the <code>agent-screen</code> stdio MCP server with Claude Code for all projects (equivalent to <code>claude mcp add --scope user</code>) and writes the Agent Screen skill to <code>~/.claude/skills/agent-screen</code>. Start a new Claude Code session so it loads the new MCP server, then verify with <code>claude mcp get agent-screen</code>.</p>
+        <p>Test it with a simple prompt:</p>
+        <blockquote>Use Agent Screen to open Calculator on your own display and work out 12 × 34.</blockquote>
+      </section>
+
+      <section id="skill">
+        <h2>2. Why the Agent Screen skill matters for Claude Code</h2>
+        <p>Claude Code loads MCP tools lazily when it searches for them. Without a skill telling it when a task needs a screen, Claude Code frequently runs <code>open -a</code> or AppleScript, which pops windows onto your own desktop and takes focus.</p>
+        <p>The Agent Screen skill teaches Claude Code to call <code>create_display</code> and <code>launch_app</code> whenever a task involves opening, operating, testing, or screenshotting a Mac app or web page. <code>AgentScreen mcp install</code> installs and updates that skill automatically with each app update.</p>
+        <p>If you prefer managing the skill as a Claude Code plugin directly from GitHub, install it instead (when the plugin is present, <code>mcp install</code> writes no duplicate copy):</p>
+        <div class="code">
+          <div class="code-bar"><span>Optional: Claude Code plugin</span><button class="copy" type="button" data-copy="claude plugin install agent-screen --marketplace Fanzzzd/agent-screen">Copy</button></div>
+          <pre class="cmds"><code><span class="ln">claude plugin install <span class="arg">agent-screen</span> <span class="arg">--marketplace</span> <span class="arg">Fanzzzd/agent-screen</span></span></code></pre>
+        </div>
+        <p>On Claude Code versions before 2.1.292, run <code>claude plugin marketplace add Fanzzzd/agent-screen</code> first, then <code>claude plugin install agent-screen@agent-screen</code>.</p>
+      </section>
+
+      <section id="workflow">
+        <h2>3. Watch, step in, and hand windows over</h2>
+        <p>Because Claude Code works on an off-screen virtual display, Agent Screen gives you four controls from the menu bar so you stay in charge without giving up your cursor:</p>
+        <ul>
+          <li><strong>Peek and Web Preview:</strong> Hover the menu bar icon to see every active Agent Display live, or click it to pin Peek. Each display also gets a local read-only <code>preview_url</code> on <code>127.0.0.1</code> that Claude Code can paste into chat.</li>
+          <li><strong>Help Request:</strong> When Claude Code reaches a sign-in page, 2FA prompt, or captcha, it calls <code>request_help</code>. A Help Card drops under the menu bar icon with the display picture and reason. Answer with <strong>Take Over</strong>, <strong>Continue</strong>, <strong>Reply</strong>, or <strong>Give a Window</strong>.</li>
+          <li><strong>Takeover:</strong> Click into the Viewer at any time to drive the display directly. Agent Screen refuses all agent input during a Takeover until you press <strong>Let … Continue</strong> or explicitly tell Claude Code to continue in chat.</li>
+          <li><strong>Handover:</strong> Need Claude Code to inspect a browser tab or Mac app you already have logged in? Drag your window onto the Viewer or pick it under <strong>Give</strong>. When the session finishes, Agent Screen returns the window to where it came from.</li>
+        </ul>
+      </section>
+
+      <section id="sessions">
+        <h2>4. Running several Claude Code sessions at once</h2>
+        <p>Claude Code passes <code>CLAUDE_CODE_SESSION_ID</code> to its stdio MCP servers. Agent Screen reads that identifier so parallel Claude Code conversations each receive an isolated Agent Display instead of stepping on each other's windows.</p>
+        <p>Subagents spawned inside one Claude Code conversation share that conversation's display. If a single task needs two apps side by side, the session can call <code>create_display</code> with <code>new: true</code> for up to four labeled displays at once. Running many displays simultaneously? Enable <strong>Smooth Display Changes</strong> in Settings (see <a href="/virtual-display/#colorsync">how ColorSync cleanup works</a>).</p>
+      </section>
+
+      <section id="limits">
+        <h2>5. What it does not do</h2>
+        <div class="callout warn">
+          <p><strong>Not a security sandbox.</strong> Claude Code drives real apps on your Mac under your user account. If you want full OS isolation for untrusted tasks, run a macOS virtual machine instead.</p>
+        </div>
+        <ul>
+          <li><strong>Private macOS APIs:</strong> Background input uses SkyLight and <code>CGVirtualDisplay</code>, so the app cannot be on the Mac App Store and future macOS updates may break it.</li>
+          <li><strong>Copy, paste, and undo shortcuts:</strong> macOS routes ⌘C, ⌘V, and ⌘Z to the focused app, so they do nothing on a background display. Claude Code uses <code>act_on_element</code> (<code>read_text</code> / <code>insert_text</code>) through the accessibility tree instead.</li>
+          <li><strong>System drags and stubborn clicks:</strong> Cross-window drags (such as dragging a file from Finder into a browser) and certain Electron menu clicks wait in the visible <strong>Input Queue</strong>. Nothing touches your real mouse until you press <strong>Allow</strong>, and moving your mouse immediately revokes it.</li>
+          <li><strong>Shared browser typing:</strong> If Claude Code opens a window in a browser you are actively typing in, Agent Screen holds your keystrokes briefly while the window opens and uses accessibility actions so the agent's clicks do not steal your typing focus.</li>
+        </ul>
+      </section>
+
+      <section id="faq">
+        <h2>6. Frequently asked questions</h2>
+        <div class="faq-list">
+          <details class="faq-item">
+            <summary>Why does Claude Code need the Agent Screen skill in addition to the MCP server?</summary>
+            <div class="faq-body">
+              <p>Claude Code loads MCP tools only when it searches for them. Without the Agent Screen skill, it often falls back to <code>open -a</code> or AppleScript on your own screen. <code>AgentScreen mcp install</code> registers both the MCP server and the skill automatically.</p>
+            </div>
+          </details>
+          <details class="faq-item">
+            <summary>Can two Claude Code sessions run GUI apps at the same time?</summary>
+            <div class="faq-body">
+              <p>Yes. Claude Code passes <code>CLAUDE_CODE_SESSION_ID</code> to its stdio MCP server, so Agent Screen gives each Claude Code session its own Agent Display. Subagents inside one session share that session's display, and a session can request up to four displays at once.</p>
+            </div>
+          </details>
+          <details class="faq-item">
+            <summary>What if Claude Code needs me to sign in or pass a captcha?</summary>
+            <div class="faq-body">
+              <p>Claude Code calls <code>request_help</code>, which drops a Help Card from the menu bar icon and pauses. Click <strong>Take Over</strong> to sign in inside the Viewer, then press <strong>Let Claude Code Continue</strong> or tell it in chat to resume.</p>
+            </div>
+          </details>
+        </div>
+      </section>
+
+      <div class="doc-cta">
+        <h2>Try Agent Screen with Claude Code</h2>
+        <p>Free, open source under the MIT license, signed and notarized for macOS 15 or later.</p>
+        <div class="actions">
+          <a class="button primary dmg" href="https://github.com/Fanzzzd/agent-screen/releases/latest">Download the DMG</a>
+          <a class="button gh-button" href="https://github.com/Fanzzzd/agent-screen">View on GitHub</a>
+        </div>
+        <p class="on-mac">Agent Screen runs on a Mac. Star it on GitHub to find it later.</p>
+      </div>
+
+      <section class="related-guides">
+        <h2>Related guides</h2>
+        <div class="related-grid">
+          <a class="guide-card" href="/mcp-clients/">
+            <div>
+              <span class="guide-kicker">MCP Setup</span>
+              <h3>MCP computer use on macOS for Codex, Cursor, Gemini CLI and more</h3>
+              <p>Copy-paste stdio configs for eight MCP clients, session isolation rules, and the full tool list.</p>
+            </div>
+            <span class="guide-more">Read MCP client guide &rarr;</span>
+          </a>
+          <a class="guide-card" href="/virtual-display/">
+            <div>
+              <span class="guide-kicker">Architecture</span>
+              <h3>How AI agent virtual displays work on macOS</h3>
+              <p>SkyLight background input, window ownership rules, ColorSync stutter fixes, and an honest comparison with VMs.</p>
+            </div>
+            <span class="guide-more">Read architecture guide &rarr;</span>
+          </a>
+        </div>
+      </section>
+    </div>
+  </article>
+</main>
+
+<footer>
+  <div class="foot">
+    <span>Agent Screen is MIT licensed. Its background input recipe is ported from <a href="https://github.com/trycua/cua">trycua/cua</a>.</span>
+    <nav>
+      <a href="/">Home</a>
+      <a href="/claude-code/">Claude Code</a>
+      <a href="/mcp-clients/">MCP Clients</a>
+      <a href="/virtual-display/">Virtual Display</a>
+      <a href="https://github.com/Fanzzzd/agent-screen">GitHub</a>
+      <a href="https://github.com/Fanzzzd/agent-screen/releases/latest">Releases</a>
+      <a href="https://github.com/Fanzzzd/agent-screen/issues">Issues</a>
+      <a href="/llms.txt">llms.txt</a>
+    </nav>
+  </div>
+</footer>
+
+<p class="sr-only" id="copy-status" aria-live="polite"></p>
+<script>
+  const mac = /mac/i.test(navigator.userAgentData?.platform || navigator.platform) && navigator.maxTouchPoints < 2;
+  const status = document.getElementById('copy-status');
+  const announce = (text) => { status.textContent = ''; setTimeout(() => (status.textContent = text), 50); };
+  for (const b of document.querySelectorAll('.copy')) {
+    let reset = 0;
+    b.addEventListener('click', async () => {
+      clearTimeout(reset);
+      try {
+        await navigator.clipboard.writeText(b.dataset.copy);
+        b.textContent = 'Copied';
+        announce('Copied to the clipboard.');
+      } catch {
+        getSelection().selectAllChildren(b.closest('.code').querySelector('pre'));
+        b.textContent = mac ? 'Press ⌘C to copy' : 'Select and copy';
+        announce(mac ? "Couldn't copy. The command is selected; press Command-C." : "Couldn't copy. The command is selected; copy it from there.");
+      }
+      reset = setTimeout(() => (b.textContent = 'Copy'), 2400);
+    });
+  }
+</script>
+</body>
+</html>

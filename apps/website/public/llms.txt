@@ -1,0 +1,65 @@
+# Agent Screen
+
+> Agent Screen is a free, MIT-licensed macOS 15+ menu bar app that gives each AI agent session its own virtual display, so agents can open apps, click, and type in the background while your mouse, keyboard, and windows stay yours.
+
+- Website: https://agentscreen.app/
+- Repository: https://github.com/Fanzzzd/agent-screen
+- Latest release: https://github.com/Fanzzzd/agent-screen/releases/latest
+- License: MIT
+- Platform: macOS 15 (Sequoia) or later
+
+## Pages
+
+- [Home](https://agentscreen.app/): Overview, comparison with built-in computer use and virtual machines, live Peek preview, install steps, privacy, limits, and FAQ.
+- [Claude Code on macOS in the background](https://agentscreen.app/claude-code/): How to let Claude Code drive Mac apps without taking your mouse or keyboard, including MCP setup and the Agent Screen skill/plugin.
+- [MCP clients setup](https://agentscreen.app/mcp-clients/): Local stdio MCP configuration for Claude Code, Codex, Cursor, Gemini CLI, Claude Desktop, VS Code with Copilot, OpenCode, and Zed, plus session isolation and tool reference.
+- [AI agent virtual display architecture](https://agentscreen.app/virtual-display/): How CGVirtualDisplay, SkyLight background input (ADR 0001), Accessibility actions, window ownership (ADR 0007), and ColorSync cleanup (ADR 0009) work compared to built-in computer use and macOS VMs.
+
+## Install
+
+```sh
+brew tap fanzzzd/agent-screen
+brew trust fanzzzd/agent-screen
+brew install --cask agent-screen
+```
+
+Or download the notarized DMG from https://github.com/Fanzzzd/agent-screen/releases/latest.
+
+Connect Claude Code and Codex:
+
+```sh
+"/Applications/Agent Screen.app/Contents/MacOS/AgentScreen" mcp install
+```
+
+Install the Agent Screen skill for Cursor, Gemini CLI, and other Agent Skills clients:
+
+```sh
+npx skills add Fanzzzd/agent-screen -g
+```
+
+## Key capabilities
+
+- One Agent Display per agent session (up to four displays per session when needed).
+- Peek: hover or click the menu bar icon to see every live Agent Display.
+- Web Preview: read-only local browser view on 127.0.0.1 with a per-display token.
+- Takeover: click into an Agent Display to pause the agent and drive it directly; resumes only when you hand control back.
+- Help Request: an agent stuck on a login or captcha drops a card under the menu bar icon; answer with Take Over, Continue, Reply, or Give a Window.
+- Handover: drag your own window onto the Viewer or grant window access; handed-over windows return to their original spot when done.
+- Accessibility actions: press buttons, choose menu items, set fields, and wait for UI changes without polling screenshots.
+- Input Queue: user-approved pointer handoff for drags or clicks that macOS does not allow in the background.
+- Recording: capture an Agent Display to MP4 with app audio and an action timeline.
+
+## Privacy and limits
+
+- Runs locally on your Mac with no telemetry. Checks GitHub once a day for updates through Sparkle.
+- Not a security sandbox: the agent drives real apps on your Mac. Use a VM if you need OS isolation.
+- Uses private macOS APIs (SkyLight, CGVirtualDisplay), so it cannot be distributed on the Mac App Store and future macOS updates may break it.
+- Copy, paste, and undo keyboard shortcuts do not work in background apps; agents use accessibility text tools instead.
+- Canvas apps and games that filter per-process events may ignore forwarded input.
+
+## Source documentation
+
+- [README](https://github.com/Fanzzzd/agent-screen/blob/main/README.md)
+- [MCP client setup](https://github.com/Fanzzzd/agent-screen/blob/main/docs/clients.md)
+- [Domain glossary](https://github.com/Fanzzzd/agent-screen/blob/main/CONTEXT.md)
+- [Architecture Decision Records](https://github.com/Fanzzzd/agent-screen/tree/main/docs/adr)
