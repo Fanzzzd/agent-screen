@@ -711,3 +711,38 @@ fn a_failed_front_request_says_why() {
         "the window left the display"
     );
 }
+
+#[test]
+fn a_background_run_keeps_its_outcome_for_the_next_call() {
+    let mut input = InputQueue::default();
+    input.register(1, &owner(1));
+    let a = input.owner(1, 1).unwrap();
+    let front = Front {
+        method: "key".into(),
+        params: serde_json::json!({ "displayId": 1, "keys": "x" }),
+        pid: 42,
+        app: "Dia".into(),
+        look: None,
+    };
+    let id = input
+        .submit_front(a.clone(), "key x".into(), "Keys in Dia".into(), front)
+        .unwrap();
+    assert!(input.age(id).is_some());
+    input.detach(id);
+    // One background run per request.
+    assert!(input.drive(id));
+    assert!(!input.drive(id));
+    assert!(input.start_front(id));
+    input.finish_front(id, None);
+    let mut answer = serde_json::Map::new();
+    answer.insert("requestId".into(), serde_json::json!(id));
+    input.keep_outcome(id, Ok(answer.clone()));
+    // Kept until a call reads it, once.
+    assert_eq!(input.take_outcome(id), Some(Ok(answer)));
+    assert_eq!(input.take_outcome(id), None);
+    // A newer action forgets the finished request and what it kept.
+    input.keep_outcome(id, Err(("failed", "not sent".into())));
+    input.replace_fronts(&a);
+    assert!(input.front(id).is_none());
+    assert_eq!(input.take_outcome(id), None);
+}

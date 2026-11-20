@@ -24,7 +24,9 @@
 //! (#219): the call answers input_pending, the same call again or
 //! `input_queue wait` runs it in the agent's page once your front app
 //! comes back, with your app staying in front (sampled every 10 ms), and
-//! a withdrawn key never runs. Then, with your front app
+//! a withdrawn key never runs. Switching back to the harness then lands in
+//! its user window. A queued double click runs the same way, and one whose
+//! control changed while it waited is not sent. Then, with your front app
 //! back, the same harness takes posted keys as before.
 //!
 //! Needs an Electron.app: `target/e2e/Electron.app`, or E2E_ELECTRON.
@@ -964,7 +966,7 @@ fn test(
         );
         return Ok(());
     }
-    queued(control, id, log, pid, your_front)?;
+    queued(control, id, window_id, log, pid, your_front)?;
     sh_lenient(
         "/usr/bin/osascript",
         &[
@@ -1089,6 +1091,7 @@ fn user_input(lines: &[String]) -> Vec<String> {
 fn queued(
     control: &Control,
     id: &Value,
+    window_id: u64,
     log: &std::path::Path,
     pid: &str,
     your_front: &str,
@@ -1170,6 +1173,12 @@ fn queued(
         format!("{seen:?}"),
     );
 
+    let back = switch_back(pid);
+    check(
+        "switching back to the harness after the queued key lands in the user's window",
+        back == "pair user",
+        format!("focused window: {back}"),
+    );
     control.call("debugFrontWait", json!({ "ms": 1500 }))?;
     if !harness_in_front(pid, log) {
         bail!(
@@ -1210,6 +1219,127 @@ fn queued(
             && agent_key(&seen, "y")
             && user_input(&seen).is_empty(),
         format!("{} | log {seen:?}", cut(&said(&waited), 600)),
+    );
+    let back = switch_back(pid);
+    check(
+        "switching back after the waited key lands in the user's window too",
+        back == "pair user",
+        format!("focused window: {back}"),
+    );
+    queued_clicks(control, id, window_id, log, pid, your_front)
+}
+
+/// Bring the harness back to the front, as the user switching back to it,
+/// without raising a window: the title of the window that then has focus.
+fn switch_back(pid: &str) -> String {
+    sh_lenient(
+        "/usr/bin/osascript",
+        &[
+            "-e",
+            &format!(
+                "tell application \"System Events\" to set frontmost of (first process whose unix id is {pid}) to true"
+            ),
+        ],
+    );
+    sleep_ms(1000);
+    focused_window(pid)
+}
+
+/// Queued clicks (#219): a double click beside the user's window waits,
+/// then runs in the agent's page once your app is in front, and switching
+/// back lands in the user's window. A double click whose target changed
+/// while it waited is not sent.
+fn queued_clicks(
+    control: &Control,
+    id: &Value,
+    window_id: u64,
+    log: &std::path::Path,
+    pid: &str,
+    your_front: &str,
+) -> Result<()> {
+    let double = |(x, y): (i64, i64)| {
+        let reply = control.call(
+            "click",
+            json!({ "sessionKey": KEY, "displayId": id, "x": x, "y": y, "count": 2 }),
+        );
+        sleep_ms(300);
+        reply
+    };
+    control.call("debugFrontWait", json!({ "ms": 1500 }))?;
+    if !harness_in_front(pid, log) {
+        bail!(
+            "the harness didn't come back to the front with its user window key: front {}",
+            front_app()
+        );
+    }
+    let t = tree(control, id, window_id)?;
+    let (_, press) = element(&t, "agent press")?;
+    let (_, later) = element(&t, "agent later")?;
+    let from = lines(log, 0).len();
+    let pending = double(press);
+    check(
+        "a double click beside the user's window answers input_pending",
+        said(&pending).contains("input_pending") && request_number(&pending).is_some(),
+        cut(&said(&pending), 300),
+    );
+    control.call("debugFrontWait", json!({ "ms": 0 }))?;
+    let (ran, fronts) = fronts_during(4, || {
+        let left = leave_after(your_front, 1000);
+        let ran = double(press);
+        let _ = left.join();
+        ran
+    })?;
+    let seen = lines(log, from);
+    let taken = taken_back(&fronts, pid);
+    check(
+        "the same double click again runs in the agent's page once your app is in front, and your app stays in front",
+        ran.is_ok()
+            && has(&seen, "pair agent dblclick")
+            && taken.is_empty()
+            && user_input(&seen).is_empty(),
+        format!("{} | taken {taken:?} | log {seen:?}", cut(&said(&ran), 400)),
+    );
+    let back = switch_back(pid);
+    check(
+        "switching back after the queued click lands in the user's window",
+        back == "pair user",
+        format!("focused window: {back}"),
+    );
+
+    // What is under a queued click changes while it waits.
+    control.call("debugFrontWait", json!({ "ms": 1500 }))?;
+    if !harness_in_front(pid, log) {
+        bail!(
+            "the harness didn't come back to the front with its user window key: front {}",
+            front_app()
+        );
+    }
+    let from = lines(log, 0).len();
+    let armed = control.call(
+        "click",
+        json!({ "sessionKey": KEY, "displayId": id, "x": later.0, "y": later.1 }),
+    );
+    let pending = double(later);
+    check(
+        "a double click on a control about to change answers input_pending",
+        armed.is_ok() && said(&pending).contains("input_pending"),
+        format!("{} | {}", said(&armed), cut(&said(&pending), 300)),
+    );
+    // The page changes the control 2.5 s after the first click.
+    sleep_ms(2000);
+    control.call("debugFrontWait", json!({ "ms": 0 }))?;
+    let left = leave_after(your_front, 500);
+    let refused = double(later);
+    let _ = left.join();
+    let seen = lines(log, from);
+    check(
+        "once your app is in front, the double click isn't sent, since what was under it changed",
+        refused
+            .as_ref()
+            .is_err_and(|e| e.to_string().contains("was not sent"))
+            && has(&seen, "pair agent later-changed")
+            && !has(&seen, "pair agent later-dblclick"),
+        format!("{} | log {seen:?}", cut(&said(&refused), 400)),
     );
     Ok(())
 }

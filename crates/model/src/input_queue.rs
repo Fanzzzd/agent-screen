@@ -364,15 +364,19 @@ impl Queue {
         self.tick(now);
         // The session's own cap first, so the session that fills it is told
         // what to clear.
+        // A front request that ended keeps nothing a caller still needs
+        // to read, beyond a withdraw's answer: it doesn't count.
+        let counts = |r: &&Request| !(r.front && r.status.terminal());
         let held = self
             .requests
             .values()
+            .filter(counts)
             .filter(|r| r.owner.connection == owner.connection)
             .count();
         if held >= MAX_SESSION_REQUESTS {
             return Err(EnqueueError::SessionFull);
         }
-        if self.requests.len() >= MAX_REQUESTS || self.next == u64::MAX {
+        if self.requests.values().filter(counts).count() >= MAX_REQUESTS || self.next == u64::MAX {
             return Err(EnqueueError::Full);
         }
         self.next += 1;
@@ -392,12 +396,7 @@ impl Queue {
                 true
             }
         });
-        for r in self.requests.values_mut() {
-            if r.front && r.owner == owner && r.status == Status::Queued {
-                r.status = Status::Stopped(Stop::Replaced);
-                r.times.ended = Some(now);
-            }
-        }
+        self.drop_fronts(&owner);
         if front {
             self.requests.insert(
                 id,
@@ -505,9 +504,11 @@ impl Queue {
         Some(id)
     }
 
-    /// The front request `id` runs now: its app is no longer in front and
-    /// a call waits for it. False when it can't: it isn't queued, or its
-    /// display is in a Takeover.
+    /// The front request `id` runs now: its app is no longer in front.
+    /// A call waits for it, or, once the call answered `input_pending`, the
+    /// request's background run sends it, unless a newer action of the
+    /// agent replaced it first. False when it can't: it isn't queued, or
+    /// its display is in a Takeover.
     pub fn start_front(&mut self, id: RequestId, now: u64) -> bool {
         let paused = self
             .requests
@@ -516,7 +517,7 @@ impl Queue {
         let Some(r) = self.requests.get_mut(&id) else {
             return false;
         };
-        if !r.front || r.status != Status::Queued || !r.attached || paused {
+        if !r.front || r.status != Status::Queued || paused {
             return false;
         }
         r.status = Status::Running;
@@ -557,13 +558,16 @@ impl Queue {
 
     /// `owner` acted on its display another way: what it queued earlier no
     /// longer applies, as when a newer action replaces it.
-    pub fn replace_fronts(&mut self, owner: &Owner, now: u64) {
-        for r in self.requests.values_mut() {
-            if r.front && r.owner == *owner && r.status == Status::Queued {
-                r.status = Status::Stopped(Stop::Replaced);
-                r.times.ended = Some(now);
-            }
-        }
+    pub fn replace_fronts(&mut self, owner: &Owner) {
+        self.drop_fronts(owner);
+    }
+
+    /// Forget `owner`'s front requests still waiting, and those that ended:
+    /// a newer action replaced them, and no call reads them any more.
+    fn drop_fronts(&mut self, owner: &Owner) {
+        self.requests.retain(|_, r| {
+            !(r.front && r.owner == *owner && (r.status == Status::Queued || r.status.terminal()))
+        });
     }
 
     /// Front requests still waiting for their app to leave the front.
@@ -867,7 +871,7 @@ mod tests {
     }
 
     #[test]
-    fn a_front_request_waits_out_a_takeover_and_a_detached_call() {
+    fn a_front_request_waits_out_a_takeover_and_runs_once_detached() {
         let mut q = queue();
         let id = q
             .enqueue_front(owner("a", 1), "key".into(), "Return in Dia".into(), 0)
@@ -876,12 +880,14 @@ mod tests {
         assert!(!q.start_front(id, 2));
         q.takeover(1, false, 3);
         q.detach(id, 4);
-        assert!(!q.start_front(id, 5));
         // The same action again attaches it.
         let again = q
             .enqueue_front(owner("a", 1), "key".into(), "Return in Dia".into(), 6)
             .unwrap();
         assert_eq!(again, id);
+        assert!(q.request(id).unwrap().attached);
+        q.detach(id, 6);
+        // Its background run may send it with no call waiting.
         assert!(q.start_front(id, 7));
         assert!(q.finish_front(id, false, 8));
         assert_eq!(q.request(id).unwrap().status, Status::Stopped(Stop::Failed));
@@ -896,17 +902,12 @@ mod tests {
         let second = q
             .enqueue_front(owner("a", 1), "click 2".into(), "Click".into(), 1)
             .unwrap();
-        assert_eq!(
-            q.request(first).unwrap().status,
-            Status::Stopped(Stop::Replaced)
-        );
+        // Replaced, it is forgotten: nothing reads it any more.
+        assert!(q.request(first).is_none());
         // The same owner's action that went in another way replaces it too.
-        q.replace_fronts(&owner("a", 1), 2);
-        assert_eq!(
-            q.request(second).unwrap().status,
-            Status::Stopped(Stop::Replaced)
-        );
-        let second = q
+        q.replace_fronts(&owner("a", 1));
+        assert!(q.request(second).is_none());
+        let third = q
             .enqueue_front(owner("a", 1), "click 3".into(), "Click".into(), 2)
             .unwrap();
         // Another session's request stays.
@@ -914,12 +915,26 @@ mod tests {
             .enqueue_front(owner("b", 2), "click 1".into(), "Click".into(), 2)
             .unwrap();
         let drag = add(&mut q, "a", 1, "drag", 3);
-        assert_eq!(
-            q.request(second).unwrap().status,
-            Status::Stopped(Stop::Replaced)
-        );
+        assert!(q.request(third).is_none());
         assert_eq!(q.request(other).unwrap().status, Status::Queued);
         assert_eq!(q.request(drag).unwrap().status, Status::Queued);
+    }
+
+    #[test]
+    fn replaced_and_withdrawn_front_requests_never_fill_the_session() {
+        let mut q = queue();
+        let a = owner("a", 1);
+        for n in 0..(MAX_SESSION_REQUESTS as u64 * 2) {
+            let id = q
+                .enqueue_front(a.clone(), format!("key {n}"), "Keys".into(), n)
+                .unwrap();
+            if n % 2 == 0 {
+                assert!(q.withdraw(id, &a, n));
+            }
+        }
+        assert!(q.requests().count() <= 2);
+        // A drag still goes in.
+        add(&mut q, "a", 1, "drag", 1000);
     }
 
     #[test]

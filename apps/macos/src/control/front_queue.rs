@@ -16,7 +16,7 @@ use super::server::{ControlError, Reply};
 use crate::core::Core;
 use crate::input_queue::{Front, Look};
 use crate::model::DisplayId;
-use agent_screen_model::input_queue::{RequestId, Status};
+use agent_screen_model::input_queue::{RequestId, Status, Stop};
 use agent_screen_model::real_click;
 use gpui::{AsyncApp, Entity};
 use serde_json::{Value, json};
@@ -35,6 +35,10 @@ static WAIT_MS: AtomicU64 = AtomicU64::new(0);
 pub fn set_wait_for_tests(ms: u64) {
     WAIT_MS.store(ms, Ordering::Relaxed);
 }
+
+/// How long a front request may wait for its app to leave the front,
+/// from its ask, before it lapses unsent.
+const MAX_AGE: Duration = Duration::from_secs(600);
 
 fn wait_limit() -> Duration {
     match WAIT_MS.load(Ordering::Relaxed) {
@@ -58,13 +62,8 @@ pub async fn queue_if_blocked(
         Err(e) if e.code == "front_blocked" => e.message.clone(),
         _ => {
             // Whatever it queued before no longer applies.
-            if let Ok(id) = display(core, p, true, cx)
-                && let Ok(owner) = core.read_with(cx, |c, _| c.input_queue.owner(id, connection))
-            {
-                core.update(cx, |c, cx| {
-                    c.input_queue.replace_fronts(&owner);
-                    cx.notify();
-                });
+            if let Ok(id) = display(core, p, true, cx) {
+                replaced_by(core, connection, id, cx);
             }
             return first;
         }
@@ -77,8 +76,18 @@ pub async fn queue_if_blocked(
     let Ok(owner) = core.read_with(cx, |c, _| c.input_queue.owner(id, connection)) else {
         return Err(refused());
     };
+    // A click runs later only if what is under its point is still there:
+    // without a first look, nothing can tell, so it isn't queued.
     let look = match method {
-        "click" => look_at(core, p, cx).await,
+        "click" => match look_at(core, p, cx).await {
+            Some(look) => Some(look),
+            None => {
+                return Err(ControlError::failed(format!(
+                    "{}. The click can't wait for the user to leave {app}: Agent Screen couldn't capture what is under its point to compare before it runs. Take a screenshot and try again.",
+                    why.trim_end_matches('.')
+                )));
+            }
+        },
         _ => None,
     };
     let params = Value::Object(p.0.clone());
@@ -102,6 +111,17 @@ pub async fn queue_if_blocked(
         })
         .map_err(ControlError::failed)?;
     run(core, connection, id, request, &why, cx).await
+}
+
+/// The agent acted on display `id` another way: its waiting front request
+/// no longer applies.
+pub fn replaced_by(core: &Entity<Core>, connection: u64, id: DisplayId, cx: &mut AsyncApp) {
+    core.update(cx, |c, cx| {
+        if let Ok(owner) = c.input_queue.owner(id, connection) {
+            c.input_queue.replace_fronts(&owner);
+            cx.notify();
+        }
+    });
 }
 
 /// What is under a click's point as it is queued: the window there, the
@@ -134,6 +154,19 @@ async fn look_kept(look: &Look, cx: &mut AsyncApp) -> bool {
                 .is_ok_and(|now| real_click::looks_same(&look.samples, &now))
     })
     .await
+}
+
+/// Why a front request stopped, in words for the agent.
+fn stopped(why: Stop) -> &'static str {
+    match why {
+        Stop::Withdrawn => "was withdrawn",
+        Stop::Replaced => "was replaced by a newer action of yours",
+        Stop::DisplayEnded => "stopped because its display ended",
+        Stop::Disconnected => "stopped because your session disconnected",
+        Stop::Takeover => "stopped because the user took over the display",
+        Stop::User => "was stopped by the user",
+        Stop::Failed => "could not run",
+    }
 }
 
 fn verb(method: &str) -> &'static str {
@@ -170,7 +203,8 @@ pub async fn wait(
 }
 
 /// Wait up to `WAIT` for front request `request`'s app to leave the front,
-/// then run it. `why` says what blocked it.
+/// then run it. `why` says what blocked it. Past `WAIT` the call answers
+/// `input_pending`, and a background run carries the request on.
 async fn run(
     core: &Entity<Core>,
     connection: u64,
@@ -179,49 +213,84 @@ async fn run(
     why: &str,
     cx: &mut AsyncApp,
 ) -> Reply {
+    drive(core, connection, id, request, Some(why), cx).await
+}
+
+/// The loop behind `run`, and behind a request's background run when
+/// `why` is None: that one never answers a call. It runs the request once
+/// the user's window leaves the front, within `MAX_AGE` of its ask, and
+/// keeps what came of it for the agent's next call.
+async fn drive(
+    core: &Entity<Core>,
+    connection: u64,
+    id: DisplayId,
+    request: RequestId,
+    why: Option<&str>,
+    cx: &mut AsyncApp,
+) -> Reply {
+    let background = why.is_none();
     let started = Instant::now();
     loop {
-        let (status, front, paused) = core.read_with(cx, |c, _| {
+        let (status, front, paused, age) = core.read_with(cx, |c, _| {
             (
                 c.input_queue.queue.request(request).map(|r| r.status),
                 c.input_queue.front(request).cloned(),
                 c.displays.get(id).is_some_and(|d| d.takeover),
+                c.input_queue.age(request).unwrap_or_default(),
             )
         });
         let (Some(status), Some(front)) = (status, front) else {
             return Err(ControlError::not_found(format!(
-                "input request {request} is gone; nothing was sent"
+                "input request {request} was replaced by a newer action of yours, or its display ended, so it was not sent. Take a screenshot before you act again."
             )));
         };
-        if status != Status::Queued {
-            let how = match status {
-                Status::Stopped(why) => format!("stopped ({why:?})"),
-                Status::Completed => "already ran".into(),
-                _ => "is running in another call".into(),
-            };
-            forget(core, request, cx);
-            return Err(ControlError::failed(format!(
-                "the queued {} (input request {request}) {how}; nothing more was sent. Take a screenshot before you act again.",
-                verb(&front.method).to_lowercase()
-            )));
+        let action = verb(&front.method).to_lowercase();
+        match status {
+            Status::Queued => {}
+            // The other loop on it, a call's or the background run, is
+            // sending it: wait for what comes of it.
+            Status::Running => {
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
+                continue;
+            }
+            ended => {
+                if background {
+                    return Err(ControlError::failed("ended"));
+                }
+                let kept = core.update(cx, |c, _| c.input_queue.take_outcome(request));
+                forget(core, request, cx);
+                if let Some(outcome) = kept {
+                    return outcome.map_err(|(code, message)| ControlError { code, message });
+                }
+                let how = match ended {
+                    Status::Stopped(why) => stopped(why),
+                    Status::Completed => "already ran",
+                    _ => "is running in another call",
+                };
+                return Err(ControlError::failed(format!(
+                    "the queued {action} (input request {request}) {how}; nothing more was sent. Take a screenshot before you act again."
+                )));
+            }
         }
         if paused {
-            detach(core, request, cx);
-            return Err(ControlError::takeover(format!(
-                "the user took over display {id}, so your queued {} (input request {request}) waits. Call wait_for_control, then take a screenshot before you act again.",
-                verb(&front.method).to_lowercase()
-            )));
-        }
-        if crate::mac::input::front() != Some(front.pid) {
+            if !background {
+                detach(core, request, cx);
+                return Err(ControlError::takeover(format!(
+                    "the user took over display {id}, so your queued {action} (input request {request}) waits. Call wait_for_control, then take a screenshot before you act again."
+                )));
+            }
+        } else if crate::mac::input::front() != Some(front.pid) {
             if let Some(look) = &front.look
                 && !look_kept(look, cx).await
             {
-                finish(core, request, Some(real_click::CONTENT_CHANGED.into()), cx);
-                return Err(ControlError::failed(format!(
+                let refused = ControlError::failed(format!(
                     "The click (input request {request}) waited until the user's window of {} lost focus, but {}, so it was not sent. Take a screenshot and click again.",
                     front.app,
                     real_click::CONTENT_CHANGED
-                )));
+                ));
+                return settle(core, request, background, Err(refused), cx);
             }
             let started_front = core.update(cx, |c, cx| {
                 let started = c.input_queue.start_front(request);
@@ -230,22 +299,30 @@ async fn run(
             });
             if started_front {
                 let params = front.params.as_object().cloned().unwrap_or_default();
+                // A posted click or key makes the agent's window the app's
+                // key window. The user's window gets that back after, with
+                // a focus record that doesn't bring the app forward, so
+                // switching back to the app lands them in their window.
+                let forwarder = core.update(cx, |c, _| c.forwarder(id));
+                forwarder.remember_user_window(front.pid).await;
                 let result = replay(core, connection, &front.method, &Args(&params), cx).await;
+                forwarder.keys_done().await;
                 match result {
                     // The app came back to the front first: wait on.
                     Err(e) if e.code == "front_blocked" => {
                         super::shared_app::take_blocked();
                         core.update(cx, |c, _| c.input_queue.requeue_front(request));
                     }
-                    Err(e) => {
-                        finish(core, request, Some(e.message.clone()), cx);
-                        return Err(e);
-                    }
+                    Err(e) => return settle(core, request, background, Err(e), cx),
                     Ok(mut answer) => {
-                        finish(core, request, None, cx);
-                        let waited = started.elapsed().as_secs_f64();
+                        let waited = age as f64 / 1000.0;
+                        let after = if background {
+                            ", after your call had returned input_pending,"
+                        } else {
+                            ""
+                        };
                         let note = format!(
-                            "It waited {waited:.1} s in the Input Queue (input request {request}) until the user's window of {} no longer had focus, then went in through the background route.",
+                            "It waited {waited:.1} s in the Input Queue (input request {request}){after} until the user's window of {} no longer had focus, then went in through the background route.",
                             front.app
                         );
                         let said = answer
@@ -259,26 +336,68 @@ async fn run(
                             "waitedSeconds".into(),
                             json!((waited * 10.0).round() / 10.0),
                         );
-                        return Ok(answer);
+                        return settle(core, request, background, Ok(answer), cx);
                     }
                 }
             }
         }
-        if started.elapsed() >= wait_limit() {
+        if let Some(why) = why
+            && started.elapsed() >= wait_limit()
+        {
             detach(core, request, cx);
+            let first = core.update(cx, |c, _| c.input_queue.drive(request));
+            if first {
+                let core = core.clone();
+                cx.spawn(async move |cx: &mut AsyncApp| {
+                    let _ = drive(&core, connection, id, request, None, cx).await;
+                })
+                .detach();
+            }
             let why = why.trim_end_matches('.');
             return Err(ControlError {
                 code: "input_pending",
                 message: format!(
-                    "{why}. It waits as input request {request} and runs by itself, through the background route, once the user's window of {app} no longer has focus, while a call of yours waits for it: repeat the same call, or call input_queue wait with request_id {request}. Meanwhile reads and act_on_element still work. A newer action replaces it, and input_queue withdraw cancels it. Agent Screen won't switch apps for the user.",
-                    app = front.app
+                    "{why}. It waits as input request {request} and runs by itself, through the background route, once the user's window of {app} no longer has focus, for up to {minutes} minutes from now; repeat the same call, or call input_queue wait with request_id {request}, to wait for it and read its result. Meanwhile reads still work. Any other action of yours on this display replaces it, and input_queue withdraw cancels it. Agent Screen won't switch apps for the user.",
+                    app = front.app,
+                    minutes = MAX_AGE.as_secs() / 60,
                 ),
             });
+        }
+        if background && Duration::from_millis(age) >= MAX_AGE {
+            let lapsed = ControlError::failed(format!(
+                "the queued {action} (input request {request}) was not sent: the user's window of {} kept focus for {} minutes. Take a screenshot before you act again.",
+                front.app,
+                MAX_AGE.as_secs() / 60
+            ));
+            return settle(core, request, true, Err(lapsed), cx);
         }
         cx.background_executor()
             .timer(Duration::from_millis(100))
             .await;
     }
+}
+
+/// What came of front request `request`: a call reads it now, so it goes;
+/// a background run keeps it for the agent's next call.
+fn settle(
+    core: &Entity<Core>,
+    request: RequestId,
+    background: bool,
+    outcome: Reply,
+    cx: &mut AsyncApp,
+) -> Reply {
+    let failure = outcome.as_ref().err().map(|e| e.message.clone());
+    if background {
+        core.update(cx, |c, cx| {
+            c.input_queue.finish_front(request, failure);
+            let kept = outcome.clone().map_err(|e| (e.code, e.message));
+            c.input_queue.keep_outcome(request, kept);
+            cx.notify();
+        });
+    } else {
+        finish(core, request, failure, cx);
+    }
+    outcome
 }
 
 fn detach(core: &Entity<Core>, request: RequestId, cx: &mut AsyncApp) {

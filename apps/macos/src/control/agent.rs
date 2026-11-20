@@ -299,6 +299,14 @@ async fn handle_one(
         if method != "launchApp" {
             watch_for_changes(&core, id, cx);
         }
+        // A newer action of the agent replaces its queued front request
+        // (ADR 0013); click, type and key do so as they go in.
+        if matches!(
+            method,
+            "mouseDown" | "mouseUp" | "drag" | "scroll" | "holdKey" | "elementAction"
+        ) {
+            super::front_queue::replaced_by(&core, connection, id, cx);
+        }
     }
     let refresh_acted = || {
         if let Some(id) = acting {

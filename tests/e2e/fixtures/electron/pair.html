@@ -41,6 +41,9 @@
       <!-- Makes the page large, about 5000 elements, to time a press's
            check on it. -->
       <button id="grow">grow</button>
+      <!-- Changes its own look 2.5 s after a click, with nothing else
+           pressing it, so what is under a queued click changes (#219). -->
+      <button id="later">later</button>
     </div>
     <!-- A page's own expander, a span with role button and no tabindex,
          as GitHub's settings pages draw one. -->
@@ -91,6 +94,20 @@
         e.preventDefault();
         log("dead-click");
       });
+      const later = document.getElementById("later");
+      later.setAttribute("aria-label", `${side} later`);
+      later.addEventListener("click", () => {
+        log("later-armed");
+        setTimeout(() => {
+          later.textContent = "changed under the click";
+          later.style.background = "#c00";
+          later.style.color = "#fff";
+          later.style.padding = "30px 60px";
+          log("later-changed");
+        }, 2500);
+      });
+      later.addEventListener("dblclick", () => log("later-dblclick"));
+      press.addEventListener("dblclick", () => log("dblclick"));
       const grow = document.getElementById("grow");
       grow.setAttribute("aria-label", `${side} grow`);
       grow.addEventListener("click", () => {

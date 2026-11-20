@@ -67,7 +67,16 @@ pub struct InputQueue {
     waiting_shown: usize,
     /// Front requests `preview_waiting` made, shown as waiting at once.
     previews: BTreeSet<RequestId>,
+    /// Front requests a background run drives once their call returned
+    /// `input_pending`, and what each run came to, kept until a call
+    /// reads it.
+    driven: BTreeSet<RequestId>,
+    outcomes: BTreeMap<RequestId, Outcome>,
 }
+
+/// What a front request's background run came to: the reply's result, or
+/// its error's code and message.
+pub type Outcome = Result<serde_json::Map<String, Value>, (&'static str, String)>;
 
 /// An action refused only because the user's window of the target app has
 /// focus, to run through the background route once that app is no longer
@@ -202,6 +211,8 @@ impl Default for InputQueue {
             ran_grant: None,
             waiting_shown: 0,
             previews: BTreeSet::new(),
+            driven: BTreeSet::new(),
+            outcomes: BTreeMap::new(),
         }
     }
 }
@@ -322,6 +333,28 @@ impl InputQueue {
         self.tick();
     }
 
+    /// Whether a background run should start for front request `id`:
+    /// once per request.
+    pub fn drive(&mut self, id: RequestId) -> bool {
+        self.driven.insert(id)
+    }
+
+    /// What front request `id`'s background run came to, for the call
+    /// that reads it.
+    pub fn keep_outcome(&mut self, id: RequestId, outcome: Outcome) {
+        self.outcomes.insert(id, outcome);
+    }
+
+    pub fn take_outcome(&mut self, id: RequestId) -> Option<Outcome> {
+        self.outcomes.remove(&id)
+    }
+
+    /// How long ago front request `id` was asked, in ms.
+    pub fn age(&self, id: RequestId) -> Option<u64> {
+        let asked = self.queue.request(id)?.times.asked;
+        Some(self.now().saturating_sub(asked))
+    }
+
     /// Front request `id` ran, or `failure` says why it could not.
     pub fn finish_front(&mut self, id: RequestId, failure: Option<String>) {
         let now = self.now();
@@ -401,9 +434,8 @@ impl InputQueue {
     /// `owner`'s action went in another way: its waiting front requests no
     /// longer apply.
     pub fn replace_fronts(&mut self, owner: &Owner) {
-        if self.queue.fronts().any(|r| &r.owner == owner) {
-            let now = self.now();
-            self.queue.replace_fronts(owner, now);
+        if self.queue.requests().any(|r| r.front && &r.owner == owner) {
+            self.queue.replace_fronts(owner);
             self.tick();
         }
     }
@@ -655,6 +687,9 @@ impl InputQueue {
         let requests = &self.queue;
         self.plans.retain(|id, _| requests.request(*id).is_some());
         self.fronts.retain(|id, _| requests.request(*id).is_some());
+        self.driven.retain(|id| requests.request(*id).is_some());
+        self.outcomes
+            .retain(|id, _| requests.request(*id).is_some());
         self.previews.retain(|id| {
             requests
                 .request(*id)
@@ -850,7 +885,7 @@ impl InputQueue {
             "elapsedSeconds": self.elapsed_seconds(),
             "waiting": self.queue.waiting().count(),
             "requests": requests,
-            "note": "Only completed means the action ran: with the user's pointer, or for waiting_for_app through the background route once the user's window of that app no longer had focus. waiting_for_app waits for that, while a call waits. approved means allowed and waiting its turn; a request made with input_queue's request action is then answered: retry the drag or click with real_input while the approval lasts. elapsedSeconds at the top is how long the current approval has lasted, null with none; a request's elapsedSeconds runs from your ask to its end, or to now. timing gives when it was asked, allowed, started and ended, in milliseconds since 1970: approvalMs is the user's time, turnMs the wait for its turn, runMs the run with the user's pointer.",
+            "note": "Only completed means the action ran: with the user's pointer, or for waiting_for_app through the background route once the user's window of that app no longer had focus. waiting_for_app waits for that, for up to 10 minutes from its ask, and keeps its result for wait. approved means allowed and waiting its turn; a request made with input_queue's request action is then answered: retry the drag or click with real_input while the approval lasts. elapsedSeconds at the top is how long the current approval has lasted, null with none; a request's elapsedSeconds runs from your ask to its end, or to now. timing gives when it was asked, allowed, started and ended, in milliseconds since 1970: approvalMs is the user's time, turnMs the wait for its turn, runMs the run with the user's pointer.",
         })
     }
 }
