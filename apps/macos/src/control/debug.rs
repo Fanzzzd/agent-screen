@@ -89,6 +89,18 @@ pub(super) async fn handle(
             shared_app::force_focus_unknown(on);
             Ok(json!({ "on": on }))
         }
+        // Test hook: how long a call waits for an action the user's front
+        // app blocks before it answers input_pending; 0 restores 30 s.
+        "debugFrontWait" => {
+            if agent_screen_mcp::endpoint::instance().as_deref() != Some("e2e") {
+                return Some(Err(ControlError::invalid(
+                    "debugFrontWait requires the isolated e2e instance",
+                )));
+            }
+            let ms = p.int("ms").unwrap_or(0).max(0) as u64;
+            super::front_queue::set_wait_for_tests(ms);
+            Ok(json!({ "ms": ms }))
+        }
         // Test hook: what the last hold of the user's keys during a launch
         // did (#110): how many events and key downs, how long, and why it
         // ended. Counts only, never which keys.

@@ -20,12 +20,28 @@ use agent_screen_model::input_queue::{RequestId, Status};
 use agent_screen_model::real_click;
 use gpui::{AsyncApp, Entity};
 use serde_json::{Value, json};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// How long one call waits for the user to leave the app before it
 /// answers `input_pending`: well under the tool timeouts of the MCP
 /// clients, of which Codex's 60 s default is the shortest.
 const WAIT: Duration = Duration::from_secs(30);
+
+/// Test hook (`debugFrontWait`): a shorter wait, in milliseconds, so
+/// scripts reach `input_pending` fast. 0 means `WAIT`.
+static WAIT_MS: AtomicU64 = AtomicU64::new(0);
+
+pub fn set_wait_for_tests(ms: u64) {
+    WAIT_MS.store(ms, Ordering::Relaxed);
+}
+
+fn wait_limit() -> Duration {
+    match WAIT_MS.load(Ordering::Relaxed) {
+        0 => WAIT,
+        ms => Duration::from_millis(ms),
+    }
+}
 
 /// `first`, the reply of a click, key or type call: unless the user's
 /// front app refused it before anything was sent, as it is. Else the
@@ -248,13 +264,13 @@ async fn run(
                 }
             }
         }
-        if started.elapsed() >= WAIT {
+        if started.elapsed() >= wait_limit() {
             detach(core, request, cx);
             let why = why.trim_end_matches('.');
             return Err(ControlError {
                 code: "input_pending",
                 message: format!(
-                    "{why}. It waits as input request {request} and runs by itself, through the background route, once the user's window of {app} no longer has focus, while a call of yours waits for it: repeat the same call, or call input_queue wait with requestId {request}. Meanwhile reads and act_on_element still work. A newer action replaces it, and input_queue withdraw cancels it. Agent Screen won't switch apps for the user.",
+                    "{why}. It waits as input request {request} and runs by itself, through the background route, once the user's window of {app} no longer has focus, while a call of yours waits for it: repeat the same call, or call input_queue wait with request_id {request}. Meanwhile reads and act_on_element still work. A newer action replaces it, and input_queue withdraw cancels it. Agent Screen won't switch apps for the user.",
                     app = front.app
                 ),
             });
