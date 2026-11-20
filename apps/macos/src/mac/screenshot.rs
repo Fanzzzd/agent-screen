@@ -274,9 +274,7 @@ pub fn display(
 /// "Clicks"). Blocking: call off the main thread.
 pub fn samples(id: DisplayId, source: crate::model::Rect) -> Result<Vec<u8>, String> {
     use objc2_core_foundation::{CGPoint, CGRect, CGSize};
-    use objc2_core_graphics::{
-        CGBitmapContextCreate, CGBitmapContextGetData, CGColorSpace, CGContext, CGImageAlphaInfo,
-    };
+    use objc2_core_graphics::{CGBitmapContextGetData, CGContext};
     let (width, height) = (source.width as usize, source.height as usize);
     if width == 0 || height == 0 {
         return Err("nothing to capture".into());
@@ -311,31 +309,14 @@ pub fn samples(id: DisplayId, source: crate::model::Rect) -> Result<Vec<u8>, Str
         result = capture();
     }
     let image = result?;
+    let context = rgb_bitmap_context(width, height, width * 4, "could not draw the region")?;
     unsafe {
-        let space = CGColorSpace::new_device_rgb().ok_or("no color space")?;
-        let context = CGBitmapContextCreate(
-            std::ptr::null_mut(),
-            width,
-            height,
-            8,
-            width * 4,
-            Some(&space),
-            CGImageAlphaInfo::NoneSkipLast.0,
-        )
-        .ok_or("could not draw the region")?;
         let all = CGRect::new(
             CGPoint::new(0.0, 0.0),
             CGSize::new(width as f64, height as f64),
         );
         match &image {
             Some(image) => {
-                unsafe extern "C" {
-                    fn CGContextDrawImage(
-                        context: *const c_void,
-                        rect: CGRect,
-                        image: *const c_void,
-                    );
-                }
                 CGContextDrawImage(
                     objc2_core_foundation::CFRetained::as_ptr(&context)
                         .as_ptr()
@@ -367,12 +348,6 @@ fn crop(
     format: Format,
 ) -> Result<Shot, String> {
     use objc2_core_foundation::{CGPoint, CGRect, CGSize};
-    use objc2_core_graphics::{
-        CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGImageAlphaInfo,
-    };
-    unsafe extern "C" {
-        fn CGImageCreateWithImageInRect(image: *const c_void, rect: CGRect) -> *const c_void;
-    }
     let (width, height) = (size.0 as usize, size.1 as usize);
     unsafe {
         let cut = CGImageCreateWithImageInRect(
@@ -385,38 +360,9 @@ fn crop(
         if cut.is_null() {
             return Err("could not crop the screenshot".into());
         }
-        let space = CGColorSpace::new_device_rgb().ok_or("no color space")?;
-        let context = CGBitmapContextCreate(
-            std::ptr::null_mut(),
-            width,
-            height,
-            8,
-            0,
-            Some(&space),
-            CGImageAlphaInfo::NoneSkipLast.0,
-        )
-        .ok_or("could not draw the screenshot")?;
-        unsafe extern "C" {
-            fn CGContextDrawImage(context: *const c_void, rect: CGRect, image: *const c_void);
-        }
-        CGContextDrawImage(
-            objc2_core_foundation::CFRetained::as_ptr(&context)
-                .as_ptr()
-                .cast(),
-            CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(size.0, size.1)),
-            cut,
-        );
+        let shot = draw_and_encode(cut, width, height, format, "could not draw the screenshot");
         CFRelease(cut);
-        let drawn =
-            CGBitmapContextCreateImage(Some(&context)).ok_or("could not draw the screenshot")?;
-        encode_raw(
-            objc2_core_foundation::CFRetained::as_ptr(&drawn)
-                .as_ptr()
-                .cast(),
-            width,
-            height,
-            format,
-        )
+        shot
     }
 }
 
@@ -474,6 +420,19 @@ unsafe extern "C" {
     fn CGImageDestinationFinalize(destination: *mut c_void) -> bool;
 }
 
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn CGContextDrawImage(
+        context: *const c_void,
+        rect: objc2_core_foundation::CGRect,
+        image: *const c_void,
+    );
+    fn CGImageCreateWithImageInRect(
+        image: *const c_void,
+        rect: objc2_core_foundation::CGRect,
+    ) -> *const c_void;
+}
+
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
     fn CFRelease(object: *const c_void);
@@ -488,6 +447,60 @@ unsafe extern "C" {
     ) -> i32;
 }
 
+fn rgb_bitmap_context(
+    width: usize,
+    height: usize,
+    bytes_per_row: usize,
+    error: &str,
+) -> Result<objc2_core_foundation::CFRetained<objc2_core_graphics::CGContext>, String> {
+    let space = objc2_core_graphics::CGColorSpace::new_device_rgb().ok_or("no color space")?;
+    unsafe {
+        objc2_core_graphics::CGBitmapContextCreate(
+            std::ptr::null_mut(),
+            width,
+            height,
+            8,
+            bytes_per_row,
+            Some(&space),
+            objc2_core_graphics::CGImageAlphaInfo::NoneSkipLast.0,
+        )
+    }
+    .ok_or_else(|| error.to_string())
+}
+
+unsafe fn draw_and_encode(
+    image: *const c_void,
+    width: usize,
+    height: usize,
+    format: Format,
+    error: &str,
+) -> Result<Shot, String> {
+    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+    let context = rgb_bitmap_context(width, height, 0, error)?;
+    unsafe {
+        CGContextDrawImage(
+            objc2_core_foundation::CFRetained::as_ptr(&context)
+                .as_ptr()
+                .cast(),
+            CGRect::new(
+                CGPoint::new(0.0, 0.0),
+                CGSize::new(width as f64, height as f64),
+            ),
+            image,
+        );
+        let drawn = objc2_core_graphics::CGBitmapContextCreateImage(Some(&context))
+            .ok_or_else(|| error.to_string())?;
+        encode_raw(
+            objc2_core_foundation::CFRetained::as_ptr(&drawn)
+                .as_ptr()
+                .cast(),
+            width,
+            height,
+            format,
+        )
+    }
+}
+
 /// Convert a 420f `CVPixelBuffer` from `Capture` into a JPEG or PNG, scaling
 /// down proportionally when wider than `max_width`. Blocking: call off the
 /// main thread.
@@ -497,10 +510,6 @@ pub fn encode_pixel_buffer(
     format: Format,
 ) -> Result<Shot, String> {
     use core_foundation::base::TCFType;
-    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
-    use objc2_core_graphics::{
-        CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGImageAlphaInfo,
-    };
 
     struct CfImage(*mut c_void);
     impl Drop for CfImage {
@@ -535,83 +544,33 @@ pub fn encode_pixel_buffer(
     }
     let dst_w = max_w;
     let dst_h = ((src_h * dst_w + (src_w / 2)) / src_w).max(1);
-    unsafe {
-        let space = CGColorSpace::new_device_rgb().ok_or("no color space")?;
-        let context = CGBitmapContextCreate(
-            std::ptr::null_mut(),
-            dst_w,
-            dst_h,
-            8,
-            0,
-            Some(&space),
-            CGImageAlphaInfo::NoneSkipLast.0,
-        )
-        .ok_or("could not draw scaled frame")?;
-        unsafe extern "C" {
-            fn CGContextDrawImage(context: *const c_void, rect: CGRect, image: *const c_void);
-        }
-        CGContextDrawImage(
-            objc2_core_foundation::CFRetained::as_ptr(&context)
-                .as_ptr()
-                .cast(),
-            CGRect::new(
-                CGPoint::new(0.0, 0.0),
-                CGSize::new(dst_w as f64, dst_h as f64),
-            ),
-            image.0,
-        );
-        let scaled =
-            CGBitmapContextCreateImage(Some(&context)).ok_or("could not draw scaled frame")?;
-        encode_raw(
-            objc2_core_foundation::CFRetained::as_ptr(&scaled)
-                .as_ptr()
-                .cast(),
-            dst_w,
-            dst_h,
-            format,
-        )
-    }
+    unsafe { draw_and_encode(image.0, dst_w, dst_h, format, "could not draw scaled frame") }
 }
 
 /// The empty desktop agents see: the background color, at the capture's
 /// size.
 fn plain(size: (f64, f64), format: Format) -> Result<Shot, String> {
-    use objc2_core_graphics::{
-        CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGContext,
-        CGImageAlphaInfo,
-    };
+    use objc2_core_graphics::{CGBitmapContextCreateImage, CGContext};
     let (width, height) = (size.0 as usize, size.1 as usize);
-    unsafe {
-        let space = CGColorSpace::new_device_rgb().ok_or("no color space")?;
-        let context = CGBitmapContextCreate(
-            std::ptr::null_mut(),
-            width,
-            height,
-            8,
-            0,
-            Some(&space),
-            CGImageAlphaInfo::NoneSkipLast.0,
-        )
-        .ok_or("could not draw the screenshot")?;
-        CGContext::set_rgb_fill_color(Some(&context), 0.13, 0.13, 0.14, 1.0);
-        CGContext::fill_rect(
-            Some(&context),
-            objc2_core_foundation::CGRect::new(
-                objc2_core_foundation::CGPoint::new(0.0, 0.0),
-                objc2_core_foundation::CGSize::new(size.0, size.1),
-            ),
-        );
-        let image =
-            CGBitmapContextCreateImage(Some(&context)).ok_or("could not draw the screenshot")?;
-        encode_raw(
-            objc2_core_foundation::CFRetained::as_ptr(&image)
-                .as_ptr()
-                .cast(),
-            width,
-            height,
-            format,
-        )
-    }
+    let context = rgb_bitmap_context(width, height, 0, "could not draw the screenshot")?;
+    CGContext::set_rgb_fill_color(Some(&context), 0.13, 0.13, 0.14, 1.0);
+    CGContext::fill_rect(
+        Some(&context),
+        objc2_core_foundation::CGRect::new(
+            objc2_core_foundation::CGPoint::new(0.0, 0.0),
+            objc2_core_foundation::CGSize::new(size.0, size.1),
+        ),
+    );
+    let image =
+        CGBitmapContextCreateImage(Some(&context)).ok_or("could not draw the screenshot")?;
+    encode_raw(
+        objc2_core_foundation::CFRetained::as_ptr(&image)
+            .as_ptr()
+            .cast(),
+        width,
+        height,
+        format,
+    )
 }
 
 /// JPEG at quality 0.8, or PNG, through ImageIO.

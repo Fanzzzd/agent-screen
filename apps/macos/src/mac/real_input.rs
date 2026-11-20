@@ -67,10 +67,6 @@ fn user_holds(bits: u8) -> bool {
 /// front back to the user's app and the reminder leave it alone.
 static HOLDING: AtomicI32 = AtomicI32::new(0);
 
-#[link(name = "Carbon", kind = "framework")]
-unsafe extern "C" {
-    fn IsSecureEventInputEnabled() -> bool;
-}
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
     fn CGWarpMouseCursorPosition(point: CGPoint) -> i32;
@@ -651,7 +647,7 @@ impl Drop for Holding {
 
 /// Input the user holds, or secure input: a loan may not start.
 fn inputs_busy() -> Option<&'static str> {
-    if unsafe { IsSecureEventInputEnabled() } {
+    if super::ime::secure_input() {
         return Some("secure input is on, as for a password field");
     }
     let held = user_holds(LEFT | RIGHT | OTHER)
@@ -749,7 +745,7 @@ pub fn drag(
     let checks = std::cell::Cell::new((0u32, Duration::ZERO));
     let allowed = |at| {
         let t = std::time::Instant::now();
-        let ok = go(at) && !touched() && !unsafe { IsSecureEventInputEnabled() };
+        let ok = go(at) && !touched() && !super::ime::secure_input();
         let (n, spent) = checks.get();
         checks.set((n + 1, spent + t.elapsed()));
         ok
@@ -936,7 +932,7 @@ pub fn click_at(
     };
     let pid = target.pid;
     let front = || super::app::frontmost_pid() == Some(pid);
-    let allowed = |at| go(at) && !touched() && !unsafe { IsSecureEventInputEnabled() };
+    let allowed = |at| go(at) && !touched() && !super::ime::secure_input();
     if !allowed(at) {
         return Outcome::Refused("the approval ended before the click");
     }
@@ -1114,7 +1110,7 @@ pub fn pick_menu_item(
     };
     let pid = target.pid;
     let front = || super::app::frontmost_pid() == Some(pid);
-    let allowed = |at| go(at) && !touched() && !unsafe { IsSecureEventInputEnabled() };
+    let allowed = |at| go(at) && !touched() && !super::ime::secure_input();
     let why_not = |at| {
         if touched() {
             "the user moved the mouse or pressed a key"
