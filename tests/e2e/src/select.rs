@@ -69,6 +69,7 @@ pub const PATHS: &[(&str, &[Area])] = &[
     ("apps/macos/src/ui/input_bar.rs", &[InputQueue]),
     ("apps/macos/src/ui/peek.rs", &[Peek]),
     ("apps/macos/src/ui/pointer.rs", &[Viewer]),
+    ("apps/macos/src/ui/queue_card.rs", &[InputQueue]),
     ("apps/macos/src/ui/recordings.rs", &[Recording]),
     ("apps/macos/src/ui/report_card.rs", &[Settings]),
     ("apps/macos/src/ui/setup.rs", &[Settings]),
