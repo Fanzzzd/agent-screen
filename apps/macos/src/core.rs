@@ -907,8 +907,7 @@ impl Core {
     /// macOS lists for it, or recall an old mode stored for its serial, such
     /// as 800×500; screenshots and windows on it then no longer fit.
     pub fn hold_modes(&mut self, cx: &mut Context<Self>) {
-        let mut wrong = Vec::new();
-        let wanted = self
+        let candidates: Vec<(DisplayId, u32, u32)> = self
             .displays
             .list
             .iter()
@@ -917,39 +916,67 @@ impl Core {
                 self.spares
                     .iter()
                     .map(|s| (s.handle.id, s.size.0 as u32, s.size.1 as u32)),
-            );
-        for (id, width, height) in wanted {
-            let now = crate::mac::cg::display_bounds(id);
-            if (now.width as u32, now.height as u32) == (width, height) {
-                self.remodes.remove(&id);
-                continue;
-            }
-            let tries = self.remodes.entry(id).or_default();
-            if *tries >= 3 {
-                continue;
-            }
-            *tries += 1;
-            wrong.push((id, width, height));
-        }
-        if wrong.is_empty() {
+            )
+            .filter(|(id, _, _)| self.remodes.get(id).copied().unwrap_or(0) < 3)
+            .collect();
+        if candidates.is_empty() {
             return;
         }
-        cx.background_executor()
-            .spawn(display::configure(move || {
-                for (id, width, height) in wrong {
-                    let was = crate::mac::cg::display_bounds(id);
-                    let back = display::restore_mode(id, width, height);
-                    crate::lifecycle::note(
-                        "mode",
-                        id,
-                        &format!(
-                            "ran at {}x{}, wants {width}x{height}, back: {back}",
-                            was.width, was.height
-                        ),
-                    );
-                }
-            }))
-            .detach();
+        cx.spawn(async move |this, cx| {
+            let (matched, wrong) = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut matched = Vec::new();
+                    let mut wrong = Vec::new();
+                    for (id, width, height) in candidates {
+                        let now = crate::mac::cg::display_bounds(id);
+                        if (now.width as u32, now.height as u32) == (width, height) {
+                            matched.push(id);
+                        } else {
+                            wrong.push((id, width, height));
+                        }
+                    }
+                    (matched, wrong)
+                })
+                .await;
+            let restore: Vec<(DisplayId, u32, u32)> = this
+                .update(cx, |core, _| {
+                    for id in matched {
+                        core.remodes.remove(&id);
+                    }
+                    let mut out = Vec::new();
+                    for (id, width, height) in wrong {
+                        let tries = core.remodes.entry(id).or_default();
+                        if *tries >= 3 {
+                            continue;
+                        }
+                        *tries += 1;
+                        out.push((id, width, height));
+                    }
+                    out
+                })
+                .unwrap_or_default();
+            if restore.is_empty() {
+                return;
+            }
+            cx.background_executor()
+                .spawn(display::configure(move || {
+                    for (id, width, height) in restore {
+                        let was = crate::mac::cg::display_bounds(id);
+                        let back = display::restore_mode(id, width, height);
+                        crate::lifecycle::note(
+                            "mode",
+                            id,
+                            &format!(
+                                "ran at {}x{}, wants {width}x{height}, back: {back}",
+                                was.width, was.height
+                            ),
+                        );
+                    }
+                }))
+                .await;
+        })
+        .detach();
     }
 
     /// The Agent Session stops using display `id`: by end_display, or the

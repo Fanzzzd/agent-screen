@@ -681,7 +681,7 @@ fn wallpaper() -> Option<std::path::PathBuf> {
 /// one that names it, so System Settings, which shows each display with its
 /// desktop, tells it apart from the user's monitors. False when its screen
 /// isn't listed yet or there is no picture, as in a bare debug binary. Main
-/// thread only.
+/// thread only (`NSWorkspace.setDesktopImageURL` requires the main thread).
 pub fn label_display(display: DisplayId, mtm: MainThreadMarker) -> bool {
     let Some(picture) = wallpaper() else {
         return false;
@@ -715,15 +715,49 @@ pub fn label_display(display: DisplayId, mtm: MainThreadMarker) -> bool {
     }
 }
 
+thread_local! {
+    static SCREEN_NAMES: std::cell::RefCell<(u64, std::collections::HashMap<DisplayId, String>)> =
+        std::cell::RefCell::new((0, std::collections::HashMap::new()));
+}
+
+pub fn forget_screen_names() {
+    SCREEN_NAMES.with(|c| c.borrow_mut().1.clear());
+}
+
 /// The localized name of the screen showing `display`. Main thread only.
+/// Cached per `cg::display_change_stamp()` and cleared on screen parameter
+/// changes to avoid repeated `SLSCopyDisplayInfoDictionary` IPCs.
 pub fn screen_name(display: DisplayId, mtm: MainThreadMarker) -> Option<String> {
-    NSScreen::screens(mtm).iter().find_map(|screen| {
+    let stamp = super::cg::display_change_stamp();
+    if let Some(name) = SCREEN_NAMES.with(|c| {
+        let mut cache = c.borrow_mut();
+        if cache.0 != stamp {
+            cache.0 = stamp;
+            cache.1.clear();
+            return None;
+        }
+        cache.1.get(&display).cloned()
+    }) {
+        return Some(name);
+    }
+    let found = NSScreen::screens(mtm).iter().find_map(|screen| {
         let number = screen
             .deviceDescription()
             .objectForKey(&NSString::from_str("NSScreenNumber"))?;
         let number = number.downcast::<NSNumber>().ok()?;
         (number.unsignedIntValue() == display).then(|| screen.localizedName().to_string())
-    })
+    });
+    if let Some(ref name) = found {
+        SCREEN_NAMES.with(|c| {
+            let mut cache = c.borrow_mut();
+            if cache.0 != stamp {
+                cache.0 = stamp;
+                cache.1.clear();
+            }
+            cache.1.insert(display, name.clone());
+        });
+    }
+    found
 }
 
 /// Start a new process of the app at `bundle` through LaunchServices, as

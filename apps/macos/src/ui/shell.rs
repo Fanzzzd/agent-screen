@@ -978,15 +978,29 @@ impl Shell {
                 _ => notify::withdraw_control(display.id),
             }
             // An agent left windows on its display: tell the user once.
-            if display.owner.is_some() && display.is_ended() && !self.ended.contains(&display.id) {
-                let windows = windows::on_display(display.id).len();
-                let note = match display.ended {
-                    Some(EndReason::Disconnected) => Note::Disconnected { windows },
-                    _ => Note::Review { windows },
-                };
-                if windows > 0 && display.ended != Some(EndReason::ClosedByUser) {
-                    notify::update(display.id, display.agent_name(), task, Some(note));
-                }
+            if display.owner.is_some()
+                && display.is_ended()
+                && !self.ended.contains(&display.id)
+                && display.ended != Some(EndReason::ClosedByUser)
+            {
+                let id = display.id;
+                let agent = display.agent_name().to_string();
+                let task = task.to_string();
+                let disconnected = display.ended == Some(EndReason::Disconnected);
+                cx.spawn(async move |_, cx| {
+                    let windows = cx
+                        .background_spawn(async move { windows::on_display(id).len() })
+                        .await;
+                    if windows > 0 {
+                        let note = if disconnected {
+                            Note::Disconnected { windows }
+                        } else {
+                            Note::Review { windows }
+                        };
+                        notify::update(id, &agent, &task, Some(note));
+                    }
+                })
+                .detach();
             }
         }
         let gone: Vec<DisplayId> = self.known.difference(&ids).copied().collect();
@@ -2342,7 +2356,12 @@ impl Shell {
         }
         let forwarder = self.core.update(cx, |core, _| core.forwarder(id));
         self.viewer_display = Some(id);
-        let count = windows::on_display(id).len();
+        let count = self
+            .peek
+            .as_ref()
+            .and_then(|(peek, _)| peek.read_with(cx, |p, _| p.counts.get(&id).copied()).ok())
+            .flatten()
+            .unwrap_or(0);
         let _ = viewer.update(cx, |viewer, _, cx| {
             if viewer.sheet.as_ref().is_some_and(|s| s.display != id) {
                 viewer.sheet = None;
@@ -2423,6 +2442,7 @@ impl Shell {
             });
         }
         self.viewer_open = true;
+        self.refresh_counts(cx);
         self.sync_card(cx);
         // Until the open animation lands, the window's frame is in flight.
         self.resting = Some(frame);
