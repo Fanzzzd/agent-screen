@@ -731,6 +731,27 @@ impl Args<'_> {
         }
     }
 
+    fn bool(&self, key: &str) -> Result<Option<bool>, ControlError> {
+        match self.0.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::Bool(b)) => Ok(Some(*b)),
+            Some(_) => Err(ControlError::invalid(format!(
+                "{key} must be true or false"
+            ))),
+        }
+    }
+
+    fn flag(&self, key: &str) -> bool {
+        self.0.get(key) == Some(&Value::Bool(true))
+    }
+
+    fn user_instruction(&self) -> Result<Option<String>, ControlError> {
+        self.string("user_instruction")?
+            .map(|w| agent_screen_model::access::user_instruction(&w))
+            .transpose()
+            .map_err(ControlError::invalid)
+    }
+
     fn one_of(&self, key: &str, allowed: &[&str]) -> Result<Option<String>, ControlError> {
         let value = self.string(key)?;
         if let Some(v) = &value
@@ -823,76 +844,7 @@ pub async fn run(
             .await
             .to_json(),
         )),
-        "create_display" => {
-            let title = a.string("title")?.unwrap_or_else(|| session.folder.clone());
-            let new = a.0.get("new").and_then(Value::as_bool).unwrap_or(false);
-            // A display ended by the app quitting hands its apps on, so
-            // their windows, now on the user's screen, are strays here.
-            // Only this session's, by the display they were on.
-            let orphans = control.ledger().orphans(&session.key);
-            let groups = orphans.as_ref().map(|groups| {
-                groups
-                    .iter()
-                    .map(|(display, pids)| json!({ "display": display, "pids": pids }))
-                    .collect::<Vec<_>>()
-            });
-            // The same pids flat, for an app older than ADR 0016, which
-            // reads only `adopt` (ADR 0005).
-            let adopt = orphans.as_ref().map(|groups| {
-                groups
-                    .iter()
-                    .flat_map(|(_, pids)| pids.clone())
-                    .collect::<Vec<_>>()
-            });
-            let reply = control
-                .call(
-                    "createDisplay",
-                    json!({
-                        "sessionKey": session.key,
-                        "client": session.client,
-                        "title": title,
-                        "width": a.int("width")?,
-                        "height": a.int("height")?,
-                        "new": new,
-                        "adopt": adopt,
-                        "adoptGroups": groups
-                    }),
-                )
-                .await?;
-            let reused = reply.get("reused").and_then(Value::as_bool) == Some(true);
-            if let Some(id) = reply.get("displayId").and_then(Value::as_u64) {
-                control.ledger().made_display(id, &session.key, reused);
-            }
-            if let Some(error) = needs_newer_app(new, &reply) {
-                return Err(error);
-            }
-            let mut out = json!({
-                "display_id": reply.get("displayId"),
-                "width": reply.get("width"),
-                "height": reply.get("height"),
-                "scale": reply.get("scale"),
-                "reused": reply.get("reused")
-            });
-            if let Some(preview_url) = reply.get("preview_url").filter(|v| !v.is_null()) {
-                out["preview_url"] = preview_url.clone();
-            }
-            if let Some(displays) = reply.get("displays").and_then(Value::as_array) {
-                out["displays"] = json!(
-                    displays
-                        .iter()
-                        .map(
-                            |d| json!({ "display_id": d.get("displayId"), "label": d.get("label") })
-                        )
-                        .collect::<Vec<_>>()
-                );
-            }
-            if let Some(note) = reply.get("note") {
-                out["note"] = note.clone();
-            } else if orphans.is_some() {
-                out["note"] = json!(RESTARTED);
-            }
-            Ok(Output::Object(out))
-        }
+        "create_display" => create_display(&a, session, control).await,
         "record_display" => {
             let action = a
                 .one_of("action", &["start", "stop"])?
@@ -925,109 +877,8 @@ pub async fn run(
                 .await?;
             Ok(Output::Object(describe_wait(&reply)))
         }
-        "request_help" => {
-            let display = a.require_int("display_id")?;
-            if let Some(words) = a.string("user_instruction")? {
-                let words = agent_screen_model::access::user_instruction(&words)
-                    .map_err(ControlError::invalid)?;
-                control
-                    .call(
-                        "answerHelp",
-                        json!({ "displayId": display, "userInstruction": words }),
-                    )
-                    .await?;
-                return Ok(Output::Object(json!({
-                    "control": "agent",
-                    "answer": "continue",
-                    "answeredIn": "chat",
-                    "note": "The Help Request ended on the user's words as you relayed them; Agent Screen didn't check them against the chat. Take a screenshot before you go on."
-                })));
-            }
-            if a.0.get("withdraw").and_then(Value::as_bool) == Some(true) {
-                let reply = control
-                    .call("withdrawHelp", json!({ "displayId": display }))
-                    .await?;
-                let withdrawn = reply.get("withdrawn") == Some(&Value::Bool(true));
-                return Ok(Output::Object(json!({ "withdrawn": withdrawn })));
-            }
-            let reason = a
-                .string("reason")?
-                .ok_or_else(|| ControlError::invalid("reason is required"))?;
-            // `answers`: this server tells the agent each answer, so the user
-            // is offered Continue, Reply and Give a Window (ADR 0015).
-            let asked = control
-                .call(
-                    "requestHelp",
-                    json!({ "displayId": display, "reason": reason, "steps": a.0.get("steps"), "answers": true }),
-                )
-                .await?;
-            // The user answered the last Help Request after its wait ended:
-            // that answer stands, and they aren't asked again.
-            if let Some(Value::Object(answered)) = asked.get("answered") {
-                let mut out = describe_wait(answered);
-                let note = out.get("note").and_then(Value::as_str).unwrap_or_default();
-                out["note"] = json!(format!(
-                    "The user answered your last Help Request after its wait ended, so they weren't asked again. {note}"
-                ));
-                out["answeredEarlier"] = json!(true);
-                return Ok(Output::Object(out));
-            }
-            let reply = control
-                .call(
-                    "waitForControl",
-                    json!({ "displayId": display, "timeoutSeconds": a.int("timeout_seconds")? }),
-                )
-                .await?;
-            Ok(Output::Object(describe_wait(&reply)))
-        }
-        "request_control" => {
-            let display = a.require_int("display_id")?;
-            let control_arg = a.one_of("control", &["agent", "user"])?;
-            if let Some(words) = a.string("user_instruction")? {
-                let words = agent_screen_model::access::user_instruction(&words)
-                    .map_err(ControlError::invalid)?;
-                let to = control_arg.unwrap_or_else(|| "agent".into());
-                let reply = control
-                    .call(
-                        "requestControl",
-                        json!({ "displayId": display, "userInstruction": words, "control": to }),
-                    )
-                    .await?;
-                return Ok(Output::Object(chat_control_output(&reply, &to)));
-            }
-            if control_arg.is_some() {
-                return Err(ControlError::invalid(
-                    "control needs user_instruction: the user's words from the chat",
-                ));
-            }
-            if a.0.get("withdraw").and_then(Value::as_bool) == Some(true) {
-                let reply = control
-                    .call("withdrawControlRequest", json!({ "displayId": display }))
-                    .await?;
-                let withdrawn = reply.get("withdrawn") == Some(&Value::Bool(true));
-                return Ok(Output::Object(json!({ "withdrawn": withdrawn })));
-            }
-            let reason = a
-                .string("reason")?
-                .ok_or_else(|| ControlError::invalid("reason is required"))?;
-            let asked = control
-                .call(
-                    "requestControl",
-                    json!({ "displayId": display, "reason": reason }),
-                )
-                .await?;
-            let reply = control
-                .call(
-                    "waitForControl",
-                    json!({ "displayId": display, "timeoutSeconds": a.int("timeout_seconds")? }),
-                )
-                .await?;
-            let mut out = describe_wait(&reply);
-            if asked.get("alreadyAsked") == Some(&Value::Bool(true)) {
-                out["alreadyAsked"] = json!(true);
-            }
-            Ok(Output::Object(out))
-        }
+        "request_help" => request_help(&a, control).await,
+        "request_control" => request_control(&a, control).await,
         "window_access" => {
             let params = window_access_params(&a)?;
             let action = params["action"].as_str().unwrap_or_default().to_string();
@@ -1038,40 +889,12 @@ pub async fn run(
             let reply = control
                 .call(
                     "listWindows",
-                    json!({ "displayId": a.require_int("display_id")?, "strays": a.0.get("strays").and_then(Value::as_bool).unwrap_or(false) }),
+                    json!({ "displayId": a.require_int("display_id")?, "strays": a.flag("strays") }),
                 )
                 .await?;
             Ok(Output::Object(Value::Object(reply)))
         }
-        "place_window" => {
-            let asked = [
-                ("x", a.number("x")?),
-                ("y", a.number("y")?),
-                ("width", a.number("width")?),
-                ("height", a.number("height")?),
-            ];
-            for (key, value) in &asked[2..] {
-                if value.is_some_and(|v| v <= 0.0) {
-                    return Err(ControlError::invalid(format!("{key} must be above 0")));
-                }
-            }
-            let mut params = json!({
-                "displayId": a.require_int("display_id")?,
-                "windowId": a.int("window_id")?,
-                "app": a.string("app")?,
-                "timeoutSeconds": a.number("timeout_seconds")?,
-                "userInstruction": a
-                    .string("user_instruction")?
-                    .map(|w| agent_screen_model::access::user_instruction(&w))
-                    .transpose()
-                    .map_err(ControlError::invalid)?,
-            });
-            for (key, value) in asked {
-                params[key] = json!(value);
-            }
-            let reply = control.call("placeWindow", params).await?;
-            Ok(Output::Object(place_output(&reply, &asked)))
-        }
+        "place_window" => place_window(&a, control).await,
         "set_disposition" => {
             let disposition = a
                 .one_of("disposition", &["keep", "close"])?
@@ -1129,244 +952,454 @@ pub async fn run(
             .await?;
             Ok(Output::Content(state.content(depth)))
         }
-        "input_queue" => {
-            let action = a
-                .one_of("action", &["request", "wait", "status", "withdraw", "done"])?
-                .ok_or_else(|| ControlError::invalid("action is required"))?;
-            let request_id = a.int("request_id")?;
-            if request_id.is_some_and(|id| id < 1) {
-                return Err(ControlError::invalid("request_id must be positive"));
-            }
-            // The app checks the same rule, before anything changes.
-            agent_screen_model::input_queue::Action::parse(&action, request_id.map(|id| id as u64))
-                .map_err(ControlError::invalid)?;
-            let operation = a.string("operation")?;
-            let reason = a.string("reason")?;
-            if action == "request"
-                && (operation
-                    .as_ref()
-                    .is_none_or(|s| s.trim().is_empty() || s.chars().count() > 2048)
-                    || reason
-                        .as_ref()
-                        .is_none_or(|s| s.trim().is_empty() || s.chars().count() > 300))
-            {
-                return Err(ControlError::invalid(
-                    "request needs operation (1..2048 characters) and reason (1..300 characters)",
-                ));
-            }
-            let timeout = a.number("timeout_seconds")?.unwrap_or(60.0);
-            if !(0.0..=60.0).contains(&timeout) {
-                return Err(ControlError::invalid(
-                    "timeout_seconds must be between 0 and 60",
-                ));
-            }
-            let result = control.call("inputQueue", json!({
-                "displayId": a.require_int("display_id")?, "action": action,
-                "requestId": request_id, "operation": operation, "reason": reason, "timeout": timeout,
-            })).await?;
-            Ok(Output::Object(Value::Object(result)))
-        }
-        "wait_for_change" => {
-            let display = a.require_int("display_id")?;
-            let window = a.require_int("window_id")?;
-            let scope = scope_arg(&a)?;
-            let conditions = json!({
-                "changed": a.0.get("changed"),
-                "appears": a.0.get("appears"),
-                "disappears": a.0.get("disappears"),
-            });
-            // The app checks the same rules, before it reads anything.
-            agent_screen_model::watch::Conditions::from_json(&conditions)
-                .map_err(ControlError::invalid)?;
-            let timeout = agent_screen_model::watch::timeout(a.number("timeout_seconds")?)
-                .map_err(ControlError::invalid)?;
-            static NEXT_WAIT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-            let wait = NEXT_WAIT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let baseline = control.last_tree(display, window, scope);
-            let call = control.call(
-                "waitForChange",
-                json!({
-                    "displayId": display,
-                    "windowId": window,
-                    "root": scope.root,
-                    "maxDepth": scope.max_depth,
-                    "conditions": conditions,
-                    "timeoutSeconds": timeout.as_secs_f64(),
-                    "baseline": baseline.as_ref().map(|(tree, _)| tree),
-                    "baselineTruncated": baseline.as_ref().is_some_and(|(_, cut)| *cut),
-                    "waitId": wait,
-                }),
-            );
-            // The client cancelled the call: stop the app's reads too. An
-            // older app doesn't know the method; its wait ends at the timeout.
-            let reply = tokio::select! {
-                reply = call => reply,
-                () = cancelled => {
-                    let _ = control.call_open("cancelWaitForChange", json!({ "waitId": wait })).await;
-                    return Err(ControlError::new("failed", "the call was cancelled"));
-                }
-            };
-            let reply = reply.map_err(|error| {
-                if error.message.contains("unknown method") {
-                    ControlError::new(
-                        "failed",
-                        "this Agent Screen app predates wait_for_change; update Agent Screen",
-                    )
-                } else {
-                    error
-                }
-            })?;
-            // The tree becomes the one the agent got only if it saw every
-            // change; otherwise the next comparison still shows the rest.
-            let fired = reply.get("outcome").and_then(Value::as_str) == Some("fired");
-            let changes = reply.get("changes").and_then(Value::as_str);
-            if let Some(tree) = reply.get("tree").and_then(Value::as_str)
-                && (fired || agent_screen_model::watch::shown_whole(changes))
-            {
-                // The tree's own read, not whether any read of the wait was cut.
-                let cut = reply.get("treeTruncated") == Some(&Value::Bool(true));
-                control.swap_tree(display, window, scope, tree.to_string(), cut);
-            }
-            Ok(Output::Content(vec![text(wait_output(
-                display, window, scope.root, &reply,
-            ))]))
-        }
-        "act_on_element" => {
-            let display = a.require_int("display_id")?;
-            let window = a.require_int("window_id")?;
-            let result = a
-                .one_of("result", &["state", "changes", "none"])?
-                .unwrap_or_else(|| "state".into());
-            let scope = scope_arg(&a)?;
-            let depth = scope.max_depth;
-            let action = a
-                .one_of(
-                    "action",
-                    &[
-                        "press",
-                        "click",
-                        "double_click",
-                        "right_click",
-                        "show_menu",
-                        "focus",
-                        "set_value",
-                        "insert_text",
-                        "read_text",
-                        "scroll_into_view",
-                        "increment",
-                        "decrement",
-                    ],
-                )?
-                .ok_or_else(|| ControlError::invalid("action is required"))?;
-            let real_input = match a.0.get("real_input") {
-                None | Some(Value::Null) => None,
-                Some(Value::Bool(value)) => Some(*value),
-                _ => return Err(ControlError::invalid("real_input must be true or false")),
-            };
-            if real_input.is_some() && action != "press" {
-                return Err(ControlError::invalid(
-                    "real_input applies to press on a menu item of an Electron app's menu bar",
-                ));
-            }
-            // A legacy app ignores unknown parameters. Confirm support and
-            // the root before even an action with an early text/menu reply.
-            if scope.root.is_some() {
-                window_state_reply(control, display, window, scope, false).await?;
-            }
-            let reply = control
-                .call(
-                    "elementAction",
-                    json!({
-                        "displayId": display,
-                        "windowId": window,
-                        "element": a.require_int("element")?,
-                        "action": action,
-                        "value": a.string("value")?,
-                        "realInput": real_input,
-                        "root": scope.root,
-                        "maxDepth": scope.max_depth
-                    }),
-                )
-                .await?;
-            if action == "read_text" {
-                let field = |key: &str| reply.get(key).and_then(Value::as_str).map(String::from);
-                let mut out = String::new();
-                if let Some(selected) = field("selected") {
-                    out.push_str(&format!("Selected:\n{selected}\n\n"));
-                }
-                if let Some(value) = field("text") {
-                    out.push_str(&format!("Value:\n{value}"));
-                }
-                return Ok(Output::Content(vec![text(out.trim_end().to_string())]));
-            }
-            if let Some(menu) = reply.get("menu").and_then(Value::as_str) {
-                return Ok(Output::Content(vec![text(format!(
-                    "The menu's items, still closed; press one to choose it. Numbers continue the window's tree.\n\n{menu}"
-                ))]));
-            }
-            // A word on how the app took the action, before what it shows.
-            let note = reply.get("note").and_then(Value::as_str).map(String::from);
-            let noted = |output: Result<Output, ControlError>| match (output, &note) {
-                (Ok(Output::Content(mut content)), Some(note)) => {
-                    content.insert(0, text(note.clone()));
-                    Ok(Output::Content(content))
-                }
-                (output, _) => output,
-            };
-            // The window state shows the action's result once the display
-            // stops changing. Skip the window picture when result is "none".
-            control
-                .call("settle", json!({ "displayId": display }))
-                .await?;
-            let need_image = result != "none";
-            noted(
-                match window_state(control, display, window, scope, need_image).await {
-                    // The action ran: a stale or busy root afterward must not
-                    // read as a failure the agent would retry.
-                    Err(error)
-                        if scope.root.is_some()
-                            && error.code != "not_found"
-                            && result == "none" =>
-                    {
-                        Ok(Output::Content(vec![text("Done.")]))
-                    }
-                    Err(error) if scope.root.is_some() && error.code != "not_found" => {
-                        Ok(Output::Content(vec![text(format!(
-                            "Done. The action ran, but its requested subtree could not be read afterward: {}. Call get_window_state without root to find the current tree.",
-                            error.message
-                        ))]))
-                    }
-                    // OK, Save or Close took its own window away: that is the
-                    // action working, so show what is on the display now. A
-                    // window the user gave to another session says so itself.
-                    Err(error)
-                        if error.code == "not_found"
-                            && !error.message.contains("to another agent session") =>
-                    {
-                        let list = control
-                            .call("listWindows", json!({ "displayId": display }))
-                            .await?;
-                        let shot = control
-                            .call("screenshot", json!({ "displayId": display }))
-                            .await?;
-                        let get = |key: &str| shot.get(key).cloned().unwrap_or(Value::Null);
-                        Ok(Output::Content(vec![
-                            text(closed_window_text(window, &list, &shot)),
-                            image(&get("data"), &get("mimeType")),
-                        ]))
-                    }
-                    Err(error) => Err(error),
-                    Ok(state) => Ok(Output::Content(match result.as_str() {
-                        "none" => vec![text(format!("Done.{}", state.strayed))],
-                        "changes" => state.changes(depth),
-                        _ => state.content(depth),
-                    })),
-                },
-            )
-        }
+        "input_queue" => input_queue(&a, control).await,
+        "wait_for_change" => wait_for_change(&a, control, cancelled).await,
+        "act_on_element" => act_on_element(&a, control).await,
         "computer" => computer(&a, control).await.map(Output::Content),
         other => Err(ControlError::invalid(format!("unknown tool {other}"))),
     }
+}
+
+async fn create_display(
+    a: &Args<'_>,
+    session: &Session,
+    control: &Control,
+) -> Result<Output, ControlError> {
+    let title = a.string("title")?.unwrap_or_else(|| session.folder.clone());
+    let new = a.flag("new");
+    // A display ended by the app quitting hands its apps on, so
+    // their windows, now on the user's screen, are strays here.
+    // Only this session's, by the display they were on.
+    let orphans = control.ledger().orphans(&session.key);
+    let groups = orphans.as_ref().map(|groups| {
+        groups
+            .iter()
+            .map(|(display, pids)| json!({ "display": display, "pids": pids }))
+            .collect::<Vec<_>>()
+    });
+    // The same pids flat, for an app older than ADR 0016, which
+    // reads only `adopt` (ADR 0005).
+    let adopt = orphans.as_ref().map(|groups| {
+        groups
+            .iter()
+            .flat_map(|(_, pids)| pids.clone())
+            .collect::<Vec<_>>()
+    });
+    let reply = control
+        .call(
+            "createDisplay",
+            json!({
+                "sessionKey": session.key,
+                "client": session.client,
+                "title": title,
+                "width": a.int("width")?,
+                "height": a.int("height")?,
+                "new": new,
+                "adopt": adopt,
+                "adoptGroups": groups
+            }),
+        )
+        .await?;
+    let reused = reply.get("reused").and_then(Value::as_bool) == Some(true);
+    if let Some(id) = reply.get("displayId").and_then(Value::as_u64) {
+        control.ledger().made_display(id, &session.key, reused);
+    }
+    if let Some(error) = needs_newer_app(new, &reply) {
+        return Err(error);
+    }
+    let mut out = json!({
+        "display_id": reply.get("displayId"),
+        "width": reply.get("width"),
+        "height": reply.get("height"),
+        "scale": reply.get("scale"),
+        "reused": reply.get("reused")
+    });
+    if let Some(preview_url) = reply.get("preview_url").filter(|v| !v.is_null()) {
+        out["preview_url"] = preview_url.clone();
+    }
+    if let Some(displays) = reply.get("displays").and_then(Value::as_array) {
+        out["displays"] = json!(
+            displays
+                .iter()
+                .map(|d| json!({ "display_id": d.get("displayId"), "label": d.get("label") }))
+                .collect::<Vec<_>>()
+        );
+    }
+    if let Some(note) = reply.get("note") {
+        out["note"] = note.clone();
+    } else if orphans.is_some() {
+        out["note"] = json!(RESTARTED);
+    }
+    Ok(Output::Object(out))
+}
+
+async fn request_help(a: &Args<'_>, control: &Control) -> Result<Output, ControlError> {
+    let display = a.require_int("display_id")?;
+    if let Some(words) = a.user_instruction()? {
+        control
+            .call(
+                "answerHelp",
+                json!({ "displayId": display, "userInstruction": words }),
+            )
+            .await?;
+        return Ok(Output::Object(json!({
+            "control": "agent",
+            "answer": "continue",
+            "answeredIn": "chat",
+            "note": "The Help Request ended on the user's words as you relayed them; Agent Screen didn't check them against the chat. Take a screenshot before you go on."
+        })));
+    }
+    if a.flag("withdraw") {
+        let reply = control
+            .call("withdrawHelp", json!({ "displayId": display }))
+            .await?;
+        let withdrawn = reply.get("withdrawn") == Some(&Value::Bool(true));
+        return Ok(Output::Object(json!({ "withdrawn": withdrawn })));
+    }
+    let reason = a
+        .string("reason")?
+        .ok_or_else(|| ControlError::invalid("reason is required"))?;
+    // `answers`: this server tells the agent each answer, so the user
+    // is offered Continue, Reply and Give a Window (ADR 0015).
+    let asked = control
+        .call(
+            "requestHelp",
+            json!({ "displayId": display, "reason": reason, "steps": a.0.get("steps"), "answers": true }),
+        )
+        .await?;
+    // The user answered the last Help Request after its wait ended:
+    // that answer stands, and they aren't asked again.
+    if let Some(Value::Object(answered)) = asked.get("answered") {
+        let mut out = describe_wait(answered);
+        let note = out.get("note").and_then(Value::as_str).unwrap_or_default();
+        out["note"] = json!(format!(
+            "The user answered your last Help Request after its wait ended, so they weren't asked again. {note}"
+        ));
+        out["answeredEarlier"] = json!(true);
+        return Ok(Output::Object(out));
+    }
+    let reply = control
+        .call(
+            "waitForControl",
+            json!({ "displayId": display, "timeoutSeconds": a.int("timeout_seconds")? }),
+        )
+        .await?;
+    Ok(Output::Object(describe_wait(&reply)))
+}
+
+async fn request_control(a: &Args<'_>, control: &Control) -> Result<Output, ControlError> {
+    let display = a.require_int("display_id")?;
+    let control_arg = a.one_of("control", &["agent", "user"])?;
+    if let Some(words) = a.user_instruction()? {
+        let to = control_arg.unwrap_or_else(|| "agent".into());
+        let reply = control
+            .call(
+                "requestControl",
+                json!({ "displayId": display, "userInstruction": words, "control": to }),
+            )
+            .await?;
+        return Ok(Output::Object(chat_control_output(&reply, &to)));
+    }
+    if control_arg.is_some() {
+        return Err(ControlError::invalid(
+            "control needs user_instruction: the user's words from the chat",
+        ));
+    }
+    if a.flag("withdraw") {
+        let reply = control
+            .call("withdrawControlRequest", json!({ "displayId": display }))
+            .await?;
+        let withdrawn = reply.get("withdrawn") == Some(&Value::Bool(true));
+        return Ok(Output::Object(json!({ "withdrawn": withdrawn })));
+    }
+    let reason = a
+        .string("reason")?
+        .ok_or_else(|| ControlError::invalid("reason is required"))?;
+    let asked = control
+        .call(
+            "requestControl",
+            json!({ "displayId": display, "reason": reason }),
+        )
+        .await?;
+    let reply = control
+        .call(
+            "waitForControl",
+            json!({ "displayId": display, "timeoutSeconds": a.int("timeout_seconds")? }),
+        )
+        .await?;
+    let mut out = describe_wait(&reply);
+    if asked.get("alreadyAsked") == Some(&Value::Bool(true)) {
+        out["alreadyAsked"] = json!(true);
+    }
+    Ok(Output::Object(out))
+}
+
+async fn place_window(a: &Args<'_>, control: &Control) -> Result<Output, ControlError> {
+    let asked = [
+        ("x", a.number("x")?),
+        ("y", a.number("y")?),
+        ("width", a.number("width")?),
+        ("height", a.number("height")?),
+    ];
+    for (key, value) in &asked[2..] {
+        if value.is_some_and(|v| v <= 0.0) {
+            return Err(ControlError::invalid(format!("{key} must be above 0")));
+        }
+    }
+    let mut params = json!({
+        "displayId": a.require_int("display_id")?,
+        "windowId": a.int("window_id")?,
+        "app": a.string("app")?,
+        "timeoutSeconds": a.number("timeout_seconds")?,
+        "userInstruction": a.user_instruction()?,
+    });
+    for (key, value) in asked {
+        params[key] = json!(value);
+    }
+    let reply = control.call("placeWindow", params).await?;
+    Ok(Output::Object(place_output(&reply, &asked)))
+}
+
+async fn input_queue(a: &Args<'_>, control: &Control) -> Result<Output, ControlError> {
+    let action = a
+        .one_of("action", &["request", "wait", "status", "withdraw", "done"])?
+        .ok_or_else(|| ControlError::invalid("action is required"))?;
+    let request_id = a.int("request_id")?;
+    if request_id.is_some_and(|id| id < 1) {
+        return Err(ControlError::invalid("request_id must be positive"));
+    }
+    // The app checks the same rule, before anything changes.
+    agent_screen_model::input_queue::Action::parse(&action, request_id.map(|id| id as u64))
+        .map_err(ControlError::invalid)?;
+    let operation = a.string("operation")?;
+    let reason = a.string("reason")?;
+    if action == "request"
+        && (operation
+            .as_ref()
+            .is_none_or(|s| s.trim().is_empty() || s.chars().count() > 2048)
+            || reason
+                .as_ref()
+                .is_none_or(|s| s.trim().is_empty() || s.chars().count() > 300))
+    {
+        return Err(ControlError::invalid(
+            "request needs operation (1..2048 characters) and reason (1..300 characters)",
+        ));
+    }
+    let timeout = a.number("timeout_seconds")?.unwrap_or(60.0);
+    if !(0.0..=60.0).contains(&timeout) {
+        return Err(ControlError::invalid(
+            "timeout_seconds must be between 0 and 60",
+        ));
+    }
+    let result = control
+        .call(
+            "inputQueue",
+            json!({
+                "displayId": a.require_int("display_id")?,
+                "action": action,
+                "requestId": request_id,
+                "operation": operation,
+                "reason": reason,
+                "timeout": timeout,
+            }),
+        )
+        .await?;
+    Ok(Output::Object(Value::Object(result)))
+}
+
+async fn wait_for_change(
+    a: &Args<'_>,
+    control: &Control,
+    cancelled: Cancelled,
+) -> Result<Output, ControlError> {
+    let display = a.require_int("display_id")?;
+    let window = a.require_int("window_id")?;
+    let scope = scope_arg(a)?;
+    let conditions = json!({
+        "changed": a.0.get("changed"),
+        "appears": a.0.get("appears"),
+        "disappears": a.0.get("disappears"),
+    });
+    // The app checks the same rules, before it reads anything.
+    agent_screen_model::watch::Conditions::from_json(&conditions).map_err(ControlError::invalid)?;
+    let timeout = agent_screen_model::watch::timeout(a.number("timeout_seconds")?)
+        .map_err(ControlError::invalid)?;
+    static NEXT_WAIT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let wait = NEXT_WAIT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let baseline = control.last_tree(display, window, scope);
+    let call = control.call(
+        "waitForChange",
+        json!({
+            "displayId": display,
+            "windowId": window,
+            "root": scope.root,
+            "maxDepth": scope.max_depth,
+            "conditions": conditions,
+            "timeoutSeconds": timeout.as_secs_f64(),
+            "baseline": baseline.as_ref().map(|(tree, _)| tree),
+            "baselineTruncated": baseline.as_ref().is_some_and(|(_, cut)| *cut),
+            "waitId": wait,
+        }),
+    );
+    // The client cancelled the call: stop the app's reads too. An
+    // older app doesn't know the method; its wait ends at the timeout.
+    let reply = tokio::select! {
+        reply = call => reply,
+        () = cancelled => {
+            let _ = control.call_open("cancelWaitForChange", json!({ "waitId": wait })).await;
+            return Err(ControlError::new("failed", "the call was cancelled"));
+        }
+    };
+    let reply = reply.map_err(|error| {
+        if error.message.contains("unknown method") {
+            ControlError::new(
+                "failed",
+                "this Agent Screen app predates wait_for_change; update Agent Screen",
+            )
+        } else {
+            error
+        }
+    })?;
+    // The tree becomes the one the agent got only if it saw every
+    // change; otherwise the next comparison still shows the rest.
+    let fired = reply.get("outcome").and_then(Value::as_str) == Some("fired");
+    let changes = reply.get("changes").and_then(Value::as_str);
+    if let Some(tree) = reply.get("tree").and_then(Value::as_str)
+        && (fired || agent_screen_model::watch::shown_whole(changes))
+    {
+        // The tree's own read, not whether any read of the wait was cut.
+        let cut = reply.get("treeTruncated") == Some(&Value::Bool(true));
+        control.swap_tree(display, window, scope, tree.to_string(), cut);
+    }
+    Ok(Output::Content(vec![text(wait_output(
+        display, window, scope.root, &reply,
+    ))]))
+}
+
+async fn act_on_element(a: &Args<'_>, control: &Control) -> Result<Output, ControlError> {
+    let display = a.require_int("display_id")?;
+    let window = a.require_int("window_id")?;
+    let result = a
+        .one_of("result", &["state", "changes", "none"])?
+        .unwrap_or_else(|| "state".into());
+    let scope = scope_arg(a)?;
+    let depth = scope.max_depth;
+    let action = a
+        .one_of(
+            "action",
+            &[
+                "press",
+                "click",
+                "double_click",
+                "right_click",
+                "show_menu",
+                "focus",
+                "set_value",
+                "insert_text",
+                "read_text",
+                "scroll_into_view",
+                "increment",
+                "decrement",
+            ],
+        )?
+        .ok_or_else(|| ControlError::invalid("action is required"))?;
+    let real_input = a.bool("real_input")?;
+    if real_input.is_some() && action != "press" {
+        return Err(ControlError::invalid(
+            "real_input applies to press on a menu item of an Electron app's menu bar",
+        ));
+    }
+    // A legacy app ignores unknown parameters. Confirm support and
+    // the root before even an action with an early text/menu reply.
+    if scope.root.is_some() {
+        window_state_reply(control, display, window, scope, false).await?;
+    }
+    let reply = control
+        .call(
+            "elementAction",
+            json!({
+                "displayId": display,
+                "windowId": window,
+                "element": a.require_int("element")?,
+                "action": action,
+                "value": a.string("value")?,
+                "realInput": real_input,
+                "root": scope.root,
+                "maxDepth": scope.max_depth
+            }),
+        )
+        .await?;
+    if action == "read_text" {
+        let field = |key: &str| reply.get(key).and_then(Value::as_str).map(String::from);
+        let mut out = String::new();
+        if let Some(selected) = field("selected") {
+            out.push_str(&format!("Selected:\n{selected}\n\n"));
+        }
+        if let Some(value) = field("text") {
+            out.push_str(&format!("Value:\n{value}"));
+        }
+        return Ok(Output::Content(vec![text(out.trim_end().to_string())]));
+    }
+    if let Some(menu) = reply.get("menu").and_then(Value::as_str) {
+        return Ok(Output::Content(vec![text(format!(
+            "The menu's items, still closed; press one to choose it. Numbers continue the window's tree.\n\n{menu}"
+        ))]));
+    }
+    // A word on how the app took the action, before what it shows.
+    let note = reply.get("note").and_then(Value::as_str).map(String::from);
+    let noted = |output: Result<Output, ControlError>| match (output, &note) {
+        (Ok(Output::Content(mut content)), Some(note)) => {
+            content.insert(0, text(note.clone()));
+            Ok(Output::Content(content))
+        }
+        (output, _) => output,
+    };
+    // The window state shows the action's result once the display
+    // stops changing. Skip the window picture when result is "none".
+    control
+        .call("settle", json!({ "displayId": display }))
+        .await?;
+    let need_image = result != "none";
+    noted(
+        match window_state(control, display, window, scope, need_image).await {
+            // The action ran: a stale or busy root afterward must not
+            // read as a failure the agent would retry.
+            Err(error) if scope.root.is_some() && error.code != "not_found" && result == "none" => {
+                Ok(Output::Content(vec![text("Done.")]))
+            }
+            Err(error) if scope.root.is_some() && error.code != "not_found" => {
+                Ok(Output::Content(vec![text(format!(
+                    "Done. The action ran, but its requested subtree could not be read afterward: {}. Call get_window_state without root to find the current tree.",
+                    error.message
+                ))]))
+            }
+            // OK, Save or Close took its own window away: that is the
+            // action working, so show what is on the display now. A
+            // window the user gave to another session says so itself.
+            Err(error)
+                if error.code == "not_found"
+                    && !error.message.contains("to another agent session") =>
+            {
+                let list = control
+                    .call("listWindows", json!({ "displayId": display }))
+                    .await?;
+                let shot = control
+                    .call("screenshot", json!({ "displayId": display }))
+                    .await?;
+                let get = |key: &str| shot.get(key).cloned().unwrap_or(Value::Null);
+                Ok(Output::Content(vec![
+                    text(closed_window_text(window, &list, &shot)),
+                    image(&get("data"), &get("mimeType")),
+                ]))
+            }
+            Err(error) => Err(error),
+            Ok(state) => Ok(Output::Content(match result.as_str() {
+                "none" => vec![text(format!("Done.{}", state.strayed))],
+                "changes" => state.changes(depth),
+                _ => state.content(depth),
+            })),
+        },
+    )
 }
 
 /// place_window's result: the frame the window ended with, and a note
@@ -1447,11 +1480,7 @@ fn window_access_params(a: &Args<'_>) -> Result<Value, ControlError> {
     let action = a
         .one_of("action", &["grant", "revoke", "return", "status"])?
         .ok_or_else(|| ControlError::invalid("action is required"))?;
-    let all = match a.0.get("all") {
-        None | Some(Value::Null) => false,
-        Some(Value::Bool(b)) => *b,
-        Some(_) => return Err(ControlError::invalid("all must be true or false")),
-    };
+    let all = a.bool("all")?.unwrap_or(false);
     let apps: Option<Vec<String>> = match a.0.get("apps") {
         None | Some(Value::Null) => None,
         Some(Value::Array(items)) => Some(
@@ -1468,11 +1497,7 @@ fn window_access_params(a: &Args<'_>) -> Result<Value, ControlError> {
         Some(_) => return Err(ControlError::invalid("apps is a list of app names")),
     };
     let window = a.int("window_id")?;
-    let words = a
-        .string("user_instruction")?
-        .map(|w| agent_screen_model::access::user_instruction(&w))
-        .transpose()
-        .map_err(ControlError::invalid)?;
+    let words = a.user_instruction()?;
     let needs_words = || {
         ControlError::invalid(format!(
             "{action} needs user_instruction: the user's words from this chat that tell you to. Without them, place_window asks the user with a card"
@@ -2047,11 +2072,7 @@ async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, Control
             ],
         )?
         .ok_or_else(|| ControlError::invalid("action is required"))?;
-    let real_input = match a.0.get("real_input") {
-        None | Some(Value::Null) => false,
-        Some(Value::Bool(value)) => *value,
-        _ => return Err(ControlError::invalid("real_input must be true or false")),
-    };
+    let real_input = a.bool("real_input")?.unwrap_or(false);
     if real_input && matches!(action.as_str(), "right_click" | "middle_click") {
         return Err(ControlError::invalid(
             agent_screen_model::real_click::NO_MENU_CLICK,
@@ -2066,7 +2087,7 @@ async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, Control
     let mut route = None;
     let coordinate = a.coordinate("coordinate")?;
     let text_arg = a.string("text")?;
-    let via_input_method = a.0.get("via_input_method") == Some(&Value::Bool(true));
+    let via_input_method = a.flag("via_input_method");
     let input_source = a.string("input_source")?;
     let modifiers: Vec<String> = text_arg
         .as_deref()
