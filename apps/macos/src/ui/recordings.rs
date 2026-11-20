@@ -1,6 +1,7 @@
 //! Recording library and AVPlayer controls. Pointer replay is visual only.
 
-use super::{pointer, setup, theme};
+use super::theme::{self, Theme};
+use super::{pointer, setup};
 use crate::i18n::t;
 use crate::mac::{playback, recording};
 use agent_screen_model::recording_playback::{
@@ -258,32 +259,30 @@ fn time(seconds: f64) -> String {
     format!("{}:{:02}", seconds / 60, seconds % 60)
 }
 
-impl Render for Recordings {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = theme::theme(window);
-        if !self.focused {
-            window.focus(&self.focus, cx);
-            self.focused = true;
+impl Recordings {
+    fn sync_player(&mut self, window: &mut Window) {
+        let Some(player) = &self.player else {
+            return;
+        };
+        let state = player.snapshot();
+        self.seconds = state.seconds;
+        self.duration = state.duration;
+        self.playing = state.playing;
+        self.status = state.status;
+        self.seeking = state.seeking;
+        self.frame = retained_frame(self.frame.take(), state.frame);
+        if state.status != playback::Status::Failed
+            && (state.playing
+                || state.status == playback::Status::Loading
+                || self.seeking
+                || (state.status == playback::Status::Ready && self.frame.is_none()))
+        {
+            window.request_animation_frame();
         }
-        if let Some(player) = &self.player {
-            let state = player.snapshot();
-            self.seconds = state.seconds;
-            self.duration = state.duration;
-            self.playing = state.playing;
-            self.status = state.status;
-            self.seeking = state.seeking;
-            self.frame = retained_frame(self.frame.take(), state.frame);
-            if state.status != playback::Status::Failed
-                && (state.playing
-                    || state.status == playback::Status::Loading
-                    || self.seeking
-                    || (state.status == playback::Status::Ready && self.frame.is_none()))
-            {
-                window.request_animation_frame();
-            }
-        }
-        let video_size = self
-            .frame
+    }
+
+    fn video_size(&self) -> Size {
+        self.frame
             .as_ref()
             .map(|frame| Size {
                 width: frame.get_width_of_plane(0) as f64,
@@ -293,17 +292,11 @@ impl Render for Recordings {
             .unwrap_or(Size {
                 width: 1280.0,
                 height: 800.0,
-            });
-        // While the bar is held, show the dragged time, and the pointer there.
-        let shown = self.scrub.shown(self.seconds);
-        let sample = self.timeline.sample(
-            shown,
-            self.show_pointer
-                && !self.error
-                && self.status != playback::Status::Failed
-                && self.frame.is_some(),
-        );
-        let picture = if self.error || self.status == playback::Status::Failed {
+            })
+    }
+
+    fn render_picture(&self) -> gpui::AnyElement {
+        if self.error || self.status == playback::Status::Failed {
             div()
                 .flex()
                 .size_full()
@@ -331,7 +324,10 @@ impl Render for Recordings {
                     t("Select a recording", "选择一段录制")
                 })
                 .into_any_element()
-        };
+        }
+    }
+
+    fn render_sidebar(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
         let weak = cx.entity().downgrade();
         let refresh = setup::button(
             "refresh-recordings",
@@ -342,7 +338,7 @@ impl Render for Recordings {
             }
             .into(),
             None,
-            &theme,
+            theme,
             move |cx| {
                 let _ = weak.update(cx, |this, cx| {
                     this.refresh(cx);
@@ -356,6 +352,7 @@ impl Render for Recordings {
             .enumerate()
             .map(|(index, video)| {
                 let selected = self.selected == Some(index);
+                let control_hover = theme.control_hover;
                 div()
                     .id(gpui::ElementId::NamedInteger(
                         "recording".into(),
@@ -369,7 +366,7 @@ impl Render for Recordings {
                     } else {
                         theme.card
                     })
-                    .hover(move |s| s.bg(theme.control_hover))
+                    .hover(move |s| s.bg(control_hover))
                     .cursor_pointer()
                     .tooltip({
                         let name = video.name.clone();
@@ -399,72 +396,65 @@ impl Render for Recordings {
                     }))
             })
             .collect::<Vec<_>>();
-        let weak = cx.entity().downgrade();
-        let play = setup::button(
-            "play-recording",
-            if self.playing {
-                t("Pause", "暂停")
-            } else {
-                t("Play", "播放")
-            }
-            .into(),
-            Some(theme.accent),
-            &theme,
-            move |cx| {
-                let _ = weak.update(cx, |this, cx| {
-                    this.toggle_play();
-                    cx.notify();
-                });
-            },
-        );
-        let weak = cx.entity().downgrade();
-        let reveal = setup::button(
-            "reveal-recording",
-            t("Show in Finder", "在访达中显示").into(),
-            None,
-            &theme,
-            move |cx| {
-                let _ = weak.update(cx, |this, _| this.reveal_selected());
-            },
-        );
-        let weak = cx.entity().downgrade();
-        let pointer_enabled = self.timeline.support == Support::Ready;
-        // A switch that can't switch says so instead of reading "Off".
-        let pointer_title = if pointer_enabled {
-            tf!(
-                "Show Pointer: {}",
-                "显示指针：{}",
-                if self.show_pointer {
-                    t("On", "开")
-                } else {
-                    t("Off", "关")
-                }
+        div()
+            .flex()
+            .flex_col()
+            .w(px(240.))
+            .h_full()
+            .p(px(12.))
+            .gap(px(10.))
+            .border_r_1()
+            .border_color(theme.card_border)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(t("Recordings", "录制回看"))
+                    .child(refresh),
             )
-        } else {
-            t("Pointer Unavailable", "无法显示指针").to_string()
-        };
-        let toggle = setup::button(
-            "recording-pointer",
-            pointer_title.into(),
-            (self.show_pointer && pointer_enabled).then_some(theme.accent),
-            &theme,
-            move |cx| {
-                let _ = weak.update(cx, |this, cx| {
-                    if this.timeline.support == Support::Ready {
-                        this.show_pointer = !this.show_pointer;
-                    }
-                    // Do not seek, pause, replace or recreate the AVPlayer here.
-                    cx.notify();
-                });
-            },
-        );
+            .child(div().text_size(px(11.)).text_color(theme.secondary).child(
+                if self.library_error {
+                    t(
+                        "Could not read the recordings folder.",
+                        "无法读取录制文件夹。",
+                    )
+                } else if self.files.is_empty() && !self.loading_library {
+                    t("No recordings yet", "还没有录制")
+                } else if self.files.len() == 2000 {
+                    t(
+                        "The list is limited to 2,000 videos.",
+                        "列表最多显示 2,000 段视频。",
+                    )
+                } else {
+                    ""
+                },
+            ))
+            .child(
+                div()
+                    .id("recording-list")
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .overflow_y_scroll()
+                    .gap(px(4.))
+                    .children(rows),
+            )
+    }
+
+    fn render_seek_bar(
+        &self,
+        shown: f64,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
         let layout = self.seek_bounds.clone();
         let fraction = if self.duration > 0.0 {
             (shown / self.duration).clamp(0.0, 1.0) as f32
         } else {
             0.0
         };
-        let seek = div()
+        div()
             .id("recording-seek")
             .role(gpui::Role::Slider)
             .aria_label(t("Seek recording", "跳转录制进度"))
@@ -541,29 +531,128 @@ impl Render for Recordings {
                             .rounded_full()
                             .bg(theme.accent),
                     ),
-            );
-        let pointer_note = if self.loading_timeline {
-            t("Loading pointer timeline…", "正在载入指针时间线…")
-        } else {
-            match self.timeline.support {
-                Support::Ready => t(
-                    "Pointer is hidden during Takeover. User pointer movements were not recorded.",
-                    "接手期间隐藏指针。录制未保存用户的指针轨迹。",
-                ),
-                Support::Legacy => t(
-                    "This older timeline has no reliable pointer timing or coordinates. Video playback is available.",
-                    "旧版时间线缺少可靠的指针时间或坐标。视频仍可播放。",
-                ),
-                Support::Missing => t(
-                    "No pointer timeline. Video playback is available.",
-                    "没有指针时间线。视频仍可播放。",
-                ),
-                Support::Invalid | Support::TooLarge => t(
-                    "The pointer timeline is incomplete, damaged, unsupported or too large. Video playback is available.",
-                    "指针时间线不完整、损坏、不受支持或过大。视频仍可播放。",
-                ),
+            )
+    }
+
+    fn render_controls(&self, shown: f64, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
+        let weak = cx.entity().downgrade();
+        let play = setup::button(
+            "play-recording",
+            if self.playing {
+                t("Pause", "暂停")
+            } else {
+                t("Play", "播放")
             }
+            .into(),
+            Some(theme.accent),
+            theme,
+            move |cx| {
+                let _ = weak.update(cx, |this, cx| {
+                    this.toggle_play();
+                    cx.notify();
+                });
+            },
+        );
+        let weak = cx.entity().downgrade();
+        let reveal = setup::button(
+            "reveal-recording",
+            t("Show in Finder", "在访达中显示").into(),
+            None,
+            theme,
+            move |cx| {
+                let _ = weak.update(cx, |this, _| this.reveal_selected());
+            },
+        );
+        let weak = cx.entity().downgrade();
+        let pointer_enabled = self.timeline.support == Support::Ready;
+        // A switch that can't switch says so instead of reading "Off".
+        let pointer_title = if pointer_enabled {
+            tf!(
+                "Show Pointer: {}",
+                "显示指针：{}",
+                if self.show_pointer {
+                    t("On", "开")
+                } else {
+                    t("Off", "关")
+                }
+            )
+        } else {
+            t("Pointer Unavailable", "无法显示指针").to_string()
         };
+        let toggle = setup::button(
+            "recording-pointer",
+            pointer_title.into(),
+            (self.show_pointer && pointer_enabled).then_some(theme.accent),
+            theme,
+            move |cx| {
+                let _ = weak.update(cx, |this, cx| {
+                    if this.timeline.support == Support::Ready {
+                        this.show_pointer = !this.show_pointer;
+                    }
+                    // Do not seek, pause, replace or recreate the AVPlayer here.
+                    cx.notify();
+                });
+            },
+        );
+        div()
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .child(play)
+            .child(format!("{} / {}", time(shown), time(self.duration)))
+            .child(div().flex_1())
+            .when(self.selected.is_some(), |d| d.child(reveal))
+            .child(toggle)
+    }
+
+    fn pointer_note(&self) -> &'static str {
+        if self.loading_timeline {
+            return t("Loading pointer timeline…", "正在载入指针时间线…");
+        }
+        match self.timeline.support {
+            Support::Ready => t(
+                "Pointer is hidden during Takeover. User pointer movements were not recorded.",
+                "接手期间隐藏指针。录制未保存用户的指针轨迹。",
+            ),
+            Support::Legacy => t(
+                "This older timeline has no reliable pointer timing or coordinates. Video playback is available.",
+                "旧版时间线缺少可靠的指针时间或坐标。视频仍可播放。",
+            ),
+            Support::Missing => t(
+                "No pointer timeline. Video playback is available.",
+                "没有指针时间线。视频仍可播放。",
+            ),
+            Support::Invalid | Support::TooLarge => t(
+                "The pointer timeline is incomplete, damaged, unsupported or too large. Video playback is available.",
+                "指针时间线不完整、损坏、不受支持或过大。视频仍可播放。",
+            ),
+        }
+    }
+}
+
+impl Render for Recordings {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = theme::theme(window);
+        if !self.focused {
+            window.focus(&self.focus, cx);
+            self.focused = true;
+        }
+        self.sync_player(window);
+        let video_size = self.video_size();
+        // While the bar is held, show the dragged time, and the pointer there.
+        let shown = self.scrub.shown(self.seconds);
+        let sample = self.timeline.sample(
+            shown,
+            self.show_pointer
+                && !self.error
+                && self.status != playback::Status::Failed
+                && self.frame.is_some(),
+        );
+        let picture = self.render_picture();
+        let sidebar = self.render_sidebar(&theme, cx);
+        let seek = self.render_seek_bar(shown, &theme, cx);
+        let controls = self.render_controls(shown, &theme, cx);
+        let pointer_note = self.pointer_note();
         div()
             .id("recordings")
             .track_focus(&self.focus)
@@ -575,52 +664,7 @@ impl Render for Recordings {
             .bg(theme.card)
             .text_color(theme.label)
             .text_size(px(13.))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .w(px(240.))
-                    .h_full()
-                    .p(px(12.))
-                    .gap(px(10.))
-                    .border_r_1()
-                    .border_color(theme.card_border)
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(t("Recordings", "录制回看"))
-                            .child(refresh),
-                    )
-                    .child(div().text_size(px(11.)).text_color(theme.secondary).child(
-                        if self.library_error {
-                            t(
-                                "Could not read the recordings folder.",
-                                "无法读取录制文件夹。",
-                            )
-                        } else if self.files.is_empty() && !self.loading_library {
-                            t("No recordings yet", "还没有录制")
-                        } else if self.files.len() == 2000 {
-                            t(
-                                "The list is limited to 2,000 videos.",
-                                "列表最多显示 2,000 段视频。",
-                            )
-                        } else {
-                            ""
-                        },
-                    ))
-                    .child(
-                        div()
-                            .id("recording-list")
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .overflow_y_scroll()
-                            .gap(px(4.))
-                            .children(rows),
-                    ),
-            )
+            .child(sidebar)
             .child(
                 div()
                     .flex()
@@ -643,17 +687,7 @@ impl Render for Recordings {
                             .child(pointer::playback_layer(sample, video_size, theme.accent)),
                     )
                     .child(seek)
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(12.))
-                            .child(play)
-                            .child(format!("{} / {}", time(shown), time(self.duration)))
-                            .child(div().flex_1())
-                            .when(self.selected.is_some(), |d| d.child(reveal))
-                            .child(toggle),
-                    )
+                    .child(controls)
                     .child(
                         div()
                             .text_size(px(11.))
