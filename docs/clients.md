@@ -4,6 +4,8 @@ Agent Screen works with any MCP client that starts a local stdio server. The ser
 
 `AgentScreen mcp install` registers it with Claude Code and Codex. For any other client, add it by hand as below. After adding it, start a new session or restart the client, since clients load MCP servers when they start.
 
+Some calls wait for the user: `wait_for_control`, `request_help`, `request_control` and `place_window` for a user's window wait up to 600 s. Give the client a tool timeout above that, such as 700 s, or those calls fail in the client while the request stays open in the app. When the app isn't running, the first call starts it and can take 15 s. The entries below set both where the client's default is shorter.
+
 ## Setup by client
 
 **Claude Code.** `AgentScreen mcp install`, or by hand:
@@ -12,12 +14,16 @@ Agent Screen works with any MCP client that starts a local stdio server. The ser
 claude mcp add --scope user agent-screen -- "/Applications/Agent Screen.app/Contents/MacOS/AgentScreen" mcp
 ```
 
-**Codex: CLI, IDE extension and desktop app.** They share `~/.codex/config.toml`, which `AgentScreen mcp install` writes ([Codex MCP docs](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)):
+**Codex: CLI, IDE extension and desktop app.** They share `~/.codex/config.toml`, which `AgentScreen mcp install` writes ([Codex MCP docs](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)). Codex stops a tool call after 60 s and a server start after 10 s by default. Running install again sets only `command` and `args` and adds a missing timeout; your own keys in the entry, such as `env`, `enabled` or tool approvals, stay.
 
 ```toml
 [mcp_servers.agent-screen]
 command = "/Applications/Agent Screen.app/Contents/MacOS/AgentScreen"
 args = ["mcp"]
+# wait_for_control can wait up to 10 minutes for the user.
+tool_timeout_sec = 700
+# A cold start of the app can take 15 s.
+startup_timeout_sec = 30
 ```
 
 **Cursor, editor and CLI.** `~/.cursor/mcp.json` for every project, or `.cursor/mcp.json` in one. Cursor's CLI loads a project's server only after `cursor-agent mcp enable agent-screen`.
@@ -33,7 +39,7 @@ args = ["mcp"]
 }
 ```
 
-**Gemini CLI.** The same `mcpServers` entry in `~/.gemini/settings.json`, or `.gemini/settings.json` in a project ([Gemini CLI MCP docs](https://github.com/google-gemini/gemini-cli/blob/main/docs/tools/mcp-server.md)).
+**Gemini CLI.** The same `mcpServers` entry with `"timeout": 700000` added, in `~/.gemini/settings.json`, or `.gemini/settings.json` in a project ([Gemini CLI MCP docs](https://github.com/google-gemini/gemini-cli/blob/main/docs/tools/mcp-server.md)). Gemini CLI's default timeout is 600,000 ms, the same as the longest wait, so a full wait would fail without it.
 
 **Claude Desktop.** The same `mcpServers` entry in `~/Library/Application Support/Claude/claude_desktop_config.json`, then quit Claude Desktop completely and open it again ([Connect to local MCP servers](https://modelcontextprotocol.io/docs/develop/connect-local-servers)).
 

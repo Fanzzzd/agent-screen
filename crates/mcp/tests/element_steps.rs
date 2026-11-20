@@ -423,3 +423,64 @@ async fn a_cancelled_wait_for_change_stops_the_apps_wait() {
         ["waitForChange", "cancelWaitForChange"]
     );
 }
+
+/// Every timeout_seconds is a number: a fractional wait reaches the app
+/// as given, where these waits once refused it as not an integer.
+#[tokio::test]
+async fn waits_take_fractional_timeouts() {
+    let fixture = Fixture::new();
+    let listener = fixture.listener();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read, mut write) = stream.into_split();
+        let mut lines = BufReader::new(read).lines();
+        let mut timeouts = Vec::new();
+        while let Some(line) = lines.next_line().await.unwrap() {
+            let request: Value = serde_json::from_str(&line).unwrap();
+            let result = match request["method"].as_str().unwrap() {
+                "agentReady" => json!({}),
+                "waitForControl" => {
+                    timeouts.push(request["params"]["timeoutSeconds"].clone());
+                    json!({"outcome": "agent", "resolution": "control"})
+                }
+                other => panic!("unexpected control method {other}"),
+            };
+            let reply = json!({"id": request["id"], "result": result});
+            write
+                .write_all(format!("{reply}\n").as_bytes())
+                .await
+                .unwrap();
+        }
+        timeouts
+    });
+    let mut client = fixture.child();
+    tokio::task::spawn_blocking(move || {
+        let mut input = client.0.stdin.take().unwrap();
+        let mut output = std::io::BufReader::new(client.0.stdout.take().unwrap());
+        let mut exchange = |request: Value| -> Value {
+            writeln!(input, "{request}").unwrap();
+            if request.get("id").is_none() {
+                return Value::Null;
+            }
+            let mut line = String::new();
+            output.read_line(&mut line).unwrap();
+            serde_json::from_str(&line).unwrap()
+        };
+        exchange(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"steps-test","version":"1"}}}));
+        exchange(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+        let tools = exchange(json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}));
+        for tool in tools["result"]["tools"].as_array().unwrap() {
+            if let Some(timeout) = tool["inputSchema"]["properties"].get("timeout_seconds") {
+                assert_eq!(timeout["type"], "number", "{}", tool["name"]);
+                assert!(timeout["maximum"].is_number(), "{}", tool["name"]);
+            }
+        }
+        let wait = exchange(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"wait_for_control","arguments":{"display_id":7,"timeout_seconds":1.5}}}));
+        assert_ne!(wait["result"]["isError"], true, "{wait}");
+        drop(input);
+        assert!(client.0.wait().unwrap().success());
+    })
+    .await
+    .unwrap();
+    assert_eq!(server.await.unwrap(), [json!(1.5)]);
+}

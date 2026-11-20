@@ -86,8 +86,19 @@ fn claude_runs(config: &str, exe: &str) -> bool {
         .is_some_and(|command| command.as_str() == Some(exe))
 }
 
+/// Whether Codex's config has an agent-screen server running `exe`.
 fn codex_runs(config: &str, exe: &str) -> bool {
-    !with_codex_entry(config, exe).1
+    config
+        .parse::<toml_edit::DocumentMut>()
+        .ok()
+        .and_then(|doc| {
+            let command = doc
+                .get("mcp_servers")?
+                .get(server_name(exe))?
+                .get("command")?;
+            Some(command.as_str() == Some(exe))
+        })
+        .unwrap_or(false)
 }
 
 /// Register `exe mcp` with every client found. Safe to run again: an entry
@@ -319,7 +330,8 @@ fn codex_config() -> Option<PathBuf> {
 
 fn codex(config: &Path, exe: &Path) -> Result<Done, String> {
     let text = std::fs::read_to_string(config).unwrap_or_default();
-    let (text, done) = with_codex_entry(&text, &exe.to_string_lossy());
+    let (text, done) = with_codex_entry(&text, &exe.to_string_lossy())
+        .map_err(|e| format!("could not update {}: {e}", config.display()))?;
     if !done {
         return Ok(Done::Already);
     }
@@ -328,40 +340,68 @@ fn codex(config: &Path, exe: &Path) -> Result<Done, String> {
     Ok(Done::AddedTo(config.to_path_buf()))
 }
 
-/// The config with Agent Screen's entry pointing at `exe`, and whether it
-/// changed. Other entries and comments stay as they are.
-fn with_codex_entry(text: &str, exe: &str) -> (String, bool) {
+/// Codex waits 60 s for a tool call by default, and wait_for_control can
+/// wait 10 minutes for the user.
+const TOOL_TIMEOUT: i64 = 700;
+/// Codex waits 10 s for a server to start by default, and the pipe waits
+/// up to 15 s for an app it starts (ADR 0021).
+const STARTUP_TIMEOUT: i64 = 30;
+
+/// The config with Agent Screen's entry running `exe`, and whether it
+/// changed. Sets only command and args, and each timeout the entry lacks:
+/// the user's own keys and subtables in it (env, approvals, enabled,
+/// a timeout they chose), other entries and comments stay as they are.
+/// A config that isn't valid TOML is left alone.
+fn with_codex_entry(text: &str, exe: &str) -> Result<(String, bool), String> {
+    use toml_edit::{Array, DocumentMut, Item, Table, value};
+    let mut doc: DocumentMut = text
+        .parse()
+        .map_err(|e| format!("it isn't valid TOML: {e}"))?;
     let name = server_name(exe);
-    let header = format!("[mcp_servers.{name}]");
-    let header = header.as_str();
-    let entry = format!(
-        "{header}\ncommand = {exe:?}\nargs = [\"mcp\"]\n# wait_for_control can wait up to 10 minutes for the user.\ntool_timeout_sec = 700\n"
-    );
-    let Some(start) = text.find(header) else {
-        let gap = if text.is_empty() || text.ends_with("\n\n") {
-            ""
-        } else if text.ends_with('\n') {
-            "\n"
-        } else {
-            "\n\n"
-        };
-        return (format!("{text}{gap}{entry}"), true);
-    };
-    // The entry runs to the next table that isn't one of its own subtables.
-    let body = &text[start + header.len()..];
-    let end = body
-        .match_indices("\n[")
-        .find(|(i, _)| !body[i + 1..].starts_with(&format!("[mcp_servers.{name}.")))
-        .map_or(text.len(), |(i, _)| start + header.len() + i + 1);
-    let old = &text[start..end];
-    if old.contains(&format!("command = {exe:?}")) {
-        return (text.to_string(), false);
+    let servers = doc.entry("mcp_servers").or_insert_with(|| {
+        // Only [mcp_servers.<name>] headers, as Codex's docs write them.
+        let mut table = Table::new();
+        table.set_implicit(true);
+        Item::Table(table)
+    });
+    let servers = servers
+        .as_table_like_mut()
+        .ok_or("mcp_servers isn't a table")?;
+    if !servers.contains_key(name) {
+        let mut table = Table::new();
+        if !text.trim().is_empty() {
+            table.decor_mut().set_prefix("\n");
+        }
+        servers.insert(name, Item::Table(table));
     }
-    let blank = if end < text.len() { "\n" } else { "" };
-    (
-        format!("{}{entry}{blank}{}", &text[..start], &text[end..]),
-        true,
-    )
+    let entry = servers
+        .get_mut(name)
+        .and_then(Item::as_table_like_mut)
+        .ok_or_else(|| format!("mcp_servers.{name} isn't a table"))?;
+    if entry.get("command").and_then(Item::as_str) != Some(exe) {
+        entry.insert("command", value(exe));
+    }
+    let args = entry.get("args").and_then(Item::as_array);
+    if args.is_none_or(|a| a.len() != 1 || a.get(0).and_then(|v| v.as_str()) != Some("mcp")) {
+        entry.insert("args", value(Array::from_iter(["mcp"])));
+    }
+    if !entry.contains_key("tool_timeout_sec") {
+        entry.insert("tool_timeout_sec", value(TOOL_TIMEOUT));
+        if let Some(mut key) = entry.key_mut("tool_timeout_sec") {
+            key.leaf_decor_mut()
+                .set_prefix("# wait_for_control can wait up to 10 minutes for the user.\n");
+        }
+    }
+    if !entry.contains_key("startup_timeout_sec") {
+        entry.insert("startup_timeout_sec", value(STARTUP_TIMEOUT));
+        if let Some(mut key) = entry.key_mut("startup_timeout_sec") {
+            key.leaf_decor_mut()
+                .set_prefix("# A cold start of the app can take 15 s.\n");
+        }
+    }
+    let out = doc.to_string();
+    let changed = out != text;
+    Ok((out, changed))
 }
 
 #[cfg(test)]
@@ -386,7 +426,7 @@ mod tests {
             ),
             "a project list naming it isn't a registration"
         );
-        let (codex, _) = with_codex_entry("", EXE);
+        let (codex, _) = with_codex_entry("", EXE).unwrap();
         assert!(codex_runs(&codex, EXE));
         assert!(!codex_runs(&codex, "/Users/me/old/Agent Screen"));
         assert!(!codex_runs("", EXE));
@@ -395,8 +435,8 @@ mod tests {
     #[test]
     fn the_development_build_registers_beside_the_installed_app() {
         let dev = "/Users/me/agent-screen/target/Agent Screen Dev.app/Contents/MacOS/AgentScreen";
-        let (text, _) = with_codex_entry("", EXE);
-        let (both, changed) = with_codex_entry(&text, dev);
+        let (text, _) = with_codex_entry("", EXE).unwrap();
+        let (both, changed) = with_codex_entry(&text, dev).unwrap();
         assert!(changed);
         assert!(
             both.contains("[mcp_servers.agent-screen]")
@@ -452,25 +492,71 @@ mod tests {
 
     #[test]
     fn appends_to_a_config_without_it() {
-        let (text, changed) = with_codex_entry("model = \"o3\"\n", EXE);
+        let (text, changed) = with_codex_entry("model = \"o3\"\n", EXE).unwrap();
         assert!(changed);
-        assert!(text.starts_with("model = \"o3\"\n\n[mcp_servers.agent-screen]\n"));
-        assert!(text.contains(&format!("command = {EXE:?}")));
+        assert_eq!(
+            text,
+            format!(
+                "model = \"o3\"\n\n[mcp_servers.agent-screen]\ncommand = {EXE:?}\nargs = [\"mcp\"]\n# wait_for_control can wait up to 10 minutes for the user.\ntool_timeout_sec = 700\n# A cold start of the app can take 15 s.\nstartup_timeout_sec = 30\n"
+            )
+        );
     }
 
     #[test]
     fn leaves_a_correct_entry_alone() {
-        let (once, _) = with_codex_entry("", EXE);
-        assert_eq!(with_codex_entry(&once, EXE), (once.clone(), false));
+        let (once, _) = with_codex_entry("", EXE).unwrap();
+        assert_eq!(with_codex_entry(&once, EXE), Ok((once.clone(), false)));
     }
 
     #[test]
-    fn replaces_an_entry_pointing_elsewhere_and_keeps_the_rest() {
-        let before = "[a]\nx = 1\n\n[mcp_servers.agent-screen]\ncommand = \"/old\"\n\n[mcp_servers.agent-screen.env]\nA = \"1\"\n\n[b]\ny = 2\n";
-        let (text, changed) = with_codex_entry(before, EXE);
+    fn repoints_an_entry_and_keeps_the_users_settings() {
+        let before = "[a]\nx = 1\n\n[mcp_servers.agent-screen]\ncommand = \"/old\"\nargs = [\"mcp\"]\nenabled = false\ntool_timeout_sec = 900\n\n[mcp_servers.agent-screen.env]\nA = \"1\"\n\n[mcp_servers.agent-screen.tools.computer]\napproval_mode = \"approve\"\n\n[b]\ny = 2\n";
+        let (text, changed) = with_codex_entry(before, EXE).unwrap();
         assert!(changed);
-        assert!(text.starts_with("[a]\nx = 1\n\n[mcp_servers.agent-screen]\n"));
-        assert!(!text.contains("/old") && !text.contains("A = \"1\""));
-        assert!(text.ends_with("tool_timeout_sec = 700\n\n[b]\ny = 2\n"));
+        assert!(!text.contains("/old"));
+        assert!(codex_runs(&text, EXE));
+        for kept in [
+            "[a]\nx = 1\n",
+            "enabled = false\n",
+            "tool_timeout_sec = 900\n",
+            "[mcp_servers.agent-screen.env]\nA = \"1\"\n",
+            "approval_mode = \"approve\"\n",
+            "[b]\ny = 2\n",
+        ] {
+            assert!(text.contains(kept), "lost {kept:?} from:\n{text}");
+        }
+        assert!(!text.contains("tool_timeout_sec = 700"));
+        assert!(text.contains("startup_timeout_sec = 30"));
+    }
+
+    #[test]
+    fn adds_the_timeouts_an_older_entry_lacks() {
+        let before = format!(
+            "[mcp_servers.agent-screen]\ncommand = {EXE:?}\nargs = [\"mcp\"]\ntool_timeout_sec = 700\n"
+        );
+        assert!(codex_runs(&before, EXE), "it already runs this copy");
+        let (text, changed) = with_codex_entry(&before, EXE).unwrap();
+        assert!(changed);
+        assert!(text.starts_with(&before) && text.ends_with("startup_timeout_sec = 30\n"));
+    }
+
+    #[test]
+    fn finds_a_quoted_or_inline_entry_instead_of_adding_another() {
+        for before in [
+            "[mcp_servers.\"agent-screen\"]\ncommand = \"/old\"\n".to_string(),
+            "[mcp_servers]\nagent-screen = { command = \"/old\", args = [\"mcp\"] }\n".to_string(),
+        ] {
+            let (text, changed) = with_codex_entry(&before, EXE).unwrap();
+            assert!(changed);
+            assert_eq!(text.matches("agent-screen").count(), 1, "{text}");
+            assert!(codex_runs(&text, EXE), "{text}");
+            assert!(text.parse::<toml_edit::DocumentMut>().is_ok());
+        }
+    }
+
+    #[test]
+    fn leaves_a_config_it_cannot_read_alone() {
+        assert!(with_codex_entry("[mcp_servers\ncommand = ", EXE).is_err());
+        assert!(!codex_runs("[mcp_servers\n", EXE));
     }
 }
