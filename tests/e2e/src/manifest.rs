@@ -305,6 +305,7 @@ pub const SCRIPTS: &[Script] = &[
     script("realdrag", &[InputQueue], Full, Real, 1).hands_off(),
     script("recording", &[Recording], Core, Hook, 1),
     script("reopened", &[Windows], Full, Agent, 1).hands_off(),
+    script("reportissue", &[Settings], Full, Hook, 0).hands_off(),
     script("requestcontrol", &[Takeover], Full, Hook, 1).hands_off(),
     script("requestwindow", &[WindowAccess, Windows], Full, Hook, 2).hands_off(),
     script("restart", &[Displays, Windows], Full, Hook, 2).hands_off(),

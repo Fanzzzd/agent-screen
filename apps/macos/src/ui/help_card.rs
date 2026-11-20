@@ -37,15 +37,15 @@ use gpui::{
 };
 
 pub const WIDTH: f32 = 320.;
-const PADDING: f32 = 14.;
-const GAP: f32 = 8.;
-const TITLE: f32 = 20.;
+pub(super) const PADDING: f32 = 14.;
+pub(super) const GAP: f32 = 8.;
+pub(super) const TITLE: f32 = 20.;
 /// Two lines of the reason; the tooltip has all of it.
-const REASON: f32 = 36.;
+pub(super) const REASON: f32 = 36.;
 const LABEL: f32 = 16.;
-const BUTTONS: f32 = 30.;
+pub(super) const BUTTONS: f32 = 30.;
 const MAX_PICTURE: f32 = 184.;
-const RADIUS: f32 = 18.;
+pub(super) const RADIUS: f32 = 18.;
 
 /// The card's height for a Window Request, which has no picture.
 pub const REQUEST_HEIGHT: f32 = PADDING * 2. + TITLE + REASON + LABEL + BUTTONS + GAP * 3.;
@@ -927,7 +927,7 @@ impl HelpCard {
 
 /// Chinese sets a little tighter: its glyphs fill the em, so Latin
 /// leading reads loose.
-fn zh() -> bool {
+pub(super) fn zh() -> bool {
     crate::i18n::lang() == crate::i18n::Lang::ZhHans
 }
 
@@ -1367,7 +1367,12 @@ pub fn tabular() -> gpui::FontFeatures {
 
 /// The family's title row: an icon, one line of semibold text, and an optional
 /// pending-approval badge (#206).
-fn title_row(icon: &'static str, color: gpui::Hsla, title: String, asking: bool) -> gpui::Div {
+pub(super) fn title_row(
+    icon: &'static str,
+    color: gpui::Hsla,
+    title: String,
+    asking: bool,
+) -> gpui::Div {
     div()
         .flex_none()
         .h(px(TITLE))
@@ -1402,7 +1407,7 @@ fn title_row(icon: &'static str, color: gpui::Hsla, title: String, asking: bool)
 }
 
 /// The family's reason: up to two lines, the rest in its tooltip.
-fn reason_text(reason: String, zh: bool) -> gpui::Stateful<gpui::Div> {
+pub(super) fn reason_text(reason: String, zh: bool) -> gpui::Stateful<gpui::Div> {
     div()
         .id("help-reason")
         .relative()
@@ -1838,11 +1843,13 @@ pub enum Tone {
     Plain,
     /// Red text with a stop mark: ending an Input Grant.
     Stop,
+    /// The accent color, with no mark: the Bug Report Card's Open on GitHub.
+    Accent,
 }
 
 /// A pill-shaped button. The Help Card's buttons record where they were
 /// painted; see `painted_buttons`.
-fn card_button(
+pub(super) fn card_button(
     id: &'static str,
     title: impl Into<SharedString>,
     tone: Tone,
@@ -1876,11 +1883,12 @@ pub fn button(
         Tone::Orange => (theme.orange.opacity(0.9), theme.orange, gpui::white()),
         Tone::Plain => (theme.control, theme.control_hover, theme.label),
         Tone::Stop => (theme.red.opacity(0.12), theme.red.opacity(0.2), theme.red),
+        Tone::Accent => (theme.accent.opacity(0.9), theme.accent, gpui::white()),
     };
     let icon = match tone {
         Tone::Orange => Some("icons/hand.svg"),
         Tone::Stop => Some("icons/stop.svg"),
-        Tone::Plain => None,
+        Tone::Plain | Tone::Accent => None,
     };
     div()
         .id(id)

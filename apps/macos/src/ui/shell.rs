@@ -7,6 +7,7 @@ use super::input_bar::{self, InputBar};
 use super::peek::{self, Peek};
 use super::pointer;
 use super::recordings::Recordings;
+use super::report_card::{self, ReportCard};
 use super::setup::{self, Setup};
 use super::stream::Streams;
 use super::viewer::{self, Sheet, Viewer, WindowMenu};
@@ -22,6 +23,7 @@ use crate::model::{DEFAULT_SIZE, DisplayId, EndReason, GivenBack, Rect, WindowTa
 use agent_screen_model::access::Authority;
 use agent_screen_model::card;
 use agent_screen_model::peek as peek_intent;
+use agent_screen_model::report::{Filed, Filing, Reports, Via};
 use agent_screen_model::request::{
     Answer, Ask, Kind, NamedWindow, REPLY_CHARS, RequestId, Unanswered,
 };
@@ -191,6 +193,16 @@ pub struct Shell {
     card_input: bool,
     /// Where the card's window goes, last time it was placed or fitted.
     card_frame: Option<NSRect>,
+    /// The Bug Report Card (ADR 0024), and the report it shows.
+    report_card: Option<(WindowHandle<ReportCard>, Retained<NSWindow>)>,
+    report_shown: Option<report_card::Shown>,
+    /// The card shows the whole report, not just its title.
+    report_expanded: bool,
+    /// Bug reports: the user's setting and consent, what waits for it and
+    /// what was opened.
+    pub reports: Reports,
+    /// Reports `debugShow` queued: Open on GitHub drops them unopened.
+    report_previews: HashSet<u64>,
     /// The Input Bar, and whether it shows.
     bar: Option<(WindowHandle<InputBar>, Retained<NSWindow>)>,
     bar_shown: bool,
@@ -479,6 +491,11 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             setup: None,
             recordings: None,
             agent_ready: Vec::new(),
+            report_card: None,
+            report_shown: None,
+            report_expanded: false,
+            reports: crate::reports::load(),
+            report_previews: HashSet::new(),
             waiting: None,
             restart: false,
             debug_menu_at: None,
@@ -522,6 +539,19 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
         .expect("Help Card window");
     native::style_panel(&card_ns, native::LEVEL_POP_UP_MENU);
     native::set_keyable_while_typing(&card_ns);
+    let report = {
+        let weak = weak.clone();
+        cx.open_window(panel_options(), move |_, cx| {
+            cx.new(|_| ReportCard::new(weak))
+        })?
+    };
+    let report_ns = report
+        .update(cx, |_, window, _| native::ns_window(window))?
+        .expect("Bug Report Card window");
+    // A non-activating panel that never takes the keyboard, as the Input
+    // Bar: its buttons leave the user's app in front.
+    native::style_panel(&report_ns, native::LEVEL_POP_UP_MENU);
+    native::set_keyable(&report_ns, false);
     let bar = {
         let (weak, core) = (weak.clone(), core.clone());
         cx.open_window(panel_options(), move |window, cx| {
@@ -553,6 +583,7 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
         shell.peek = Some((peek, peek_ns));
         shell.viewer = Some((viewer, viewer_ns));
         shell.card = Some((card, card_ns));
+        shell.report_card = Some((report, report_ns));
         shell.bar = Some((bar, bar_ns));
         shell.check_aerospace(cx);
     });
@@ -1022,10 +1053,16 @@ impl Shell {
 
     // MARK: Help Card
 
+    /// Show the Help Card, or the Bug Report Card when no Help Card shows.
+    fn sync_card(&mut self, cx: &mut Context<Self>) {
+        self.sync_help_card(cx);
+        self.sync_report_card(cx);
+    }
+
     /// Show the Help Card for the first open Help Request the user hasn't
     /// put off, or hide it. It steps aside for Peek, and for the Viewer
     /// showing that display.
-    fn sync_card(&mut self, cx: &mut Context<Self>) {
+    fn sync_help_card(&mut self, cx: &mut Context<Self>) {
         let Some((card, window)) = self.card.clone() else {
             return;
         };
@@ -2887,6 +2924,24 @@ impl Shell {
             "access" => self.open_viewer(id, cx),
             "connect" => self.menu(MenuAction::ConnectAgents, cx),
             "wallpaper" => self.choose_wallpaper(cx),
+            // The Bug Report Card with a report from no agent, and its
+            // buttons as a click presses them. Nothing opens.
+            "report-card" => self.preview_report(cx),
+            "report-card-open" | "report-card-later" => {
+                let id = self
+                    .reports
+                    .pending()
+                    .map(|p| p.id)
+                    .ok_or("no report waits")?;
+                if surface == "report-card-open" {
+                    self.allow_report(id, cx);
+                } else {
+                    self.decline_report(id, cx);
+                }
+            }
+            "report-card-more" => self.toggle_report_details(cx),
+            "report-card-off" => self.set_reports_automatic(false, cx),
+            "report-card-on" => self.set_reports_automatic(true, cx),
             "click" => self.native(
                 Native::IconClicked {
                     right: false,
@@ -3088,6 +3143,10 @@ impl Shell {
             t("Report a Problem…", "报告问题…"),
             MenuAction::ReportProblem,
         );
+        menu.submenu(
+            t("Agent Bug Reports", "Agent 问题报告"),
+            self.reports_menu(),
+        );
         if let Some(version) = update::pending() {
             menu.action(
                 &tf!("Restart to Update to {version}…", "重启以更新到 {version}…"),
@@ -3277,6 +3336,15 @@ impl Shell {
             MenuAction::OpenSettings => self.open_setup(cx),
             MenuAction::OpenRecordings => self.open_recordings(cx),
             MenuAction::ReportProblem => self.report_problem(cx),
+            MenuAction::OpenReported { index } => {
+                if let Some(report) = self.reports.reported().nth(index) {
+                    crate::reports::open(&report.url);
+                }
+            }
+            MenuAction::ToggleReports => {
+                let on = !self.reports.automatic;
+                self.set_reports_automatic(on, cx);
+            }
             MenuAction::CheckForUpdates => update::check(),
             MenuAction::InstallUpdate => self.install_update(cx),
             MenuAction::OpenAeroSpaceConfig => {
@@ -3742,6 +3810,215 @@ impl Shell {
         self.hide_peek(cx);
         self.peek_intent.stop();
         cx.quit();
+    }
+
+    // MARK: Bug reports
+
+    /// An agent filed a bug report with `report_issue` (ADR 0024). It waits
+    /// on the Bug Report Card: nothing opens until the user clicks.
+    pub fn file_report(&mut self, filing: Filing, via: Via, cx: &mut Context<Self>) -> Filed {
+        let filed = self.reports.file(filing, via, crate::reports::now_ms());
+        match &filed {
+            Filed::Waiting(_) => log::info!("a bug report waits on the card"),
+            Filed::Send => log::info!("the relay may file a bug report"),
+            _ => {}
+        }
+        crate::reports::save(&self.reports);
+        self.sync_card(cx);
+        filed
+    }
+
+    /// Open on GitHub on the card: the user's click opens this report's
+    /// form, and only this one. A preview's report opens nothing and gives
+    /// no consent.
+    pub fn allow_report(&mut self, id: u64, cx: &mut Context<Self>) {
+        if self.report_previews.remove(&id) {
+            self.reports.decline(id);
+        } else {
+            let relay = agent_screen_mcp::report::relay_on();
+            if let Some(url) = self.reports.open(id, relay, crate::reports::now_ms())
+                && !url.is_empty()
+            {
+                crate::reports::open(&url);
+            }
+            crate::reports::save(&self.reports);
+        }
+        self.sync_card(cx);
+    }
+
+    /// Not Now on the card: the report goes unsent.
+    pub fn decline_report(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.report_previews.remove(&id);
+        self.reports.decline(id);
+        self.sync_card(cx);
+    }
+
+    /// Show Report or Hide Report on the card.
+    pub fn toggle_report_details(&mut self, cx: &mut Context<Self>) {
+        self.report_expanded = !self.report_expanded;
+        self.sync_card(cx);
+    }
+
+    /// The setting: off drops what waits and sends nothing more.
+    pub fn set_reports_automatic(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.reports.set_automatic(on);
+        if !on {
+            self.report_previews.clear();
+        }
+        crate::reports::save(&self.reports);
+        self.sync_card(cx);
+        self.push_setup(cx);
+    }
+
+    /// A report for `debugShow` on the card, from no agent: Open on GitHub
+    /// drops it unopened.
+    fn preview_report(&mut self, cx: &mut Context<Self>) {
+        let id = self.reports.queue(Filing {
+            agent: "Codex".into(),
+            title: t(
+                "computer left_click on a button in [window title] did nothing",
+                "computer left_click 点击 [window title] 里的按钮无反应",
+            )
+            .into(),
+            fingerprint: format!("agentscreen-preview-{}", self.report_previews.len()),
+            url: String::new(),
+            body: PREVIEW_BODY.into(),
+        });
+        self.report_previews.insert(id);
+        self.sync_card(cx);
+    }
+
+    /// The Bug Report Card for the first report waiting, or hide it. It
+    /// waits while the Help Card or Peek shows.
+    fn sync_report_card(&mut self, cx: &mut Context<Self>) {
+        let Some((card, window)) = self.report_card.clone() else {
+            return;
+        };
+        let free = self.card_shown.is_none() && !self.peek_shown;
+        // Another report starts with its details folded.
+        let front = self.reports.pending().map(|p| p.id);
+        if front != self.report_shown.as_ref().map(|s| s.id) {
+            self.report_expanded = false;
+        }
+        let want = self
+            .reports
+            .pending()
+            .filter(|_| free)
+            .map(|p| report_card::Shown {
+                id: p.id,
+                agent: p.filing.agent.clone(),
+                title: p.filing.title.clone(),
+                body: p.filing.body.clone(),
+                more: self.reports.pending_count().saturating_sub(1),
+                expanded: self.report_expanded,
+                relay: agent_screen_mcp::report::relay_on(),
+            });
+        if want == self.report_shown {
+            return;
+        }
+        let was = self.report_shown.clone();
+        self.report_shown = want.clone();
+        let _ = card.update(cx, |card, _, cx| {
+            card.shown = want.clone();
+            cx.notify();
+        });
+        let Some(want) = want else {
+            native::order_out(&window);
+            return;
+        };
+        let Some((screen, _)) = self.host_screen() else {
+            log::debug!("bug report card: no screen to show it on");
+            return;
+        };
+        let (w, h) = (
+            f64::from(help_card::WIDTH),
+            f64::from(report_card::height(want.expanded)),
+        );
+        let anchor = self.anchor();
+        let (mid, top) = (
+            anchor.origin.x + anchor.size.width / 2.0,
+            anchor.origin.y - 6.0,
+        );
+        let x = (mid - w / 2.0)
+            .min(screen.origin.x + screen.size.width - w - 8.0)
+            .max(screen.origin.x + 8.0);
+        let frame = rect(x.round(), (top - h).round(), w, h);
+        match was {
+            // The same card grew or shrank: it stays where it is, with its
+            // top edge in place.
+            Some(was) if was.expanded != want.expanded => {
+                native::later(move || {
+                    let now = native::frame(&window);
+                    let top = now.origin.y + now.size.height;
+                    native::set_frame(&window, rect(now.origin.x, top - h, w, h));
+                });
+            }
+            // Another report in the same card: its content changed, not its place.
+            Some(_) => {}
+            None => native::later(move || {
+                native::set_alpha(&window, 0.0);
+                native::set_frame(&window, offset(frame, 10.0));
+                native::order_front(&window);
+                native::animate(&window, frame, 1.0, 0.24);
+            }),
+        }
+    }
+
+    /// The Bug Report Card for `debugCard`: the report it shows, how many
+    /// wait, the setting and the consent.
+    pub fn debug_reports(&self) -> serde_json::Value {
+        serde_json::json!({
+            "shown": self.report_shown.as_ref().map(|s| s.id),
+            "expanded": self.report_shown.as_ref().is_some_and(|s| s.expanded),
+            "relayConsent": self.reports.relay_consent,
+            "pending": self.reports.pending_count(),
+            "automatic": self.reports.automatic,
+            "consent": self.reports.consent,
+            "reported": self.reports.reported().count(),
+            "free": self.card_shown.is_none() && !self.peek_shown,
+        })
+    }
+
+    /// Whether AeroSpace runs, for a bug report.
+    pub fn aerospace_running(&self) -> bool {
+        self.aerospace.is_some()
+    }
+
+    /// The menu's Agent Bug Reports: what waits, what was opened, and the
+    /// setting.
+    fn reports_menu(&self) -> native::Menu {
+        fn short(title: &str) -> String {
+            if title.chars().count() <= 60 {
+                return title.to_string();
+            }
+            title.chars().take(59).collect::<String>() + "…"
+        }
+        let menu = native::Menu::new("Agent Bug Reports");
+        if let Some(waiting) = self.reports.pending() {
+            menu.disabled(&tf!(
+                "Waiting for Your OK: {}",
+                "等你确认：{}",
+                short(&waiting.filing.title)
+            ));
+        }
+        for (index, report) in self.reports.reported().enumerate() {
+            menu.action(
+                &tf!("Reported: {}", "已报告：{}", short(&report.title)),
+                MenuAction::OpenReported { index },
+            );
+        }
+        if self.reports.pending().is_some() || self.reports.reported().next().is_some() {
+            menu.separator();
+        }
+        menu.action(
+            if self.reports.automatic {
+                t("Turn Off Agent Bug Reports", "关闭 Agent 问题报告")
+            } else {
+                t("Turn On Agent Bug Reports", "开启 Agent 问题报告")
+            },
+            MenuAction::ToggleReports,
+        );
+        menu
     }
 
     // MARK: Permissions
@@ -4329,11 +4606,13 @@ impl Shell {
         let aerospace = self.aerospace;
         let pinned: Vec<String> = self.conflicts.iter().map(|(w, _)| w.clone()).collect();
         let wallpaper = crate::mac::app::custom_wallpaper();
+        let reports_on = self.reports.automatic;
         if handle
             .update(cx, |setup, _, cx| {
                 setup.aerospace = aerospace;
                 setup.pinned = pinned;
                 setup.wallpaper = wallpaper;
+                setup.reports_on = reports_on;
                 setup.status = status;
                 setup.notifications = notifications;
                 (setup.colorsync, setup.colorsync_busy, setup.colorsync_error) = colorsync;
@@ -5600,3 +5879,41 @@ mod peek_input_tests {
         assert_eq!(intent.mode(), Mode::Pinned);
     }
 }
+
+/// The report `debugShow report-card` shows, as a real one reads on the
+/// card: redacted, the agent's fields first. Reports are written in English.
+const PREVIEW_BODY: &str = "### Title
+
+computer left_click on a button in [window title] did nothing
+
+### Steps to reproduce
+
+1. Opened [file] in [window title]
+2. `computer` {\"action\":\"left_click\",\"coordinate\":[412,288],\"display_id\":5} → ok
+
+### Expected
+
+The button at 412, 288 is pressed.
+
+### Actual
+
+Nothing happened; the window at [host] kept its state.
+
+### Anything else
+
+Filed by the agent with report_issue. Reproducible: always. AeroSpace: no.
+Report fingerprint: agentscreen-0f3a9c21b7d4
+
+### App and MCP diagnostics, versions and builds
+
+Agent Screen 0.1.41 (e3ac2970127c)
+
+{ \"report_schema_version\": 1, \"collector\": \"mcp\" }
+
+### macOS version
+
+26.1
+
+### MCP client and agent
+
+codex-mcp-client 0.50.0";

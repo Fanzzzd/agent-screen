@@ -124,13 +124,59 @@ pub fn definitions() -> Vec<Value> {
             "Collect bug report diagnostics",
             &[
                 "Collect compiled build metadata for THIS MCP process and the responding Agent Screen app.",
-                "On a bug, collect this in the failing session and attach the report to a GitHub bug report.",
+                "For a report a person files by hand: collect this in the failing session and attach it to a GitHub bug report.",
+                "To report an Agent Screen bug yourself, call report_issue, which includes this report.",
                 "Works before create_display and preserves ongoing sessions. Does not start the app, send input,",
                 "change settings, restart clients, submit an issue or upload user content.",
                 "Missing or legacy apps and unknown builds are reported explicitly. See docs/REPORTING_BUGS.md.",
             ],
             object(json!({}), &[]),
             READ_ONLY,
+        ),
+        tool(
+            "report_issue",
+            "Report an Agent Screen bug",
+            &[
+                "Report a bug in Agent Screen itself: one of its tools failed, hung or did something other than its description says.",
+                "Not for bugs in the app you operate, and not for your own mistakes. Call it once per failure, in the session where it happened.",
+                "Agent Screen adds its version and build revision, the macOS version, your client's name and version, this session's diagnostics and its display-log lines.",
+                "Reports are public. It redacts known patterns (window titles on your displays, quoted text, links, host names, IP addresses, paths, file names, email addresses, keys and tokens, the user's name),",
+                "but it can't recognize every private word: write only about Agent Screen's behavior, and never put what the user typed or what a window showed in a field.",
+                "The report waits on the Bug Report Card under Agent Screen's menu bar icon, where the user reviews it; it leaves the Mac only when they click Open on GitHub",
+                "and submit the prefilled form. After the user has opened a report once, it first checks GitHub's public issues: a known open issue comes back as duplicate",
+                "with its number, and a bug fixed in a newer release as fixed_in_newer_release, so you ask the user to update. The result shows the report exactly as it",
+                "would be sent, and the status: waiting_for_user, duplicate, fixed_in_newer_release, already_reported, too_many or off. Tell the user what happened.",
+            ],
+            object(
+                json!({
+                    "title": { "type": "string", "description": "One line naming the failure, such as \"computer left_click on a Safari tab does nothing\"." },
+                    "steps": {
+                        "type": "array",
+                        "description": "What you did, in order, as sentences about Agent Screen's tools.",
+                        "items": { "type": "string" }
+                    },
+                    "calls": {
+                        "type": "array",
+                        "description": "The Agent Screen tool calls that led to the failure, in order. Arguments keep only handles, coordinates, actions and sizes; text, titles, URLs and paths are removed.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "tool": { "type": "string" },
+                                "arguments": { "type": "object" },
+                                "result": { "type": "string", "description": "What the call returned, shortened." }
+                            },
+                            "required": ["tool"]
+                        }
+                    },
+                    "expected": { "type": "string", "description": "What you expected to happen." },
+                    "actual": { "type": "string", "description": "What happened instead." },
+                    "reproducible": { "type": "string", "enum": ["always", "sometimes", "once", "unknown"], "description": "Whether doing it again fails again. Default unknown." },
+                    "tool": { "type": "string", "description": "The Agent Screen tool that failed, such as computer." },
+                    "error": { "type": "string", "description": "The error text that tool returned, exactly. Reports with the same tool and error count as the same failure." }
+                }),
+                &["title", "expected", "actual"],
+            ),
+            PLAIN,
         ),
         always_load(tool(
             "create_display",
@@ -2730,9 +2776,9 @@ mod tests {
     }
 
     #[test]
-    fn seventeen_tools_with_object_schemas() {
+    fn eighteen_tools_with_object_schemas() {
         let tools = definitions();
-        assert_eq!(tools.len(), 17);
+        assert_eq!(tools.len(), 18);
         let diagnostics = tools
             .iter()
             .find(|t| t["name"] == "get_diagnostics")
@@ -2743,6 +2789,13 @@ mod tests {
         for tool in &tools {
             assert_eq!(tool["inputSchema"]["type"], "object", "{}", tool["name"]);
         }
+        // Gemini's function-calling schema converter has refused anyOf.
+        let report = tools.iter().find(|t| t["name"] == "report_issue").unwrap();
+        let schema = report["inputSchema"].to_string();
+        assert!(
+            !schema.contains("anyOf") && !schema.contains("oneOf"),
+            "{schema}"
+        );
     }
 
     #[test]

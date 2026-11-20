@@ -281,7 +281,7 @@ fn every_protocol_version_gets_its_own_wire_shape() {
                 .contains("create_display")
         );
         let (names, listed) = client.tool_names();
-        assert_eq!(names.len(), 17, "{version}");
+        assert_eq!(names.len(), 18, "{version}");
         let list = &listed["result"];
         for field in ["resultType", "ttlMs", "cacheScope"] {
             assert!(
@@ -320,7 +320,7 @@ fn every_protocol_version_gets_its_own_wire_shape() {
             .contains("create_display")
     );
     let (names, listed) = client.tool_names();
-    assert_eq!(names.len(), 17);
+    assert_eq!(names.len(), 18);
     let list = &listed["result"];
     assert_eq!(list["resultType"], "complete", "{list}");
     assert_eq!(list["ttlMs"], 3_600_000, "{list}");

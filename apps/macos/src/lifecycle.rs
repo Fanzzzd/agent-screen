@@ -41,6 +41,44 @@ pub fn note(event: &str, id: DisplayId, detail: &str) {
     append(&line);
 }
 
+/// The last `max` lines about any of `displays`, oldest first, for a bug
+/// report, which redacts them (ADR 0024).
+pub fn lines_about(displays: &[DisplayId], max: usize) -> Vec<String> {
+    if displays.is_empty() {
+        return Vec::new();
+    }
+    // The last 256 KB: the log grows for as long as the app runs.
+    let Some(text) = path().and_then(|p| tail(&p, 256 * 1024)) else {
+        return Vec::new();
+    };
+    let marks: Vec<String> = displays.iter().map(|id| format!("display={id} ")).collect();
+    let mut lines: Vec<String> = text
+        .lines()
+        .rev()
+        .filter(|line| marks.iter().any(|m| line.contains(m.as_str())))
+        .take(max)
+        .map(String::from)
+        .collect();
+    lines.reverse();
+    lines
+}
+
+/// The last `max` bytes of a file, from the first whole line in them.
+fn tail(path: &std::path::Path, max: u64) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let start = len.saturating_sub(max);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    Some(match (start > 0, text.split_once('\n')) {
+        (true, Some((_, rest))) => rest.to_string(),
+        _ => text,
+    })
+}
+
 /// The folder the log lives in.
 pub fn folder() -> Option<PathBuf> {
     path()?.parent().map(PathBuf::from)

@@ -56,6 +56,10 @@ _Avoid_: message, chat
 The card that drops from the menu bar icon while a Help Request is open: the display's picture, the agent's reason, and its answers: Take Over, Continue, Reply, Give a Window and Later, which puts it off. It stays until the Help Request ends or the user puts it off, and steps aside during a Takeover. A new Help Request brings it back, even with the same reason.
 _Avoid_: alert, popup, banner
 
+**Bug Report Card** (问题报告卡片):
+The card that drops from the menu bar icon, in the Help Card's family, when an agent's bug report waits: the agent, the report's title, Show Report for the whole report, what Open on GitHub does, and Open on GitHub, Not Now and Turn Off. Every report waits here, and Open on GitHub opens that one report's form and no other. It waits while the Help Card shows (ADR 0024).
+_Avoid_: report dialog, consent popup
+
 **Recording** (录制):
 A video of an Agent Display that its Agent Session asked for, with a timeline of the session's actions and the Takeovers. It ends when the session stops it, when the display ends, or after 30 minutes.
 _Avoid_: capture, screencast

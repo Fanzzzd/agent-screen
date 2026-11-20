@@ -2,6 +2,14 @@
 
 Open a [bug report](https://github.com/Fanzzzd/agent-screen/issues/new?template=bug_report.yml) for a reproducible Agent Screen problem. Reports are public. For a vulnerability, use the private route in [SECURITY.md](../SECURITY.md).
 
+## Agents report bugs themselves
+
+An agent whose Agent Screen tool failed calls **`report_issue`** in that session ([ADR 0024](adr/0024-agents-report-bugs-themselves.md)). Agent Screen adds the version, build revision, macOS version, the client's name and version, the session's `get_diagnostics` report and its display-log lines. It redacts known patterns: window titles on the session's displays, quoted text, links, host names, IP addresses, paths, file names, email addresses, keys and tokens, and your name and the Mac's name. It can't recognize every private word, so review each report before you send it. The tool's result shows the report exactly as it would leave the Mac.
+
+Every report waits on the card under the menu bar icon. Show Report shows all of it. Open on GitHub opens that one report's prefilled form in your browser for you to submit, and nothing leaves your Mac before that click. Once you have opened a report, later ones first search GitHub's public issues for the report's fingerprint. An open match comes back as `duplicate` with its number. A match closed as fixed, when a newer release is out, comes back as `fixed_in_newer_release`: update Agent Screen and try again. The same failure waits at most once a day, and at most five reports wait. Turn reports off on the card, in the menu's Agent Bug Reports or in Settings; the agent then gets the report back to show you, and nothing is sent.
+
+The rest of this page is for a report you file by hand.
+
 ## Collect the failing session first
 
 1. In the MCP session where the problem occurred, call **`get_diagnostics`** with `{}`. Paste its report into the issue. This identifies that MCP process and the app that answers its control endpoint. It works before `create_display` and leaves ongoing sessions alone.
