@@ -1,6 +1,7 @@
 //! Serves control requests from Agent Sessions. Coordinates are in points
 //! relative to the display's top-left corner, the same space as screenshots.
 
+use super::off;
 use super::server::{ControlError, Reply};
 use super::shared_app::{self, Beside};
 use crate::core::Core;
@@ -17,13 +18,11 @@ use crate::model::{
 use crate::numbers;
 use agent_screen_model::access::{self, Authority, ChatAction, Instruction, Refusal};
 use agent_screen_model::bring_out::Refusal as BringOutRefusal;
-use agent_screen_model::held::{self, Held, Place};
+use agent_screen_model::held::{self, Held};
 use agent_screen_model::input_queue::Action;
 use agent_screen_model::placement::{self, AppSighting, Holder, NamedApp, PutAway, WindowSighting};
 use agent_screen_model::real_click;
-use agent_screen_model::request::{
-    Answer, HelpAsked, Kind, NamedWindow, RequestId, Resolution, Woken,
-};
+use agent_screen_model::request::{Answer, HelpAsked, Kind, NamedWindow, Resolution, Woken};
 use agent_screen_model::session::Orphans;
 use agent_screen_model::shared_app::Front;
 use base64::Engine;
@@ -368,7 +367,7 @@ async fn handle_one(
             } else {
                 Format::Jpeg
             };
-            if p.0.get("settle") == Some(&Value::Bool(true)) {
+            if p.flag("settle") {
                 settle_display(&core, id, size, cx).await;
             }
             // Within the image budget the agent reads coordinates in, and
@@ -435,23 +434,20 @@ async fn handle_one(
             // The agent saw a background click have no effect and asks for
             // the user's pointer (ADR 0013, "Clicks"). Nothing goes out on
             // the background route meanwhile.
-            if p.0.get("realInput") == Some(&Value::Bool(true)) {
+            if p.flag("realInput") {
                 guard_agent_point(&core, id, point, cx).await?;
                 // The menu a real right click opens would close when the
                 // user's front app comes back.
                 // So would a Control-held left click's.
-                let pressed = real_click::Button::parse(button_name(button))
-                    .unwrap_or(real_click::Button::Left);
+                let pressed = real_click_button(button);
                 if real_click::opens_menu(pressed, modifiers.control) {
                     return Err(ControlError::invalid(real_click::NO_MENU_CLICK));
                 }
-                let click = real_click::Button::parse(button_name(button))
-                    .and_then(|b| real_click::Click::new(b, count))
-                    .ok_or_else(|| {
-                        ControlError::invalid(
-                            "a click with the user's pointer presses its button one to three times",
-                        )
-                    })?;
+                let click = real_click::Click::new(pressed, count).ok_or_else(|| {
+                    ControlError::invalid(
+                        "a click with the user's pointer presses its button one to three times",
+                    )
+                })?;
                 return queued_click(&core, connection, id, point, click, modifiers, cx).await;
             }
             // Check foreign-display ownership and find the top window in one
@@ -559,7 +555,7 @@ async fn handle_one(
             guard_agent_point(&core, id, from, cx).await?;
             guard_agent_point(&core, id, to, cx).await?;
             let modifiers = modifiers(&p)?;
-            if p.0.get("realInput") == Some(&Value::Bool(true)) {
+            if p.flag("realInput") {
                 return queued_drag(
                     &core,
                     connection,
@@ -720,7 +716,7 @@ async fn handle_one(
                     return reply(json!({ "windowId": window }));
                 }
             }
-            if down && p.0.get("realInput") == Some(&Value::Bool(true)) {
+            if down && p.flag("realInput") {
                 return queued_drag(
                     &core,
                     connection,
@@ -821,7 +817,7 @@ async fn handle_one(
             let text = p
                 .string("text")
                 .ok_or_else(|| ControlError::invalid("text is required"))?;
-            if p.0.get("viaInputMethod") == Some(&Value::Bool(true)) {
+            if p.flag("viaInputMethod") {
                 let keys = crate::keychord::keys_for_text(&text).map_err(|c| {
                     ControlError::invalid(format!(
                         "{c:?} has no key on a US keyboard. Through the input method, type the keys it composes from, such as pinyin letters."
@@ -891,7 +887,7 @@ async fn handle_one(
                 .ok_or_else(|| ControlError::invalid("keys is required"))?;
             let chords = KeyChord::parse_sequence(&keys)
                 .map_err(|e| ControlError::invalid(e.to_string()))?;
-            if p.0.get("viaInputMethod") == Some(&Value::Bool(true)) {
+            if p.flag("viaInputMethod") {
                 return through_input_method(&core, id, chords, p.string("inputSource"), cx).await;
             }
             let forwarder = core.update(cx, |c, _| c.forwarder(id));
@@ -1021,7 +1017,7 @@ async fn handle_one(
             }
             Ok(json!({}))
         }
-        "listWindows" if p.0.get("strays").and_then(Value::as_bool) == Some(true) => {
+        "listWindows" if p.flag("strays") => {
             let id = display(&core, &p, false, cx)?;
             let list: Vec<Value> = strays(&core, id, cx)
                 .await
@@ -1825,7 +1821,7 @@ async fn handle_one(
                 agent_screen_model::model::help_steps(steps).map_err(ControlError::invalid)?;
             // The asker's MCP server understands answers other than a
             // Takeover (ADR 0015). One built earlier doesn't say so.
-            let answers = p.0.get("answers") == Some(&Value::Bool(true));
+            let answers = p.flag("answers");
             let asked = core.update(cx, |c, cx| {
                 let asked = c.displays.request_help(id, reason, steps, answers);
                 cx.notify();
@@ -1960,838 +1956,10 @@ async fn handle_one(
             out["userIdleSeconds"] = json!(idle);
             Ok(out)
         }
-        // Test hook: stands in for the user's input in the Viewer.
-        "debugTakeover" if debug_methods() => {
-            let id = display(&core, &p, false, cx)?;
-            let active = p.0.get("active") == Some(&Value::Bool(true));
-            core.update(cx, |c, cx| {
-                if active {
-                    c.take_over(id, cx)
-                } else {
-                    c.hand_back(id, cx)
-                }
-            });
-            Ok(json!({}))
-        }
-        // Move any window, by pid and id, to a global point: a test puts a
-        // system alert on an agent display with it.
-        "debugMoveWindow" if debug_methods() => {
-            let target = WindowTarget {
-                pid: p.int("pid").unwrap_or(0) as i32,
-                window_id: p.int("windowId").unwrap_or(0) as u32,
-            };
-            let (x, y) = (p.number("x").unwrap_or(0.0), p.number("y").unwrap_or(0.0));
-            let moved = cx
-                .background_executor()
-                .spawn(async move {
-                    ax::window_element(target).is_some_and(|w| ax::set_position(&w, x, y))
-                })
-                .await;
-            Ok(json!({ "moved": moved }))
-        }
-        "debugViewer" if debug_methods() => {
-            let (frame, image, key) = crate::mac::viewer_input::debug_layout()
-                .ok_or_else(|| ControlError::not_found("the Viewer shows no display"))?;
-            // Whether the shown display's stream showed another display.
-            let misrouted = cx.update(|cx| {
-                crate::ui::shell::current()
-                    .and_then(|shell| shell.upgrade())
-                    .and_then(|shell| shell.read(cx).viewer_display())
-                    .zip(crate::ui::stream::global())
-                    .is_some_and(|(id, streams)| streams.read(cx).misrouted(id))
-            });
-            // The header's Take Back button, in points from the Viewer's
-            // top-left corner, as last painted.
-            let take_back = crate::ui::viewer::WindowMenu::TakeBack.button().map(|b| {
-                [
-                    f64::from(b.origin.x),
-                    f64::from(b.origin.y),
-                    f64::from(b.size.width),
-                    f64::from(b.size.height),
-                ]
-            });
-            Ok(json!({
-                "frame": frame,
-                "image": image,
-                "key": key,
-                // The input method's marked text in the Viewer, and the
-                // target's caret, where it shows, in points from the
-                // Viewer's top-left corner.
-                "marked": crate::mac::viewer_input::marked(),
-                // The tap that keeps presses in the Viewer from other apps
-                // is installed and enabled (ADR 0014).
-                "privatePress": crate::mac::viewer_input::private_press(),
-                // The Viewer's input context is AppKit's current one: the
-                // input method composes only then.
-                "inputContext": crate::mac::viewer_input::input_context_current(),
-                // The kind of input source the Viewer types with now.
-                "source": match crate::mac::ime::current_kind() {
-                    agent_screen_model::viewer_keys::Source::Layout => "layout",
-                    agent_screen_model::viewer_keys::Source::InputMethod => "inputMethod",
-                },
-                "caret": crate::mac::viewer_input::caret_in_window(),
-                // A password field has the keyboard in the target, as last
-                // looked up, or secure input is on.
-                "secure": crate::mac::viewer_input::secure(),
-                // "unknown" until a lookup answers after the focus may
-                // have moved; keys go as keys meanwhile.
-                "secrecy": secrecy_name(crate::mac::viewer_input::secrecy()),
-                // How long the latest focus lookups took, and how long
-                // held keys waited for them, in milliseconds.
-                "lookupMs": crate::mac::input::lookup_ms(),
-                "heldMs": crate::mac::viewer_input::held_ms(),
-                // Each key press's final route, by key code, in order, and
-                // how many compositions a lookup dropped for a password
-                // field, which a lookup in time leaves at none.
-                "routes": crate::mac::viewer_input::routes()
-                    .into_iter()
-                    .map(|(code, route)| json!([code, route]))
-                    .collect::<Vec<_>>(),
-                "secureFound": crate::mac::viewer_input::secure_found_count(),
-                // Lookups of the target's focus asked for, none with a
-                // keyboard layout, and any made on the main thread.
-                "inspections": crate::mac::viewer_input::inspections(),
-                "mainThreadLookups": crate::mac::ax::MAIN_THREAD_LOOKUPS
-                    .load(std::sync::atomic::Ordering::Relaxed),
-                "misrouted": misrouted,
-                "takeBack": take_back,
-            }))
-        }
-        "debugStreams" if debug_methods() => {
-            // Each display's capture stream: running, showing another
-            // screen, frames delivered, restarts.
-            let streams = cx.update(|cx| {
-                crate::ui::stream::global()
-                    .map(|streams| streams.read(cx).debug())
-                    .unwrap_or_default()
-            });
-            Ok(json!({ "streams": streams }))
-        }
-        "debugWebPreview" if debug_methods() => Ok(crate::web::debug_status()),
-        "debugViewerInput" if debug_methods() => {
-            use crate::mac::viewer_input;
-            // A frame from the display's stream leaves the Viewer to draw,
-            // as it nearly always is while the user works in it.
-            if p.int("key") == Some(1) {
-                cx.update(|cx| cx.refresh_windows());
-            }
-            let mut routed = None;
-            let mut secrecy = None;
-            // `source` stands in for the user's input source: "layout" or
-            // "inputMethod".
-            let source = {
-                use agent_screen_model::viewer_keys::Source;
-                match p.string("source").as_deref() {
-                    None => None,
-                    Some("layout") => Some(Source::Layout),
-                    Some("inputMethod") => Some(Source::InputMethod),
-                    Some(_) => {
-                        return Err(ControlError::failed("source is layout or inputMethod"));
-                    }
-                }
-            };
-            match p.string("kind").as_deref() {
-                Some("click") => viewer_input::inject_click(
-                    p.number("x").unwrap_or(0.5),
-                    p.number("y").unwrap_or(0.5),
-                    p.int("key").unwrap_or(0) == 1,
-                    source,
-                ),
-                // `characters` are what the key types, and `ime` what the
-                // input method does with it: "pass", "nothing",
-                // "mark:TEXT", "insert:TEXT" or "insertcommand:TEXT". The
-                // reply says what the key came to.
-                Some("key") => {
-                    let script = match p.string("ime") {
-                        None => None,
-                        Some(ime) => Some(viewer_input::Script::parse(&ime).ok_or_else(|| {
-                            ControlError::failed(
-                                "ime is pass, nothing, mark:TEXT, insert:TEXT or insertcommand:TEXT",
-                            )
-                        })?),
-                    };
-                    // `phase`: "down" or "up" alone, else both; `repeat`:
-                    // the press is a held key's repeat.
-                    use objc2_app_kit::NSEventType;
-                    let kinds: &[NSEventType] = match p.string("phase").as_deref() {
-                        None => &[NSEventType::KeyDown, NSEventType::KeyUp],
-                        Some("down") => &[NSEventType::KeyDown],
-                        Some("up") => &[NSEventType::KeyUp],
-                        Some(_) => return Err(ControlError::failed("phase is down or up")),
-                    };
-                    secrecy = Some(secrecy_name(viewer_input::secrecy()));
-                    let characters = p.string("characters").unwrap_or_default();
-                    let key = viewer_input::TestKey {
-                        code: p.int("code").unwrap_or(0) as u16,
-                        shift: p.int("shift").unwrap_or(0) == 1,
-                        command: p.int("command").unwrap_or(0) == 1,
-                        characters: &characters,
-                        repeat: p.int("repeat").unwrap_or(0) == 1,
-                    };
-                    viewer_input::inject_key(key, source, script, kinds)
-                    .map(|route| routed = Some(route))
-                }
-                // Shift pressed (`down`: 1) or released.
-                Some("shift") => {
-                    secrecy = Some(secrecy_name(viewer_input::secrecy()));
-                    viewer_input::inject_shift(p.int("down").unwrap_or(0) == 1, source)
-                }
-                // A press, a drag in steps and a release, as a hand on
-                // the trackpad makes them.
-                Some("drag") => {
-                    use objc2_app_kit::NSEventType;
-                    let from = (p.number("x").unwrap_or(0.5), p.number("y").unwrap_or(0.5));
-                    let to = (
-                        p.number("toX").unwrap_or(0.5),
-                        p.number("toY").unwrap_or(0.5),
-                    );
-                    viewer_input::inject_mouse(NSEventType::LeftMouseDown, from.0, from.1)
-                        .map_err(ControlError::failed)?;
-                    for step in 1..=20 {
-                        cx.background_executor()
-                            .timer(Duration::from_millis(16))
-                            .await;
-                        let t = step as f64 / 20.0;
-                        viewer_input::inject_mouse(
-                            NSEventType::LeftMouseDragged,
-                            from.0 + (to.0 - from.0) * t,
-                            from.1 + (to.1 - from.1) * t,
-                        )
-                        .map_err(ControlError::failed)?;
-                    }
-                    viewer_input::inject_mouse(NSEventType::LeftMouseUp, to.0, to.1)
-                }
-                // The input method's calls on the Viewer's view while the
-                // user composes: text marked, or the composition ended.
-                Some(kind @ ("mark" | "commit")) => {
-                    // A frame paints the Viewer's input handler first.
-                    cx.update(|cx| cx.refresh_windows());
-                    cx.background_executor()
-                        .timer(Duration::from_millis(50))
-                        .await;
-                    viewer_input::inject_text_input(
-                        &p.string("text").unwrap_or_default(),
-                        kind == "commit",
-                    )
-                }
-                _ => Err("kind is click, key, shift, drag, mark or commit".into()),
-            }
-            .map_err(ControlError::failed)?;
-            // `secrecy`: what the key was routed by.
-            Ok(json!({ "route": routed, "secrecy": secrecy }))
-        }
-        // Test hook: the front app's focused window reads as unknown, as
-        // when the app doesn't answer accessibility in time.
-        "debugFocusUnknown" if debug_methods() => {
-            if agent_screen_mcp::endpoint::instance().as_deref() != Some("e2e") {
-                return Err(ControlError::invalid(
-                    "debugFocusUnknown requires the isolated e2e instance",
-                ));
-            }
-            let on = p.0.get("on").and_then(Value::as_bool).unwrap_or(true);
-            shared_app::force_focus_unknown(on);
-            Ok(json!({ "on": on }))
-        }
-        // Test hook: what the last hold of the user's keys during a launch
-        // did (#110): how many events and key downs, how long, and why it
-        // ended. Counts only, never which keys.
-        "debugKeyHold" if debug_methods() => Ok(match crate::mac::key_hold::last() {
-            Some(s) => json!({
-                "events": s.events,
-                "keyDowns": s.key_downs,
-                "ms": s.ms,
-                "end": format!("{:?}", s.end),
-                "sent": s.sent,
-                "discarded": s.discarded,
-            }),
-            None => json!({ "events": null }),
-        }),
-        // Test hook: turn the check for a press's effect beside the user's
-        // window off or on, to time what it costs.
-        "debugPressCheck" if debug_methods() => {
-            let on = p.0.get("on").and_then(Value::as_bool).unwrap_or(true);
-            shared_app::set_press_check(on);
-            Ok(json!({ "on": on }))
-        }
-        // Test hook: the user hands a window over from the Windows menu.
-        "debugHandOver" if debug_methods() => {
-            let id = display(&core, &p, false, cx)?;
-            // As the Give menu does, unless `gave` is false: a drag.
-            let gave = p.0.get("gave") != Some(&Value::Bool(false));
-            let window = p
-                .int("windowId")
-                .and_then(|w| windows::find(w as u32))
-                .ok_or_else(|| ControlError::not_found("no window with that id"))?;
-            let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
-            shell
-                .update(cx, |shell, cx| {
-                    shell.hand_over(window.target, Some(window.bounds), id, gave, cx)
-                })
-                .map_err(|e| ControlError::failed(e.to_string()))?;
-            Ok(json!({}))
-        }
-        // Test hook: the user answers the display's Window Request, as the
-        // card's buttons do, once one is open.
-        "debugAnswerWindow" if debug_methods() => {
-            let id = display(&core, &p, false, cx)?;
-            let give = p.0.get("give") == Some(&Value::Bool(true));
-            for _ in 0..50 {
-                let open = core.read_with(cx, |c, _| {
-                    c.displays
-                        .get(id)
-                        .is_some_and(|d| d.requests.is_open(Kind::Window))
-                });
-                if open {
-                    break;
-                }
-                cx.background_executor()
-                    .timer(Duration::from_millis(100))
-                    .await;
-            }
-            let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
-            let answered = shell
-                .update(cx, |shell, cx| shell.answer_window(id, give, cx))
-                .map_err(|e| ControlError::failed(e.to_string()))?;
-            Ok(json!({ "answered": answered }))
-        }
-        // Test hook: the user answers the display's Help Request, as the
-        // card's buttons or the notification's actions do. `answer` is
-        // continue, reply (with `text`), later or takeOver; `via`
-        // notification takes the notification's path, for the request
-        // `requestId` when given, as a notification posted for it carries.
-        "debugAnswerHelp" if debug_methods() => {
-            let id = display(&core, &p, false, cx)?;
-            let answer = p.string("answer").unwrap_or_default();
-            let text = p.string("text").unwrap_or_default();
-            let via_notification = p.string("via").as_deref() == Some("notification");
-            let request = p.int("requestId").map(|r| r as RequestId);
-            let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
-            // Typed into the card's field, then Send: the card tells the
-            // Shell, as a click does, so the Shell isn't updating here.
-            if answer == "reply" && !via_notification {
-                let card = shell
-                    .read_with(cx, |shell, _| shell.card_window())
-                    .map_err(|e| ControlError::failed(e.to_string()))?
-                    .ok_or_else(|| ControlError::failed("no Help Card"))?;
-                let sent = card
-                    .update(cx, |card, window, cx| {
-                        card.debug_reply(id, &text, window, cx)
-                    })
-                    .map_err(|e| ControlError::failed(e.to_string()))?;
-                return reply(json!({ "answered": sent }));
-            }
-            let answered = shell
-                .update(cx, |shell, cx| {
-                    shell.debug_answer_help(id, &answer, text, via_notification, request, cx)
-                })
-                .map_err(|e| ControlError::failed(e.to_string()))?
-                .map_err(ControlError::invalid)?;
-            Ok(json!({ "answered": answered }))
-        }
-        // Test hook: the user takes a window back from the Windows menu.
-        "debugTakeBack" if debug_methods() => {
-            let id = display(&core, &p, false, cx)?;
-            let target = p
-                .int("windowId")
-                .and_then(|w| windows::find(w as u32))
-                .ok_or_else(|| ControlError::not_found("no window with that id"))?
-                .target;
-            let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
-            let left = shell
-                .update(cx, |shell, cx| shell.take_back(target, id, cx))
-                .map_err(|e| ControlError::failed(e.to_string()))?
-                .await;
-            cx.background_executor()
-                .timer(Duration::from_millis(500))
-                .await;
-            Ok(json!({ "left": left }))
-        }
-        // Test hook: the session that holds the user stand-in stage gives
-        // up a window it launched there, so the window counts as the user's
-        // own, as on a real screen of theirs. The claim stays, so AeroSpace
-        // leaves the window on the stage.
-        #[cfg(debug_assertions)]
-        "debugUserWindow" if debug_methods() => {
-            let id = p.int("displayId").unwrap_or(0) as DisplayId;
-            usable(&core, connection, &p, id, "debugUserWindow", cx)?;
-            if !cg::window_display_role(id).accepts_window_request() {
-                return Err(ControlError::invalid(
-                    "debugUserWindow needs this session's user stand-in stage (debugShow userStage)",
-                ));
-            }
-            let window = p
-                .int("windowId")
-                .ok_or_else(|| ControlError::invalid("windowId is required"))?
-                as u32;
-            let here = off(cx, move || {
-                windows::on_display(id)
-                    .iter()
-                    .any(|w| w.target.window_id == window)
-            })
-            .await;
-            if !here {
-                return Err(ControlError::not_found(
-                    "no window with that id on the stage",
-                ));
-            }
-            // Only a window the claim file holds on the stage: AeroSpace
-            // would take any other for the user's workspace.
-            let claimed = off(cx, move || crate::mac::claims::claim_confirmed(window, id)).await;
-            if !claimed {
-                return Err(ControlError::failed(
-                    "the window's claim for the stage wasn't published",
-                ));
-            }
-            core.update(cx, |c, _| {
-                c.displays.forget_on(id, window);
-                if let Some(d) = c.displays.get_mut(id) {
-                    d.user_made.insert(window);
-                }
-            });
-            Ok(json!({}))
-        }
-        // Test hook: which agent the setup window says loaded the tools.
-        "debugAgentReady" if debug_methods() => {
-            let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
-            let agent = shell
-                .read_with(cx, |shell, _| shell.last_agent_ready())
-                .map_err(|e| ControlError::failed(e.to_string()))?;
-            Ok(json!({ "agent": agent }))
-        }
-        // Test hook: only an Input Loan's focus step on `windowId`, which
-        // takes the front app and gives it back, watched for `watchMs`.
-        "debugLoanFocus" if debug_methods() => {
-            let target = p
-                .int("windowId")
-                .and_then(|w| windows::find(w as u32))
-                .ok_or_else(|| ControlError::not_found("no window with that id"))?
-                .target;
-            let watch = Duration::from_millis(p.int("watchMs").unwrap_or(2000) as u64);
-            Ok(off(cx, move || {
-                crate::mac::real_input::debug_forward(target, watch)
-            })
-            .await)
-        }
-        // Test hook: macOS last named `pid` the front app, as when the user
-        // had just used it, without making it active.
-        "debugFront" if debug_methods() => {
-            crate::mac::input::note_activation(p.int("pid").map(|pid| pid as i32));
-            Ok(json!({}))
-        }
-        // Test hook: the user brought `pid` to the front, as from the Dock:
-        // the displays the reminder of where its windows are named.
-        "debugActivated" if debug_methods() => {
-            let pid = p.int("pid").unwrap_or(0) as i32;
-            let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
-            let task = shell
-                .update(cx, |shell, cx| shell.remind_where(pid, false, cx))
-                .map_err(|e| ControlError::failed(e.to_string()))?;
-            let reminded = task.await;
-            let peek = shell
-                .update(cx, |shell, cx| shell.reminder(cx))
-                .ok()
-                .flatten();
-            Ok(json!({ "reminded": reminded, "peek": peek }))
-        }
-        // Test hooks for updates: check the feed now without a window, and
-        // what is waiting to be installed.
-        "debugCheckForUpdates" if debug_methods() => {
-            crate::mac::update::check_in_background();
-            Ok(json!({ "available": crate::mac::update::available() }))
-        }
-        "debugUpdateState" if debug_methods() => Ok(json!({
-            "available": crate::mac::update::available(),
-            "pending": crate::mac::update::pending(),
-        })),
-        // Test hook: the user's left click at a global point, as the global
-        // monitor reports it, such as on an app's Dock icon.
-        "debugUserClick" if debug_methods() => {
-            let at = (p.require("x")?, p.require("y")?);
-            let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
-            let task = shell
-                .update(cx, |shell, cx| shell.user_clicked(at, cx))
-                .map_err(|e| ControlError::failed(e.to_string()))?;
-            let reminded = task.await;
-            let peek = shell
-                .update(cx, |shell, cx| shell.reminder(cx))
-                .ok()
-                .flatten();
-            Ok(json!({ "reminded": reminded, "peek": peek }))
-        }
-        // Test hook: what Agent Screen would do now if the agents' browser
-        // instance `pid` came to the front by another app, from the user's
-        // latest input, without doing it (ADR 0022).
-        "debugAgentsActivated" if debug_methods() => {
-            let pid = p.int("pid").unwrap_or(0) as i32;
-            let agents = devtools::is_agents(pid);
-            let decided = off(cx, move || devtools::on_agents_activated(pid)).await;
-            Ok(json!({ "agents": agents, "decision": format!("{decided:?}") }))
-        }
-        // Test hook: a DevTools command through Agent Screen's pipe to
-        // `pid`, in the page `target` when given, for verifying a browser
-        // (ADR 0022).
-        "debugDevtools" if debug_methods() => {
-            let pid = p.int("pid").unwrap_or(0) as i32;
-            let method = p.string("method").unwrap_or_default();
-            let params = p.0.get("params").cloned().unwrap_or(json!({}));
-            let target = p.string("target");
-            off(cx, move || {
-                let channel = devtools::channel(pid, Duration::from_secs(2))
-                    .ok_or_else(|| format!("pid {pid} has no pipe"))?;
-                channel.raw(&method, params, target.as_deref())
-            })
-            .await
-            .map(|result| json!({ "result": result }))
-            .map_err(ControlError::failed)
-        }
-        // Test hook: a key press of the user's that went to `pid`, as the
-        // global key monitor reports one typed into Spotlight.
-        "debugUserKey" if debug_methods() => {
-            let pid = p.int("pid").unwrap_or(0) as i32;
-            cx.background_executor()
-                .spawn(async move { crate::mac::catch::user_key_to(pid) })
-                .await;
-            Ok(json!({}))
-        }
-        // A panic on the main thread after the reply, as one in an AppKit
-        // callback: the app aborts.
-        "debugPanic" if debug_methods() => {
-            cx.spawn(async |cx| {
-                cx.background_executor()
-                    .timer(Duration::from_millis(100))
-                    .await;
-                panic!("debugPanic");
-            })
-            .detach();
-            Ok(json!({}))
-        }
-        "debugQuit" if debug_methods() => {
-            // Quits the way the menu does, after this reply goes out.
-            cx.spawn(async |cx| {
-                cx.background_executor()
-                    .timer(Duration::from_millis(100))
-                    .await;
-                cx.update(|cx| cx.quit());
-            })
-            .detach();
-            Ok(json!({}))
-        }
-        "debugInputObserver" if debug_methods() => {
-            if agent_screen_mcp::endpoint::instance().as_deref() != Some("e2e") {
-                return Err(ControlError::invalid(
-                    "input observer tests require the isolated e2e instance",
-                ));
-            }
-            let timeout = match p.string("action").as_deref().unwrap_or("status") {
-                "status" => false,
-                "timeout" => true,
-                _ => return Err(ControlError::invalid("action must be status or timeout")),
-            };
-            Ok(cx.update(|_| {
-                if timeout {
-                    crate::mac::real_input::debug_observer_timeout();
-                }
-                json!({
-                    "watching": crate::mac::real_input::watching(),
-                    "enabled": crate::mac::real_input::observer_enabled(),
-                })
-            }))
-        }
-        // The Help Card's width and its buttons' bounds at the last paint.
-        "debugCard" if debug_methods() => {
-            let (width, buttons) = crate::ui::help_card::painted_buttons();
-            let buttons: Map<String, Value> = buttons
-                .into_iter()
-                .map(|(id, r)| (id.to_string(), json!(r)))
-                .collect();
-            // The reply field, and whether the card has the keyboard.
-            let state = match crate::ui::shell::current()
-                .and_then(|shell| shell.read_with(cx, |shell, _| shell.card_window()).ok())
-                .flatten()
-            {
-                Some(card) => card
-                    .update(cx, |card, window, cx| card.debug_state(window, cx))
-                    .unwrap_or(Value::Null),
-                None => Value::Null,
-            };
-            let report = crate::ui::shell::current()
-                .and_then(|shell| shell.read_with(cx, |shell, _| shell.debug_reports()).ok())
-                .unwrap_or(Value::Null);
-            Ok(json!({
-                "report": report,
-                "width": width,
-                "buttons": buttons,
-                "queueHeight": crate::ui::help_card::queue_height(),
-                "key": state.get("key"),
-                "cardKeys": state.get("cardKeys"),
-                "highlighted": state.get("highlighted"),
-                "reply": state.get("reply"),
-            }))
-        }
-        // Which picture the menu bar icon shows: idle, working, asking or setup.
-        "debugIcon" if debug_methods() => {
-            let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
-            let (state, asking_count) = shell
-                .update(cx, |shell, _| (shell.icon_state(), shell.asking_count()))
-                .map_err(|e| ControlError::failed(e.to_string()))?;
-            Ok(json!({
-                "state": state,
-                "askingCount": asking_count,
-            }))
-        }
-        "debugShow" if debug_methods() => {
-            let surface = p.string("surface").unwrap_or_else(|| "viewer".into());
-            let id = p.int("displayId").unwrap_or(0) as DisplayId;
-            #[cfg(debug_assertions)]
-            if surface == "userStage" {
-                usable(&core, connection, &p, id, "debugShow", cx)?;
-                let shell =
-                    crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
-                let selected = shell
-                    .update(cx, |shell, _| shell.stage_display() == Some(id))
-                    .unwrap_or(false);
-                let held = core.read_with(cx, |c, _| c.displays.get(id).is_some());
-                if !held || !selected || !cg::is_agent_screen(id) || !cg::is_online(id) {
-                    return Err(ControlError::invalid(
-                        "userStage requires this session's selected live stage display",
-                    ));
-                }
-                cg::debug_user_stage(id, connection);
-                return reply(json!({}));
-            }
-            if matches!(
-                surface.as_str(),
-                "input-queue"
-                    | "input-queue-approved"
-                    | "input-queue-drags"
-                    | "input-queue-running"
-                    | "input-queue-click"
-                    | "input-queue-menu"
-                    | "input-queue-allow"
-                    | "input-queue-decline"
-                    | "input-bar-stop"
-            ) {
-                if agent_screen_mcp::endpoint::instance().as_deref() != Some("e2e") {
-                    return Err(ControlError::invalid(
-                        "input queue previews require the isolated e2e instance",
-                    ));
-                }
-                usable(&core, connection, &p, id, "debugShow", cx)?;
-                // A new preview's steps replace an earlier preview's.
-                if !matches!(
-                    surface.as_str(),
-                    "input-queue-allow" | "input-queue-decline" | "input-bar-stop"
-                ) {
-                    crate::ui::help_card::preview_steps(Vec::new());
-                }
-            }
-            // The card for a menu item an Electron app needs a real click
-            // for. Its call never waits, so the request never runs.
-            if surface == "input-queue-menu" {
-                core.update(cx, |c, cx| -> Result<(), ControlError> {
-                    let owner = c
-                        .input_queue
-                        .owner(id, connection)
-                        .map_err(ControlError::invalid)?;
-                    let item = crate::input_queue::MenuItem {
-                        target: WindowTarget {
-                            pid: 0,
-                            window_id: 0,
-                        },
-                        area: cg::display_bounds(id),
-                        app: p.string("app").unwrap_or_else(|| "Slack".into()),
-                        path: vec![(4, "Go".into()), (1, "Back".into())],
-                    };
-                    let request = c
-                        .input_queue
-                        .submit(
-                            owner,
-                            format!("preview-menu:{id}"),
-                            "Preview a menu item that needs a real click".into(),
-                            Some(crate::input_queue::Plan::MenuItem(item)),
-                        )
-                        .map_err(ControlError::invalid)?;
-                    c.input_queue.detach(request);
-                    cx.notify();
-                    Ok(())
-                })?;
-            }
-            // Drags across a board on the display, `count` of them (1 to
-            // 3, default 3): one request, whose call never waits, so it
-            // never runs, even allowed, and the rest shown after it, then
-            // a click with `presses` when given. `input-queue-running`
-            // allows it and shows the second as running.
-            if matches!(
-                surface.as_str(),
-                "input-queue-drags" | "input-queue-running"
-            ) {
-                let count = p.int("count").unwrap_or(3).clamp(1, 3) as usize;
-                core.update(cx, |c, cx| -> Result<(), ControlError> {
-                    let owner = c
-                        .input_queue
-                        .owner(id, connection)
-                        .map_err(ControlError::invalid)?;
-                    let area = cg::display_bounds(id);
-                    // The design's paths, on a 1280 by 800 board.
-                    let paths = [
-                        ((450.0, 179.0), (1094.0, 320.0)),
-                        ((450.0, 269.0), (772.0, 232.0)),
-                        ((260.0, 500.0), (340.0, 500.0)),
-                    ];
-                    let at = |(x, y): (f64, f64)| {
-                        (
-                            area.x + x / 1280.0 * area.width,
-                            area.y + y / 800.0 * area.height,
-                        )
-                    };
-                    let drags = paths.into_iter().take(count).map(|(from, to)| {
-                        crate::input_queue::Plan::Drag(crate::input_queue::Drag {
-                            target: WindowTarget {
-                                pid: 0,
-                                window_id: 0,
-                            },
-                            frame: area,
-                            drop: WindowTarget {
-                                pid: 0,
-                                window_id: 0,
-                            },
-                            drop_frame: area,
-                            area,
-                            from: at(from),
-                            to: at(to),
-                            flags: 0,
-                        })
-                    });
-                    let click = p.int("presses").map(|presses| {
-                        crate::input_queue::Plan::Click(preview_click(
-                            area,
-                            presses,
-                            &p,
-                            c.input_queue.now(),
-                        ))
-                    });
-                    let mut plans = drags.chain(click);
-                    // A session waits on one request at a time, so the
-                    // first is a real request and the rest only show.
-                    let first = plans.next().expect("one preview drag");
-                    let request = c
-                        .input_queue
-                        .submit(
-                            owner,
-                            format!("preview-drag:{id}"),
-                            "Preview a drag that needs the real pointer".into(),
-                            Some(first),
-                        )
-                        .map_err(ControlError::invalid)?;
-                    c.input_queue.detach(request);
-                    crate::ui::help_card::preview_steps(plans.map(|plan| (id, plan)).collect());
-                    cx.notify();
-                    Ok(())
-                })?;
-            }
-            // A click with `presses` (1 to 3, default 1) in `app`'s window
-            // `title` (default WeCom, Chats), on a chat list's row. Its
-            // call never waits, so it never runs, even allowed.
-            if surface == "input-queue-click" {
-                let presses = p.int("presses").unwrap_or(1);
-                core.update(cx, |c, cx| -> Result<(), ControlError> {
-                    let owner = c
-                        .input_queue
-                        .owner(id, connection)
-                        .map_err(ControlError::invalid)?;
-                    let plan =
-                        preview_click(cg::display_bounds(id), presses, &p, c.input_queue.now());
-                    let request = c
-                        .input_queue
-                        .submit(
-                            owner,
-                            format!("preview-click:{id}"),
-                            "Preview a click that needs the real pointer".into(),
-                            Some(crate::input_queue::Plan::Click(plan)),
-                        )
-                        .map_err(ControlError::invalid)?;
-                    c.input_queue.detach(request);
-                    cx.notify();
-                    Ok(())
-                })?;
-            }
-            // Allow itself, through the shell, comes after this.
-            if matches!(surface.as_str(), "input-queue" | "input-queue-approved") {
-                core.update(cx, |c, cx| -> Result<(), ControlError> {
-                    let owner = c
-                        .input_queue
-                        .owner(id, connection)
-                        .map_err(ControlError::invalid)?;
-                    c.input_queue
-                        .submit(
-                            owner,
-                            format!("preview:{id}"),
-                            "Preview a queued drag on this display".into(),
-                            None,
-                        )
-                        .map_err(ControlError::invalid)?;
-                    cx.notify();
-                    Ok(())
-                })?;
-            }
-            // A Window Request for no real window, so scripts can look at
-            // the card with any `app` and `title`. Keep answers it.
-            // `holder`, a Display Label, shows the card for a window another
-            // session holds; `place` review or screen says it is on a Review
-            // Display or the user's screen.
-            if surface == "window-request" {
-                let app = p.string("app").unwrap_or_else(|| "TextEdit".into());
-                let title = p.string("title").unwrap_or_default();
-                let target = WindowTarget {
-                    pid: 0,
-                    window_id: 0,
-                };
-                let held = p.string("holder").map(|label| Held {
-                    display: 0,
-                    agent: label.split(" · ").next().unwrap_or_default().to_string(),
-                    label,
-                    place: match p.string("place").as_deref() {
-                        Some("review") => Place::Review,
-                        Some("screen") => Place::UserScreen,
-                        _ => Place::Display,
-                    },
-                    status: None,
-                });
-                let _answer = core
-                    .update(cx, |c, cx| {
-                        let rx =
-                            c.displays
-                                .request_window(id, NamedWindow { target, app, title }, held);
-                        cx.notify();
-                        rx
-                    })
-                    .ok_or_else(|| ControlError::failed(format!("display {id} has ended")))?;
-                cx.background_executor()
-                    .timer(Duration::from_millis(900))
-                    .await;
-                return reply(json!({}));
-            }
-            // `x` and `y`, in global top-left points, open a Give or Take
-            // Back menu there instead of at the pointer.
-            let menu_at = p.number("x").zip(p.number("y"));
-            let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
-            shell
-                .update(cx, |shell, cx| {
-                    shell.debug_menu_at = menu_at;
-                    let shown = shell.debug_show(&surface, id, cx);
-                    // A surface that opened no menu leaves no point for
-                    // the next real one.
-                    shell.debug_menu_at = None;
-                    shown
-                })
-                .map_err(|e| ControlError::failed(e.to_string()))?
-                .map_err(ControlError::invalid)?;
-            cx.background_executor()
-                .timer(Duration::from_millis(900))
-                .await;
-            Ok(json!({}))
-        }
-        other => Err(ControlError::invalid(format!("unknown method {other}"))),
+        other => match super::debug::handle(&core, connection, other, &p, cx).await {
+            Some(result) => result,
+            None => Err(ControlError::invalid(format!("unknown method {other}"))),
+        },
     };
     if let Some(id) = acting {
         crate::mac::catch::agent_acted(id);
@@ -2881,7 +2049,7 @@ async fn permitted(cx: &mut AsyncApp) -> Result<(), ControlError> {
 /// names its session with `sessionKey`, so one connection serves several
 /// sessions (ADR 0016). An MCP server built before that names none; then
 /// it is the last session that called createDisplay on the connection.
-fn usable(
+pub(super) fn usable(
     core: &Entity<Core>,
     connection: u64,
     p: &Args<'_>,
@@ -2937,7 +2105,7 @@ async fn create_display(
     });
     let asked = (p.number("width"), p.number("height"));
     // Another display for the session, beside the ones it has (ADR 0016).
-    let new = p.0.get("new") == Some(&Value::Bool(true));
+    let new = p.flag("new");
     let orphans = orphans_param(p);
     if !new && let Some(existing) = reuse(core, connection, &session_key, &orphans, asked, cx) {
         return Ok(existing);
@@ -4454,7 +3622,7 @@ async fn window_access(
         .map(|w| access::user_instruction(&w))
         .transpose()
         .map_err(ControlError::invalid)?;
-    let all = p.0.get("all") == Some(&Value::Bool(true));
+    let all = p.flag("all");
     let apps: Vec<String> =
         p.0.get("apps")
             .and_then(Value::as_array)
@@ -5471,7 +4639,7 @@ const RUNNING_APP_TURN: Duration = Duration::from_millis(4000);
 fn running_app_turn() -> Duration {
     std::env::var("AGENTSCREEN_RUNNING_TURN_MS")
         .ok()
-        .filter(|_| debug_methods())
+        .filter(|_| super::debug::enabled())
         .and_then(|ms| ms.parse().ok())
         .map_or(RUNNING_APP_TURN, Duration::from_millis)
 }
@@ -5773,11 +4941,6 @@ async fn agents_run(path: &std::path::Path, profile: &std::path::Path, cx: &Asyn
         })
     })
     .await
-}
-
-/// Run `f`, which waits on another process, off the UI thread.
-async fn off<R: Send + 'static>(cx: &AsyncApp, f: impl FnOnce() -> R + Send + 'static) -> R {
-    cx.background_executor().spawn(async move { f() }).await
 }
 
 async fn launch(
@@ -7912,11 +7075,11 @@ async fn queued_drag(
     }
 }
 
-fn button_name(button: Button) -> &'static str {
+fn real_click_button(button: Button) -> real_click::Button {
     match button {
-        Button::Left => "left",
-        Button::Right => "right",
-        Button::Middle => "middle",
+        Button::Left => real_click::Button::Left,
+        Button::Right => real_click::Button::Right,
+        Button::Middle => real_click::Button::Middle,
     }
 }
 
@@ -8206,7 +7369,7 @@ async fn queued_menu_press(
 
 // MARK: Parameters
 
-fn display(
+pub(super) fn display(
     core: &Entity<Core>,
     p: &Args,
     live: bool,
@@ -8779,7 +7942,7 @@ async fn wait_for_change(
         .filter(|_| numbered)
         .map(|tree| watch::Read {
             tree,
-            truncated: p.0.get("baselineTruncated") == Some(&Value::Bool(true)),
+            truncated: p.flag("baselineTruncated"),
         });
     let from_agent = baseline.is_some();
     let mut watch = watch::Watch::new(conditions, baseline);
@@ -8915,77 +8078,29 @@ fn takeover(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) -> bool {
 }
 
 /// Loosely typed request parameters from JSON.
-struct Args<'a>(&'a Params);
+pub(super) struct Args<'a>(pub(super) &'a Params);
 
 impl Args<'_> {
-    fn string(&self, key: &str) -> Option<String> {
+    pub(super) fn string(&self, key: &str) -> Option<String> {
         self.0.get(key)?.as_str().map(String::from)
     }
-    fn number(&self, key: &str) -> Option<f64> {
+    pub(super) fn number(&self, key: &str) -> Option<f64> {
         self.0.get(key)?.as_f64()
     }
-    fn int(&self, key: &str) -> Option<i64> {
+    pub(super) fn int(&self, key: &str) -> Option<i64> {
         let value = self.0.get(key)?;
         value.as_i64().or_else(|| value.as_f64().map(|f| f as i64))
     }
-    fn require(&self, key: &str) -> Result<f64, ControlError> {
+    pub(super) fn bool(&self, key: &str) -> Option<bool> {
+        self.0.get(key)?.as_bool()
+    }
+    pub(super) fn flag(&self, key: &str) -> bool {
+        self.bool(key) == Some(true)
+    }
+    pub(super) fn require(&self, key: &str) -> Result<f64, ControlError> {
         self.number(key)
             .ok_or_else(|| ControlError::invalid(format!("{key} is required")))
     }
-}
-
-/// A preview click with `presses` (1 to 3) in `app`'s window `title`
-/// (default WeCom, Chats), on a chat list's row of a display at `area`.
-fn preview_click(
-    area: crate::model::Rect,
-    presses: i64,
-    p: &Args,
-    now: u64,
-) -> crate::input_queue::Click {
-    let click = agent_screen_model::real_click::Click::new(
-        agent_screen_model::real_click::Button::Left,
-        presses.clamp(1, 3),
-    )
-    .expect("one to three presses");
-    crate::input_queue::Click {
-        target: WindowTarget {
-            pid: 0,
-            window_id: 0,
-        },
-        frame: area,
-        menu: None,
-        ax_pid: 0,
-        area,
-        // A row of a sidebar, on a 1280 by 800 board.
-        at: (
-            area.x + 180.0 / 1280.0 * area.width,
-            area.y + 236.0 / 800.0 * area.height,
-        ),
-        click,
-        flags: 0,
-        app: p.string("app").unwrap_or_else(|| "WeCom".into()),
-        title: Some(p.string("title").unwrap_or_else(|| "Chats".into())),
-        region: area,
-        look: Vec::new(),
-        element: None,
-        asked_ms: now,
-    }
-}
-
-/// Test hooks: in debug builds, or with AGENTSCREEN_DEBUG=1 for measuring a
-/// release build.
-/// What the Viewer knows of the target's focus, for debug replies.
-fn secrecy_name(secrecy: agent_screen_model::viewer_keys::Secrecy) -> &'static str {
-    use agent_screen_model::viewer_keys::Secrecy;
-    match secrecy {
-        Secrecy::Unknown => "unknown",
-        Secrecy::Secure => "secure",
-        Secrecy::Open => "open",
-    }
-}
-
-fn debug_methods() -> bool {
-    cfg!(debug_assertions) || std::env::var_os("AGENTSCREEN_DEBUG").is_some_and(|v| v == "1")
 }
 
 #[cfg(test)]
