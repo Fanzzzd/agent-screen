@@ -10,6 +10,8 @@
 //   probe strip PNG ROWS      pixels in the top ROWS rows farther than 40 from the top-left one
 //   probe cancelmenu X Y      close the menu at global point X Y through accessibility
 //   probe front               the front app's name
+//   probe allwindows PID      as windows, with windows not on screen too
+//   probe hideloop PID S      hide PID whenever it shows, every 20 ms for S seconds
 //   probe frontpid            the front app's pid
 //   probe focused PID         the window number of PID's focused window, as Accessibility names it, or 0
 //   probe close PID ID        press the close button of PID's window ID through accessibility: "closed", "refused" or "no window"
@@ -45,6 +47,23 @@ switch args[1] {
 case "windows":
   let pid = Int32(args[2])!
   let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as! [[String: Any]]
+  for w in list where (w[kCGWindowOwnerPID as String] as? Int32) == pid {
+    let b = w[kCGWindowBounds as String] as! [String: Double]
+    print("{\"id\":\(w[kCGWindowNumber as String] as! Int),\"layer\":\(w[kCGWindowLayer as String] as! Int),\"x\":\(b["X"]!),\"y\":\(b["Y"]!),\"width\":\(b["Width"]!),\"height\":\(b["Height"]!)}")
+  }
+case "hideloop":
+  // Hide PID every 20 ms for SECONDS whenever it shows, from before it
+  // checks in, as an app the user hid: its windows never draw.
+  let pid = pid_t(args[2])!
+  let end = Date(timeIntervalSinceNow: Double(args[3])!)
+  while Date() < end {
+    if let app = NSRunningApplication(processIdentifier: pid), !app.isHidden { app.hide() }
+    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+  }
+case "allwindows":
+  // As windows, with the windows not on screen too, as a hidden app's.
+  let pid = Int32(args[2])!
+  let list = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as! [[String: Any]]
   for w in list where (w[kCGWindowOwnerPID as String] as? Int32) == pid {
     let b = w[kCGWindowBounds as String] as! [String: Double]
     print("{\"id\":\(w[kCGWindowNumber as String] as! Int),\"layer\":\(w[kCGWindowLayer as String] as! Int),\"x\":\(b["X"]!),\"y\":\(b["Y"]!),\"width\":\(b["Width"]!),\"height\":\(b["Height"]!)}")
