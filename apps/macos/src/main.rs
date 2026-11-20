@@ -24,70 +24,112 @@ use control::server::{self, Event};
 use futures::StreamExt;
 use gpui::{ActivationPolicy, App, AppContext, AsyncApp};
 
+use std::collections::VecDeque;
 use std::io::{BufWriter, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{OnceLock, mpsc};
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
-enum LogItem {
-    Line(String),
-    Flush(mpsc::SyncSender<()>),
+/// Upper bound on queued log lines so a permanently stalled stderr pipe cannot
+/// grow process memory without limit.
+const MAX_QUEUED_LINES: usize = 4096;
+const FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
+
+struct QueueState {
+    lines: VecDeque<String>,
+    dropped: u64,
+    enqueued_seq: u64,
+    flushed_seq: u64,
+    closed: bool,
+}
+
+struct AsyncQueue {
+    state: Mutex<QueueState>,
+    has_work: Condvar,
+    flushed: Condvar,
+    max_lines: usize,
 }
 
 /// Non-blocking FIFO log writer backed by a single writer thread so stderr
-/// backpressure never stalls the main UI thread. Uses an unbounded MPSC queue
-/// so lines are never dropped or reordered; `flush()` drains every queued line,
-/// and `enter_direct_mode()` flushes before switching panicking/exiting calls
-/// to direct writes.
+/// backpressure never stalls the main UI thread. Bounds queued lines to
+/// `MAX_QUEUED_LINES`, dropping the oldest entries while stderr is stalled and
+/// emitting a warning line with the drop count once writes resume; `flush()`
+/// drains every queued line, and `enter_direct_mode()` flushes before switching
+/// panicking/exiting calls to direct writes.
 struct AsyncWriter {
-    tx: mpsc::Sender<LogItem>,
+    queue: Arc<AsyncQueue>,
     direct: AtomicBool,
 }
 
-const FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
-
 impl AsyncWriter {
     fn spawn<W: Write + Send + 'static>(sink: W) -> Self {
-        let (tx, rx) = mpsc::channel::<LogItem>();
-        let _ = std::thread::Builder::new()
+        Self::spawn_with_capacity(sink, MAX_QUEUED_LINES)
+    }
+
+    fn spawn_with_capacity<W: Write + Send + 'static>(sink: W, max_lines: usize) -> Self {
+        let queue = Arc::new(AsyncQueue {
+            state: Mutex::new(QueueState {
+                lines: VecDeque::new(),
+                dropped: 0,
+                enqueued_seq: 0,
+                flushed_seq: 0,
+                closed: false,
+            }),
+            has_work: Condvar::new(),
+            flushed: Condvar::new(),
+            max_lines: max_lines.max(1),
+        });
+        let worker_queue = Arc::clone(&queue);
+        if std::thread::Builder::new()
             .name("agent-screen-log".into())
-            .spawn(move || Self::run(rx, sink));
+            .spawn(move || Self::run(worker_queue, sink))
+            .is_err()
+        {
+            queue.state.lock().unwrap_or_else(|e| e.into_inner()).closed = true;
+        }
         Self {
-            tx,
+            queue,
             direct: AtomicBool::new(false),
         }
     }
 
-    fn run<W: Write>(rx: mpsc::Receiver<LogItem>, sink: W) {
+    fn run<W: Write>(queue: Arc<AsyncQueue>, sink: W) {
         let mut out = BufWriter::new(sink);
-        while let Ok(first) = rx.recv() {
-            let mut flush_acks = Vec::new();
-            Self::handle_item(first, &mut out, &mut flush_acks);
-            while let Ok(next) = rx.try_recv() {
-                Self::handle_item(next, &mut out, &mut flush_acks);
+        let mut batch = Vec::new();
+        loop {
+            let (dropped, batch_end_seq) = {
+                let mut state = queue.state.lock().unwrap_or_else(|e| e.into_inner());
+                while state.lines.is_empty() && state.dropped == 0 && !state.closed {
+                    state = queue
+                        .has_work
+                        .wait(state)
+                        .unwrap_or_else(|e| e.into_inner());
+                }
+                if state.lines.is_empty() && state.dropped == 0 && state.closed {
+                    break;
+                }
+                let dropped = std::mem::take(&mut state.dropped);
+                batch.extend(state.lines.drain(..));
+                let end_seq = state.enqueued_seq;
+                (dropped, end_seq)
+            };
+            if dropped > 0 {
+                let _ = writeln!(
+                    out,
+                    "Agent Screen WARN: dropped {dropped} log lines while stderr was stalled"
+                );
             }
-            let _ = out.flush();
-            for ack in flush_acks {
-                let _ = ack.send(());
-            }
-        }
-        let _ = out.flush();
-    }
-
-    fn handle_item<W: Write>(
-        item: LogItem,
-        out: &mut BufWriter<W>,
-        flush_acks: &mut Vec<mpsc::SyncSender<()>>,
-    ) {
-        match item {
-            LogItem::Line(line) => {
+            for line in batch.drain(..) {
                 let _ = out.write_all(line.as_bytes());
             }
-            LogItem::Flush(ack) => {
-                let _ = out.flush();
-                flush_acks.push(ack);
+            let _ = out.flush();
+            let mut state = queue.state.lock().unwrap_or_else(|e| e.into_inner());
+            if batch_end_seq > state.flushed_seq {
+                state.flushed_seq = batch_end_seq;
             }
+            queue.flushed.notify_all();
         }
+        let _ = out.flush();
     }
 
     fn write_line(&self, line: String) {
@@ -97,17 +139,44 @@ impl AsyncWriter {
             let _ = stderr.flush();
             return;
         }
-        if let Err(mpsc::SendError(LogItem::Line(line))) = self.tx.send(LogItem::Line(line)) {
+        let mut state = self.queue.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.closed {
+            drop(state);
             let mut stderr = std::io::stderr().lock();
             let _ = stderr.write_all(line.as_bytes());
             let _ = stderr.flush();
+            return;
         }
+        while state.lines.len() >= self.queue.max_lines {
+            state.lines.pop_front();
+            state.dropped = state.dropped.saturating_add(1);
+        }
+        state.lines.push_back(line);
+        state.enqueued_seq = state.enqueued_seq.saturating_add(1);
+        drop(state);
+        self.queue.has_work.notify_one();
     }
 
     fn flush(&self) {
-        let (ack_tx, ack_rx) = mpsc::sync_channel::<()>(1);
-        if self.tx.send(LogItem::Flush(ack_tx)).is_ok() {
-            let _ = ack_rx.recv_timeout(FLUSH_TIMEOUT);
+        let deadline = Instant::now() + FLUSH_TIMEOUT;
+        let mut state = self.queue.state.lock().unwrap_or_else(|e| e.into_inner());
+        let target = state.enqueued_seq;
+        while state.flushed_seq < target && !state.closed {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                break;
+            };
+            if remaining.is_zero() {
+                break;
+            }
+            let (next, timed_out) = self
+                .queue
+                .flushed
+                .wait_timeout(state, remaining)
+                .unwrap_or_else(|e| e.into_inner());
+            state = next;
+            if timed_out.timed_out() {
+                break;
+            }
         }
     }
 
@@ -117,6 +186,15 @@ impl AsyncWriter {
         self.flush();
         self.direct.store(true, Ordering::Release);
         self.flush();
+    }
+}
+
+impl Drop for AsyncWriter {
+    fn drop(&mut self) {
+        let mut state = self.queue.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.closed = true;
+        self.queue.has_work.notify_all();
+        self.queue.flushed.notify_all();
     }
 }
 
@@ -649,5 +727,84 @@ mod logger_tests {
         for (i, line) in lines.iter().enumerate() {
             assert_eq!(*line, format!("queued-{i}"));
         }
+    }
+
+    #[test]
+    fn async_writer_bounds_queue_dropping_oldest_and_logs_drop_count() {
+        struct Gate {
+            state: Mutex<(bool, bool)>,
+            cv: Condvar,
+        }
+        struct StalledSink {
+            gate: Arc<Gate>,
+            out: Arc<Mutex<Vec<u8>>>,
+        }
+        impl Write for StalledSink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                let mut st = self.gate.state.lock().unwrap();
+                if !st.0 {
+                    st.0 = true;
+                    self.gate.cv.notify_all();
+                    while !st.1 {
+                        st = self.gate.cv.wait(st).unwrap();
+                    }
+                }
+                drop(st);
+                self.out.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let gate = Arc::new(Gate {
+            state: Mutex::new((false, false)),
+            cv: Condvar::new(),
+        });
+        let out = Arc::new(Mutex::new(Vec::new()));
+        let writer = AsyncWriter::spawn_with_capacity(
+            StalledSink {
+                gate: Arc::clone(&gate),
+                out: Arc::clone(&out),
+            },
+            4,
+        );
+
+        // First line enters `StalledSink::write` and blocks the writer thread.
+        writer.write_line("first\n".to_string());
+        {
+            let mut st = gate.state.lock().unwrap();
+            while !st.0 {
+                st = gate.cv.wait(st).unwrap();
+            }
+        }
+
+        // Queue 10 lines while stalled with capacity 4: oldest 6 are dropped.
+        for i in 0..10 {
+            writer.write_line(format!("msg-{i}\n"));
+        }
+
+        // Unblock the sink and flush.
+        {
+            let mut st = gate.state.lock().unwrap();
+            st.1 = true;
+            gate.cv.notify_all();
+        }
+        writer.flush();
+
+        let text = String::from_utf8(out.lock().unwrap().clone()).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines,
+            vec![
+                "first",
+                "Agent Screen WARN: dropped 6 log lines while stderr was stalled",
+                "msg-6",
+                "msg-7",
+                "msg-8",
+                "msg-9",
+            ]
+        );
     }
 }
