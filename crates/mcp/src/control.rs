@@ -223,10 +223,12 @@ impl Control {
     }
 
     /// Tell the app something now if it is running, without starting it,
-    /// and again on each later connection. While the app is down, look for
-    /// it every 2 s, so one that starts or restarts later hears it too.
+    /// and again on each later connection. For out-of-process socket clients,
+    /// look for the app every 2 s while it is down so one that starts or
+    /// restarts later hears it too. In-process hosts run inside the app
+    /// itself and need no polling task.
     pub async fn greet(self: &Arc<Self>, method: &str, params: Value) {
-        if self.greeting.lock().unwrap().is_none() {
+        if self.greeting.lock().unwrap().is_none() && matches!(self.link, AppLink::Socket) {
             let control = Arc::downgrade(self);
             tokio::spawn(async move {
                 loop {

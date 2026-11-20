@@ -7,7 +7,7 @@
 //! the functions the time went to. `/usr/bin/sample` starts too slowly to
 //! catch most stalls; this sees each one from its 30th millisecond.
 
-use std::sync::mpsc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 /// Menus and alerts the user has open. AppKit runs a loop of its own while
@@ -59,26 +59,51 @@ pub fn watch() {
         .name("agent-screen-hang-watch".into())
         .spawn(move || {
             let mut samples: Vec<[usize; DEPTH]> = Vec::with_capacity(MAX_SAMPLES);
+            // Reuse one Condvar + generation pair instead of allocating a new
+            // channel every 100 ms.
+            let ack = Arc::new((Mutex::new(0u64), Condvar::new()));
+            let mut seq = 0u64;
             loop {
                 std::thread::sleep(EVERY);
-                let (answered, answer) = mpsc::channel::<()>();
+                seq = seq.wrapping_add(1);
                 let opened = OPENED.load(std::sync::atomic::Ordering::SeqCst);
                 let open = MODALS.load(std::sync::atomic::Ordering::SeqCst) != 0;
                 let posted = Instant::now();
+                let target = seq;
+                let ack_main = Arc::clone(&ack);
                 dispatch2::DispatchQueue::main().exec_async(move || {
-                    let _ = answered.send(());
+                    let (lock, cv) = &*ack_main;
+                    *lock.lock().unwrap_or_else(|e| e.into_inner()) = target;
+                    cv.notify_one();
                 });
                 samples.clear();
-                if answer.recv_timeout(LATE).is_err() {
-                    while answer.recv_timeout(TICK).is_err() {
+                let (lock, cv) = &*ack;
+                let mut seen = lock.lock().unwrap_or_else(|e| e.into_inner());
+                let (mut guard, _) = cv
+                    .wait_timeout_while(seen, LATE, |s| *s != target)
+                    .unwrap_or_else(|e| e.into_inner());
+                if *guard != target {
+                    while *guard != target {
+                        let (next, _) = cv
+                            .wait_timeout_while(guard, TICK, |s| *s != target)
+                            .unwrap_or_else(|e| e.into_inner());
+                        guard = next;
+                        if *guard == target {
+                            break;
+                        }
                         if samples.len() < MAX_SAMPLES {
+                            // Release the lock before suspending the main thread.
+                            drop(guard);
                             let mut stack = [0usize; DEPTH];
                             if main.stack(&mut stack) {
                                 samples.push(stack);
                             }
+                            guard = lock.lock().unwrap_or_else(|e| e.into_inner());
                         }
                     }
                 }
+                seen = guard;
+                drop(seen);
                 let waited = posted.elapsed();
                 if waited >= NOTE && !modal_during(opened, open) {
                     let (summary, full) = profile(&samples);
