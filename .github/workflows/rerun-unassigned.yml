@@ -1,7 +1,9 @@
 # GitHub cancels a job after 15 minutes when no macOS runner takes it.
 # Of the 36 failed CI attempts from 10 to 19 November, 32 were that and
 # a plain rerun passed; see docs/research/ci-reliability.md. This reruns
-# such a run up to twice, and never a run where something really failed.
+# such a run up to twice, and never a run where something really failed
+# or a pull request's run a newer push replaced. A rerun's own completion
+# fires workflow_run again, so the second rerun happens; see the script.
 # workflow_run uses this file from main, so a change here acts after merge.
 name: Rerun jobs no runner took
 
@@ -13,6 +15,7 @@ on:
 permissions:
   actions: write
   checks: read
+  contents: read
 
 jobs:
   rerun:

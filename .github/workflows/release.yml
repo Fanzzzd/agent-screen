@@ -9,7 +9,7 @@
 # current version instead, skipping what's already done: to finish a
 # release that failed partway.
 #
-# Secrets, in the `release` environment, which only main may use:
+# Secrets, in the `release` environment, which the owner limits to main:
 # - DEVELOPER_ID_P12_BASE64, DEVELOPER_ID_P12_PASSWORD: the Developer ID
 #   Application certificate and its private key.
 # - APP_STORE_CONNECT_KEY_P8, APP_STORE_CONNECT_KEY_ID,
@@ -22,8 +22,9 @@
 #   (ADR 0012).
 name: Release
 
-# The merged release pull request is a push to main whose squashed commit
-# starts with its title, as prepare-release.yml tells it apart. A push,
+# Every push to main runs `decide`, which reads the repository, not the
+# commit message: a release pull request merges as a merge commit or a
+# squash, and both change the version to one with no tag yet. A push,
 # unlike the pull request's own event, runs on refs/heads/main, which the
 # environment's branch rule matches.
 on:
@@ -39,19 +40,54 @@ on:
 permissions:
   contents: write
 
-# One release at a time. Other pushes to main skip at once and get a group
-# of their own, so they never replace a release waiting its turn.
-concurrency:
-  group: >-
-    ${{ (github.event_name == 'workflow_dispatch' || startsWith(github.event.head_commit.message, 'chore(release): Agent Screen ')) && 'release' || format('release-skip-{0}', github.run_id) }}
-
 jobs:
+  # A version on main with no tag after its release run ended means the
+  # release never published: this job fails on every later push until
+  # someone publishes it from the Actions tab.
+  decide:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      release: ${{ steps.decide.outputs.decision == 'release' }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          # History and tags.
+          fetch-depth: 0
+      - name: Does this push release?
+        id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+        run: .github/scripts/release-decision.sh "$EVENT" "$BEFORE"
+      - name: Did the release of this version publish?
+        if: steps.decide.outputs.decision == 'unpublished'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.decide.outputs.version }}
+          BUMPED_IN: ${{ steps.decide.outputs.bumped_in }}
+        run: |
+          set -euo pipefail
+          # The run of the push that set the version may still be building.
+          running="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/release.yml/runs?head_sha=$BUMPED_IN&per_page=20" \
+            --jq '[.workflow_runs[] | select(.status != "completed")] | length')"
+          if ((running > 0)); then
+            echo "The release of v$VERSION from $BUMPED_IN is still running."
+            exit 0
+          fi
+          echo "::error::v$VERSION, on main since $BUMPED_IN, has no tag, and no Release run for it is still running. Run Release from the Actions tab with \"publish\" ticked."
+          exit 1
+
   build:
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      startsWith(github.event.head_commit.message, 'chore(release): Agent Screen ')
+    needs: decide
+    if: needs.decide.outputs.release == 'true'
     runs-on: macos-26
     environment: release
+    # One release at a time.
+    concurrency: release
     # 23 minutes cold in November, with notarization waiting on Apple.
     timeout-minutes: 60
     outputs:
@@ -115,8 +151,8 @@ jobs:
       - name: Check
         run: |
           cargo fmt --all --check
-          cargo clippy --workspace --all-targets -- -D warnings
-          cargo test --workspace
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+          cargo test --workspace --locked
 
       - name: Build and notarize the DMG and cask
         env:
@@ -154,6 +190,7 @@ jobs:
     if: github.event_name != 'workflow_dispatch' || inputs.publish
     runs-on: ubuntu-latest
     environment: release
+    concurrency: release-publish
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0

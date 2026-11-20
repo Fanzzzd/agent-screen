@@ -16,8 +16,9 @@ concurrency: prepare-release
 
 jobs:
   prepare-release:
-    # A merged release pull request has nothing left to prepare. Squash
-    # merging makes its title the commit's subject.
+    # A merged release pull request has nothing left to prepare. Squashed,
+    # its title is the commit's subject and this skips; merged with a merge
+    # commit, the job runs and finds no changesets.
     if: "${{ !startsWith(github.event.head_commit.message, 'chore(release): Agent Screen ') }}"
     runs-on: ubuntu-latest
     timeout-minutes: 10

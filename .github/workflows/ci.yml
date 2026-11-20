@@ -60,6 +60,10 @@ jobs:
       - name: Do the website's media versions match the files?
         run: node apps/website/scripts/version-media.mjs --check
 
+      # release.yml decides from it whether a push to main releases.
+      - name: Does the release decision hold?
+        run: .github/scripts/test-release-decision.sh
+
       # A reminder, not a gate: tests and refactors need no changeset.
       - name: Does the app change come with a changeset?
         if: github.event_name == 'push'
