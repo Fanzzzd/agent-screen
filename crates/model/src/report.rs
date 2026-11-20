@@ -136,15 +136,26 @@ impl Redactor {
         .with(titles, TITLE)
     }
 
-    /// The user's full name: the whole name, and each word of three
-    /// letters or more as a word of its own.
+    /// The user's full name: the whole name, each Latin word of three
+    /// letters or more as a word of its own, and each Chinese, Japanese or
+    /// Korean word of two characters or more wherever it appears, since
+    /// that prose has no spaces: "张伟" in "我和张伟一起".
     pub fn with_name(mut self, name: &str) -> Self {
+        let words: Vec<&str> = name
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .collect();
         self.names.extend(
-            name.split(|c: char| !c.is_alphanumeric())
-                .filter(|w| w.chars().count() >= 3)
-                .map(str::to_lowercase),
+            words
+                .iter()
+                .filter(|w| !w.chars().any(cjk) && w.chars().count() >= 3)
+                .map(|w| w.to_lowercase()),
         );
-        self.with([name.to_string()], PRIVATE)
+        let cjk_words = words
+            .iter()
+            .filter(|w| w.chars().all(cjk))
+            .map(|w| w.to_string());
+        self.with(std::iter::once(name.to_string()).chain(cjk_words), PRIVATE)
     }
 
     /// Other text that is the user's: a task title, a folder, a name.
@@ -157,7 +168,11 @@ impl Redactor {
             secrets
                 .into_iter()
                 .map(|s| s.trim().to_string())
-                .filter(|s| s.chars().count() >= 3)
+                // Two Chinese characters make a name; two letters don't.
+                .filter(|s| {
+                    let n = s.chars().count();
+                    n >= 3 || n == 2 && s.chars().all(cjk)
+                })
                 .map(|s| (s, marker)),
         );
         self.secrets
@@ -191,7 +206,8 @@ impl Redactor {
             .replace(&format!("\"{PRIVATE}\""), PRIVATE)
     }
 
-    /// The user's name, word by word, in any case: "alice" and "Alice's".
+    /// The user's name, word by word, in any case: "alice", "Alice's" and
+    /// "Alice说". A Chinese character ends a Latin word.
     fn name_words(&self, input: &str) -> String {
         if self.names.is_empty() {
             return input.to_string();
@@ -207,7 +223,7 @@ impl Redactor {
             word.clear();
         };
         for c in input.chars() {
-            if c.is_alphanumeric() {
+            if c.is_alphanumeric() && !cjk(c) {
                 word.push(c);
             } else {
                 push(&mut word, &mut out);
@@ -312,39 +328,98 @@ fn plain(s: &str) -> bool {
 }
 
 /// Links, host names, addresses, paths, file names, email addresses,
-/// secrets and encoded data, a whitespace-separated token at a time. The
-/// token after "Bearer" or "Basic" is a secret.
+/// secrets and encoded data, a token at a time. Tokens end at whitespace,
+/// at full-width punctuation, and where Chinese, Japanese or Korean text
+/// meets Latin text, since that prose has no spaces: "打开了report.pdf"
+/// has the token "report.pdf". A path keeps its characters together across
+/// a slash: "/Users/x/文档/a.pdf" is one token. The token after "Bearer",
+/// "Basic", "password:" or "密码：" is a secret.
 fn tokens(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut token = String::new();
-    let mut after_scheme = false;
-    let flush = |token: &str, out: &mut String, after_scheme: &mut bool| {
-        if token.is_empty() {
-            return;
-        }
-        out.push_str(&if *after_scheme {
-            wrap(token, |_| Some(SECRET))
-        } else {
-            token_marker(token)
-        });
-        let lower = token
-            .trim_matches(|c: char| !c.is_alphanumeric() && c != '_')
-            .to_ascii_lowercase();
-        *after_scheme = lower == "bearer"
-            || lower == "basic"
-            || token.ends_with([':', '=']) && SECRET_KEYS.contains(&lower.as_str());
-    };
-    for c in input.chars() {
-        if c.is_whitespace() {
-            flush(&token, &mut out, &mut after_scheme);
+    // The next token is a secret.
+    let mut secret_next = false;
+    // The last token was a key such as "password", which a full-width
+    // colon makes a secret's key.
+    let mut last_key = false;
+    let flush =
+        |token: &mut String, out: &mut String, secret_next: &mut bool, last_key: &mut bool| {
+            if token.is_empty() {
+                return;
+            }
+            out.push_str(&if *secret_next {
+                wrap(token, |_| Some(SECRET))
+            } else {
+                token_marker(token)
+            });
+            let lower = token
+                .trim_matches(|c: char| !c.is_alphanumeric() && c != '_')
+                .to_ascii_lowercase();
+            *last_key = SECRET_KEYS.contains(&lower.as_str());
+            *secret_next = lower == "bearer"
+                || lower == "basic"
+                || token.ends_with([':', '=']) && *last_key
+                || cjk_secret_key(token);
             token.clear();
+        };
+    let path = |c: char| c == '/' || c == '\\';
+    for c in input.chars() {
+        if c.is_whitespace() || wide_punctuation(c) {
+            flush(&mut token, &mut out, &mut secret_next, &mut last_key);
+            if (c == '：' || c == '＝') && last_key {
+                secret_next = true;
+            }
             out.push(c);
-        } else {
-            token.push(c);
+            continue;
         }
+        if let Some(last) = token.chars().last()
+            && cjk(last) != cjk(c)
+            && !path(last)
+            && !path(c)
+        {
+            flush(&mut token, &mut out, &mut secret_next, &mut last_key);
+        }
+        token.push(c);
     }
-    flush(&token, &mut out, &mut after_scheme);
+    flush(&mut token, &mut out, &mut secret_next, &mut last_key);
     out
+}
+
+/// A Chinese, Japanese or Korean character, or a full-width form.
+fn cjk(c: char) -> bool {
+    matches!(c,
+        '\u{2E80}'..='\u{303F}'
+        | '\u{3040}'..='\u{30FF}'
+        | '\u{3100}'..='\u{31FF}'
+        | '\u{3400}'..='\u{4DBF}'
+        | '\u{4E00}'..='\u{9FFF}'
+        | '\u{AC00}'..='\u{D7AF}'
+        | '\u{F900}'..='\u{FAFF}'
+        | '\u{FF00}'..='\u{FFEF}'
+    )
+}
+
+/// Full-width punctuation, which ends a token as a space does:
+/// "，。：；（）、「」《》！？".
+fn wide_punctuation(c: char) -> bool {
+    matches!(c, '\u{3000}'..='\u{303F}')
+        || matches!(c, '\u{FF00}'..='\u{FFEF}') && !c.is_alphanumeric()
+}
+
+/// Chinese words before a secret: "密码", "密码是", "令牌为".
+fn cjk_secret_key(token: &str) -> bool {
+    let token = token.trim_end_matches(['是', '为', '：', ':', '=', '＝']);
+    [
+        "密码",
+        "口令",
+        "密钥",
+        "令牌",
+        "验证码",
+        "秘钥",
+        "パスワード",
+    ]
+    .iter()
+    .any(|key| token.ends_with(key))
 }
 
 fn token_marker(token: &str) -> String {
@@ -368,12 +443,12 @@ fn token_marker(token: &str) -> String {
 fn wrap(token: &str, marker: impl Fn(&str) -> Option<&'static str>) -> String {
     let start = token
         .char_indices()
-        .find(|(_, c)| !"([{<\"'`“‘「".contains(*c))
+        .find(|(_, c)| !"([{<\"'`“‘「（《『【［｛＜".contains(*c))
         .map_or(token.len(), |(i, _)| i);
     let end = token
         .char_indices()
         .rev()
-        .find(|(_, c)| !".,;:!?)]}>\"'`”’」".contains(*c))
+        .find(|(_, c)| !".,;:!?)]}>\"'`”’」，。：；）、》』】！？］｝＞".contains(*c))
         .map_or(start, |(i, c)| i + c.len_utf8())
         .max(start);
     let (lead, core, tail) = (&token[..start], &token[start..end], &token[end..]);
@@ -514,25 +589,36 @@ fn classify(core: &str) -> Option<&'static str> {
     None
 }
 
-/// A key or token by its shape: a known prefix, an AWS access key id, a
-/// JSON Web Token.
+/// A key or token by its shape, at the token's start or after any
+/// character that isn't a letter or digit, as in "key:ghp_…" or
+/// "(sk-…)": a known prefix, an AWS access key id, a JSON Web Token.
 fn secret(core: &str) -> bool {
+    let starts = std::iter::once(0).chain(
+        core.char_indices()
+            .filter(|(_, c)| !c.is_alphanumeric())
+            .map(|(i, c)| i + c.len_utf8()),
+    );
+    starts.map(|i| &core[i..]).any(secret_at)
+}
+
+fn secret_at(rest: &str) -> bool {
     if SECRET_PREFIXES
         .iter()
-        .any(|p| core.len() > p.len() && core.starts_with(p))
+        .any(|p| rest.len() > p.len() && rest.starts_with(p))
     {
         return true;
     }
-    let aws = (core.starts_with("AKIA") || core.starts_with("ASIA"))
-        && core.len() >= 16
-        && core[4..]
+    let aws = (rest.starts_with("AKIA") || rest.starts_with("ASIA"))
+        && rest[4..]
             .bytes()
-            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit());
-    let jwt = core.starts_with("eyJ")
-        && core.split('.').count() >= 2
-        && core
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"-_.=".contains(&b));
+            .take_while(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+            .count()
+            >= 12;
+    let jwt = rest.starts_with("eyJ")
+        && rest
+            .split(|c: char| !(c.is_ascii_alphanumeric() || "-_.=".contains(c)))
+            .next()
+            .is_some_and(|t| t.split('.').count() >= 2);
     aws || jwt
 }
 
@@ -1563,6 +1649,72 @@ mod tests {
         let kept =
             "Agent Screen 0.1.41 at 12:30:45 took 1/2 of it, e.g. a 16:9 window and/or more.";
         assert_eq!(r.text(kept), kept);
+    }
+
+    /// Chinese prose has no spaces between words; the review of #240 found
+    /// each of these passing through.
+    #[test]
+    fn redaction_works_in_chinese_prose() {
+        let r = redactor().with_name("张伟");
+        for (text, gone, marker) in [
+            ("打开了report.pdf", "report", FILE),
+            ("文件 report.pdf。", "report", FILE),
+            ("连接git.acme.internal失败", "acme", HOST),
+            ("ip是192.168.1.5", "192.168", HOST),
+            (
+                "密钥ghp_16C7e42F292c6912E7710c838347Ae178B4a",
+                "ghp_",
+                SECRET,
+            ),
+            ("（sk-ant-api03-abc）已失效", "sk-ant", SECRET),
+            (
+                "令牌：eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig，过期了",
+                "eyJ",
+                SECRET,
+            ),
+            ("密码是hunter2，不对", "hunter2", SECRET),
+            ("password：hunter2", "hunter2", SECRET),
+            ("保存到/Users/zw/文档/税务/2025.pdf了", "税务", PATH),
+            ("发邮件给zw@corp.example吧", "zw@", EMAIL),
+            ("我和张伟一起测试", "张伟", PRIVATE),
+            ("张伟说点击无效", "张伟", PRIVATE),
+        ] {
+            let out = r.text(text);
+            assert!(!out.contains(gone), "{text}: {out}");
+            assert!(out.contains(marker), "{text}: {out}");
+        }
+        // The Chinese around a match stays, and so do Agent Screen's words.
+        assert_eq!(r.text("打开了report.pdf"), format!("打开了{FILE}"));
+        assert_eq!(r.text("文件 report.pdf。"), format!("文件 {FILE}。"));
+        assert_eq!(
+            r.text("连接git.acme.internal失败"),
+            format!("连接{HOST}失败")
+        );
+        let kept = "computer 的 left_click 在 display 5 上没有反应，版本 0.1.41。";
+        assert_eq!(r.text(kept), kept);
+        // One character of a name, or a name inside a longer Latin word, stays.
+        assert_eq!(r.text("张先生"), "张先生");
+        let latin = redactor().with_name("Alice Smith");
+        assert_eq!(
+            latin.text("Alice说点击无效"),
+            format!("{PRIVATE}说点击无效")
+        );
+    }
+
+    #[test]
+    fn a_key_counts_wherever_it_starts() {
+        let r = redactor();
+        for text in [
+            "key:ghp_abc123",
+            "(github_pat_11ABC)",
+            "auth=sk-proj-x",
+            "x/AKIAIOSFODNN7EXAMPLE",
+        ] {
+            let out = r.text(text);
+            assert!(out.contains(SECRET), "{text}: {out}");
+        }
+        // A word that merely contains a prefix stays.
+        assert_eq!(r.text("task-runner risk-free"), "task-runner risk-free");
     }
 
     #[test]

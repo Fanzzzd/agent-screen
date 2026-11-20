@@ -24,6 +24,8 @@ Reports are public. Redaction (`agent_screen_model::report::Redactor`, no OS cal
 - Tool-call arguments keep their keys and only the values of keys that carry Agent Screen's own data: handles, coordinates, actions, sizes, flags. `text`, `title`, `url`, `user_instruction`, element text and every other value become `[removed]`. A tool that isn't Agent Screen's becomes `[another tool]`.
 - The diagnostics report already holds only compiled build fields.
 
+Chinese, Japanese and Korean prose has no spaces, so a token also ends at full-width punctuation and where that text meets Latin text: "连接git.acme.internal失败" has the token `git.acme.internal`. A path stays one token across a slash, so a folder named in Chinese goes with it. A key counts wherever it starts after a character that isn't a letter or digit, and a name of two Chinese characters, such as 张伟, is matched anywhere in the text.
+
 This is a denylist over free text, and it can't recognize every private word: unquoted words the user typed, a window title it was never told about, a name or a place in prose. So every claim says "redacts known patterns; review before sending", the tool's description tells the agent to write only about Agent Screen's behavior, and the user reads the whole report on the card before anything leaves the Mac.
 
 The tool's result carries the report exactly as it would leave the Mac.
