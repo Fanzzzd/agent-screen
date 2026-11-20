@@ -185,6 +185,20 @@ fn since(log: &Log, from: usize) -> Vec<String> {
     log.lock().unwrap_or_else(|e| e.into_inner())[from..].to_vec()
 }
 
+/// The page's events since `from` once `done` says they're all in, or
+/// after 3 s. A window shown a moment ago, as the handed-over one, may
+/// deliver them late.
+fn wait_for(log: &Log, from: usize, done: impl Fn(&[String]) -> bool) -> Vec<String> {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        let events = since(log, from);
+        if done(&events) || std::time::Instant::now() >= until {
+            return events;
+        }
+        sleep_ms(100);
+    }
+}
+
 fn profile() -> PathBuf {
     out().join("handoverclicks-profile")
 }
@@ -507,7 +521,7 @@ fn test(port: u16, log: &Log) -> Result<()> {
         let has = |events: &[String], e: &str| events.iter().any(|x| x.starts_with(e));
         let from = mark(log);
         let r = click(plain);
-        let ev = since(log, from);
+        let ev = wait_for(log, from, |ev| has(ev, "plain acted"));
         report("click plain", &r, &ev);
         check(
             "a click on a button fires trusted pointer, mouse and click events, and its click handler",
@@ -520,7 +534,7 @@ fn test(port: u16, log: &Log) -> Result<()> {
         );
         let from = mark(log);
         let r = click(trigger);
-        let ev = since(log, from);
+        let ev = wait_for(log, from, |ev| has(ev, "popover opened"));
         report("click trigger", &r, &ev);
         check(
             "a click on a pointerdown trigger opens its portal popover",
@@ -529,7 +543,7 @@ fn test(port: u16, log: &Log) -> Result<()> {
         );
         let from = mark(log);
         let r = click(strict);
-        let ev = since(log, from);
+        let ev = wait_for(log, from, |ev| has(ev, "strict acted"));
         report("click strict", &r, &ev);
         check(
             "a click on a button that wants trusted pointerdown, pointerup and click acts",
@@ -544,8 +558,7 @@ fn test(port: u16, log: &Log) -> Result<()> {
             "type",
             json!({ "sessionKey": KEY, "displayId": id, "text": "Find me" }),
         );
-        sleep_ms(800);
-        let ev = since(log, from);
+        let ev = wait_for(log, from, |ev| has(ev, "value Find me|"));
         report("click field, type", &r, &ev);
         check(
             "a click on a text field focuses it, and typed text lands there, not in the page's shortcut",
@@ -560,16 +573,16 @@ fn test(port: u16, log: &Log) -> Result<()> {
             ("strict", strict_n),
         ] {
             for action in ["press", "click"] {
+                let wanted = match label {
+                    "plain" => "plain acted",
+                    "trigger" => "popover opened",
+                    _ => "strict acted",
+                };
                 let from = mark(log);
                 let r = act(n, action, None);
-                let ev = since(log, from);
+                let ev = wait_for(log, from, |ev| has(ev, wanted));
                 report(&format!("elementAction {action} {label}"), &r, &ev);
                 if action == "click" {
-                    let wanted = match label {
-                        "plain" => "plain acted",
-                        "trigger" => "popover opened",
-                        _ => "strict acted",
-                    };
                     check(
                         &format!(
                             "act_on_element click on the {label} control acts as a click does"
@@ -586,28 +599,39 @@ fn test(port: u16, log: &Log) -> Result<()> {
         // click; then by focus and type-ahead.
         let from = mark(log);
         let r = click(sel);
-        sleep_ms(500);
         // The select's menu is a window of its own; the popup button's
-        // children in the page's tree have no real frames.
-        let menu_window = control
-            .call("listWindows", json!({ "sessionKey": KEY, "displayId": id }))
-            .ok()
-            .and_then(|l| {
-                l["windows"].as_array().and_then(|ws| {
-                    ws.iter()
-                        .filter_map(|w| w["windowId"].as_u64())
-                        .find(|&w| w != window_id)
-                })
-            });
-        let menu = match menu_window {
-            Some(w) => control
-                .call(
-                    "windowState",
-                    json!({ "sessionKey": KEY, "displayId": id, "windowId": w }),
-                )
-                .map(|s| s["tree"].as_str().unwrap_or_default().to_string())
-                .unwrap_or_default(),
-            None => String::new(),
+        // children in the page's tree have no real frames. It may take a
+        // moment to show and to list its items.
+        let menu_state = || {
+            let menu_window = control
+                .call("listWindows", json!({ "sessionKey": KEY, "displayId": id }))
+                .ok()
+                .and_then(|l| {
+                    l["windows"].as_array().and_then(|ws| {
+                        ws.iter()
+                            .filter_map(|w| w["windowId"].as_u64())
+                            .find(|&w| w != window_id)
+                    })
+                });
+            let menu = match menu_window {
+                Some(w) => control
+                    .call(
+                        "windowState",
+                        json!({ "sessionKey": KEY, "displayId": id, "windowId": w }),
+                    )
+                    .map(|s| s["tree"].as_str().unwrap_or_default().to_string())
+                    .unwrap_or_default(),
+                None => String::new(),
+            };
+            (menu_window, menu)
+        };
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let (menu_window, menu) = loop {
+            let (w, menu) = menu_state();
+            if element(&menu, "Preview").is_ok() || std::time::Instant::now() >= until {
+                break (w, menu);
+            }
+            sleep_ms(200);
         };
         println!("menu window {menu_window:?}: {}", cut(&menu, 800));
         let item = element(&menu, "Preview").ok();
@@ -617,8 +641,7 @@ fn test(port: u16, log: &Log) -> Result<()> {
                 "no Preview item in the tree after the click"
             )),
         };
-        sleep_ms(500);
-        let ev = since(log, from);
+        let ev = wait_for(log, from, |ev| has(ev, "value Find me|Preview"));
         report("select by clicks", &picked, &ev);
         check(
             "a click opens the native select and a click on an item picks it",
@@ -635,8 +658,9 @@ fn test(port: u16, log: &Log) -> Result<()> {
             "type",
             json!({ "sessionKey": KEY, "displayId": id, "text": "Dev" }),
         );
-        sleep_ms(800);
-        let ev = since(log, from);
+        let ev = wait_for(log, from, |ev| {
+            ev.iter().any(|e| e.ends_with("|Development"))
+        });
         report("select focus + type", &typed, &ev);
         check(
             "focus and type-ahead choose a select item",
