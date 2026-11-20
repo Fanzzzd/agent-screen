@@ -620,6 +620,7 @@ const EFFECT_WAIT: Duration = Duration::from_millis(600);
 /// Where a press's effect is read: the display's change counter, when it
 /// runs, the app's windows on Agent Displays, and the page.
 struct Watcher {
+    _count_hold: super::agent::ChangeCountHold,
     display: Option<Arc<crate::mac::capture::Latest>>,
     pid: i32,
     window: u32,
@@ -633,11 +634,13 @@ impl Watcher {
         pressed: &ax::Sendable,
         cx: &AsyncApp,
     ) -> Self {
+        let count_hold = super::agent::hold_change_counting(id);
         let display =
             crate::ui::stream::global().and_then(|s| s.read_with(cx, |s, _| s.latest(id)));
         let pressed = ax::Sendable(pressed.get().clone());
         let page = off(cx, move || beside::page(target, pressed.get())).await;
         Watcher {
+            _count_hold: count_hold,
             display,
             pid: target.pid,
             window: target.window_id,

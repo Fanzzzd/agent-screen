@@ -6612,23 +6612,97 @@ fn watch_for_changes(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) {
         s.want(id, "agent", 30, px, cx);
     });
     let at = Instant::now();
-    ACTION_BASE.with(|b| b.borrow_mut().insert(id, at));
-    AGENT_COUNT_AT.with(|a| a.borrow_mut().insert(id, at));
+    ACTION_BASE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(id, at);
+    AGENT_COUNT_AT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(id, at);
     // Safety valve if an action is sent without a follow-up `wait_until_still`
     // (for example, direct control-socket `click`): stop CPU luma scanning
-    // after 2 s while keeping `"agent-warm"` alive for 30 s.
+    // after 2 s once no settle wait or in-flight press check holds counting,
+    // while keeping `"agent-warm"` alive for 30 s.
     let streams_weak = streams.downgrade();
     cx.spawn(async move |cx: &mut AsyncApp| {
-        cx.background_executor().timer(Duration::from_secs(2)).await;
-        let still_same = AGENT_COUNT_AT.with(|a| a.borrow().get(&id).copied() == Some(at));
-        let settling = AGENT_SETTLING.with(|s| s.borrow().get(&id).copied().unwrap_or(0) > 0);
-        if still_same && !settling {
-            AGENT_COUNT_AT.with(|a| a.borrow_mut().remove(&id));
-            let _ = streams_weak.update(cx, |s, cx| s.want(id, "agent", 0, (0, 0), cx));
+        loop {
+            cx.background_executor().timer(Duration::from_secs(2)).await;
+            let still_same = AGENT_COUNT_AT
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&id)
+                .copied()
+                == Some(at);
+            match safety_timer_step(still_same, count_holds(id)) {
+                SafetyTimerStep::Superseded => break,
+                SafetyTimerStep::KeepWaiting => continue,
+                SafetyTimerStep::StopCounting => {
+                    AGENT_COUNT_AT
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&id);
+                    let _ = streams_weak.update(cx, |s, cx| s.want(id, "agent", 0, (0, 0), cx));
+                    break;
+                }
+            }
         }
     })
     .detach();
     keep_counting(id, cx);
+}
+
+/// Process-wide RAII hold that keeps `"agent"` luma change counting active on
+/// `id` while a settle wait or an in-flight `shared_app::Watcher` press check
+/// runs, so `watch_for_changes`'s 2 s safety timer does not drop the display
+/// signal if `AXPress` blocks for more than 2 s. Safe to create and drop on
+/// different threads.
+pub(super) struct ChangeCountHold {
+    id: DisplayId,
+}
+
+impl Drop for ChangeCountHold {
+    fn drop(&mut self) {
+        let mut map = AGENT_COUNT_HOLDS.lock().unwrap_or_else(|e| e.into_inner());
+        let next = map.get(&self.id).copied().unwrap_or(1).saturating_sub(1);
+        if next == 0 {
+            map.remove(&self.id);
+        } else {
+            map.insert(self.id, next);
+        }
+    }
+}
+
+pub(super) fn hold_change_counting(id: DisplayId) -> ChangeCountHold {
+    let mut map = AGENT_COUNT_HOLDS.lock().unwrap_or_else(|e| e.into_inner());
+    *map.entry(id).or_default() += 1;
+    ChangeCountHold { id }
+}
+
+fn count_holds(id: DisplayId) -> usize {
+    AGENT_COUNT_HOLDS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&id)
+        .copied()
+        .unwrap_or(0)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SafetyTimerStep {
+    Superseded,
+    KeepWaiting,
+    StopCounting,
+}
+
+fn safety_timer_step(still_same: bool, holds: usize) -> SafetyTimerStep {
+    if !still_same {
+        SafetyTimerStep::Superseded
+    } else if holds > 0 {
+        SafetyTimerStep::KeepWaiting
+    } else {
+        SafetyTimerStep::StopCounting
+    }
 }
 
 /// Keep the display's capture stream warm for 30 s without holding `"agent"`
@@ -6638,15 +6712,19 @@ fn keep_counting(id: DisplayId, cx: &mut AsyncApp) {
         return;
     };
     let wanted = Instant::now();
-    AGENT_ACTIVE.with(|a| a.borrow_mut().insert(id, wanted));
+    AGENT_ACTIVE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(id, wanted);
     let streams = streams.downgrade();
     cx.spawn(async move |cx: &mut AsyncApp| {
         cx.background_executor()
             .timer(Duration::from_secs(30))
             .await;
-        let latest = AGENT_ACTIVE.with(|a| a.borrow().get(&id).copied());
-        if latest == Some(wanted) {
-            AGENT_ACTIVE.with(|a| a.borrow_mut().remove(&id));
+        let mut active = AGENT_ACTIVE.lock().unwrap_or_else(|e| e.into_inner());
+        if active.get(&id).copied() == Some(wanted) {
+            active.remove(&id);
+            drop(active);
             let _ = streams.update(cx, |s, cx| s.want(id, "agent-warm", 0, (0, 0), cx));
         }
     })
@@ -6666,7 +6744,7 @@ async fn wait_until_still(id: DisplayId, size: (f64, f64), cx: &mut AsyncApp) {
         s.want(id, "agent", 30, px, cx);
         s.latest(id)
     });
-    AGENT_SETTLING.with(|s| *s.borrow_mut().entry(id).or_default() += 1);
+    let hold = hold_change_counting(id);
     let start = Instant::now();
     // The stream has been counting since the action, so no change after it
     // is lost to a stream still starting. An app may draw what an action
@@ -6675,7 +6753,9 @@ async fn wait_until_still(id: DisplayId, size: (f64, f64), cx: &mut AsyncApp) {
     // changed, the wait lasts half a second from the action, then until
     // the display has been still for 120 ms.
     let since = ACTION_BASE
-        .with(|b| b.borrow_mut().remove(&id))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&id)
         .filter(|at| at.elapsed() < Duration::from_secs(5))
         .unwrap_or(start);
     // Watch `Latest::changes` off the main thread instead of hopping onto the
@@ -6704,18 +6784,12 @@ async fn wait_until_still(id: DisplayId, size: (f64, f64), cx: &mut AsyncApp) {
             }
         })
         .await;
-    let remaining = AGENT_SETTLING.with(|s| {
-        let mut map = s.borrow_mut();
-        let next = map.get(&id).copied().unwrap_or(1).saturating_sub(1);
-        if next == 0 {
-            map.remove(&id);
-        } else {
-            map.insert(id, next);
-        }
-        next
-    });
-    if remaining == 0 {
-        AGENT_COUNT_AT.with(|a| a.borrow_mut().remove(&id));
+    drop(hold);
+    if count_holds(id) == 0 {
+        AGENT_COUNT_AT
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&id);
         streams.update(cx, |s, cx| s.want(id, "agent", 0, (0, 0), cx));
     }
     keep_counting(id, cx);
@@ -6729,21 +6803,21 @@ const VS_CODE_MENU_NOTE: &str = "This app is built on VS Code. It ran this menu 
 /// What an agent hears after pressing an Electron app's menu item.
 const ELECTRON_MENU_NOTE: &str = "This is an Electron app. Electron reports a menu item pressed through accessibility to the app as its keyboard shortcut (event.triggeredByAccelerator is true), and some apps ignore shortcuts while a text field has focus. If the window shows no change, press the item again with real_input: true: once the user allows it, Agent Screen chooses it with a real click on the display's menu bar. Or move focus out of the text field, with a click on an empty part of the window, then press it again.";
 
-thread_local! {
-    /// When each display last settled after an action.
-    static AGENT_ACTIVE: std::cell::RefCell<std::collections::HashMap<DisplayId, std::time::Instant>> =
-        std::cell::RefCell::new(std::collections::HashMap::new());
-    /// When each display's last action began.
-    static ACTION_BASE: std::cell::RefCell<std::collections::HashMap<DisplayId, Instant>> =
-        std::cell::RefCell::new(std::collections::HashMap::new());
-    /// Last `watch_for_changes` stamp so the 2 s safety timer only clears
-    /// stale counting when no newer action arrived.
-    static AGENT_COUNT_AT: std::cell::RefCell<std::collections::HashMap<DisplayId, Instant>> =
-        std::cell::RefCell::new(std::collections::HashMap::new());
-    /// Number of active `wait_until_still` waits per display.
-    static AGENT_SETTLING: std::cell::RefCell<std::collections::HashMap<DisplayId, usize>> =
-        std::cell::RefCell::new(std::collections::HashMap::new());
-}
+/// Process-wide change-counting state per display (not `thread_local!`, so
+/// holds created or dropped on background threads stay visible to main-thread
+/// timers without count drift).
+static AGENT_ACTIVE: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<DisplayId, Instant>>,
+> = std::sync::LazyLock::new(Default::default);
+static ACTION_BASE: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<DisplayId, Instant>>,
+> = std::sync::LazyLock::new(Default::default);
+static AGENT_COUNT_AT: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<DisplayId, Instant>>,
+> = std::sync::LazyLock::new(Default::default);
+static AGENT_COUNT_HOLDS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<DisplayId, usize>>,
+> = std::sync::LazyLock::new(Default::default);
 
 /// Screenshot pixels per display point: below 1 on displays whose
 /// screenshot is scaled down.
@@ -8621,5 +8695,61 @@ mod handle_one_arm_tests {
         });
         assert_eq!(refreshed, 2);
         assert!(propagated_err.is_err());
+    }
+
+    #[test]
+    fn change_count_hold_keeps_safety_timer_waiting_across_threads_until_released() {
+        use super::{SafetyTimerStep, count_holds, hold_change_counting, safety_timer_step};
+        use std::sync::mpsc;
+
+        let id = 4242;
+        assert_eq!(count_holds(id), 0);
+        assert_eq!(
+            safety_timer_step(true, count_holds(id)),
+            SafetyTimerStep::StopCounting
+        );
+
+        // Take a hold on a background thread and verify visibility on the test
+        // thread, then move the hold across threads and drop it on the test
+        // thread so cross-thread create/drop never drifts.
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let bg_hold = hold_change_counting(id);
+            ready_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            bg_hold
+        });
+        ready_rx.recv().unwrap();
+
+        assert_eq!(count_holds(id), 1);
+        assert_eq!(
+            safety_timer_step(true, count_holds(id)),
+            SafetyTimerStep::KeepWaiting
+        );
+        assert_eq!(
+            safety_timer_step(false, count_holds(id)),
+            SafetyTimerStep::Superseded
+        );
+
+        // Overlapping hold on this thread keeps count at 2 until both drop.
+        let settle_hold = hold_change_counting(id);
+        assert_eq!(count_holds(id), 2);
+        drop(settle_hold);
+        assert_eq!(count_holds(id), 1);
+        assert_eq!(
+            safety_timer_step(true, count_holds(id)),
+            SafetyTimerStep::KeepWaiting
+        );
+
+        release_tx.send(()).unwrap();
+        let moved_hold = worker.join().unwrap();
+        assert_eq!(count_holds(id), 1);
+        drop(moved_hold);
+        assert_eq!(count_holds(id), 0);
+        assert_eq!(
+            safety_timer_step(true, count_holds(id)),
+            SafetyTimerStep::StopCounting
+        );
     }
 }
