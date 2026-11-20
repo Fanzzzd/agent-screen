@@ -473,7 +473,7 @@ impl InputQueue {
         let now = self.now();
         let id = self
             .queue
-            .enqueue_front(
+            .enqueue_front_beside(
                 owner,
                 "preview-waiting".into(),
                 "Preview the waiting line".into(),
