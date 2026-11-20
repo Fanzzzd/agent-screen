@@ -883,11 +883,16 @@ impl Channel {
         };
         match decided {
             NewPage::Wait => {
+                log::debug!(
+                    "devtools: pid {} page {target} has no address yet",
+                    self.pid
+                );
                 addressless
                     .entry(target.to_string())
                     .or_insert_with(Instant::now);
             }
             NewPage::Keep => {
+                log::debug!("devtools: pid {} keeps its new page {target}", self.pid);
                 addressless.remove(target);
             }
             NewPage::Forward => {

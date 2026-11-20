@@ -167,22 +167,24 @@ fn acted_recently(display: DisplayId, pid: i32) -> bool {
         .any(|(d, p, until)| *d == display && p.is_none_or(|p| p == pid) && now < *until)
 }
 
-/// Whether an agent drove `pid` just now, by its own input to it or to a
-/// display that shows a window of it.
+/// Whether an agent drove `pid` just now: its input, or an element action,
+/// to a display that shows a window of it, in the last `ACTION_WINDOW`. A
+/// launch's cold start doesn't count: links that reach the agents'
+/// instance in its first 30 s are the user's too.
 pub fn agent_drove(pid: i32) -> bool {
     let now = std::time::Instant::now();
-    let driven: Vec<(DisplayId, Option<i32>)> = ACTED
+    let driven: Vec<DisplayId> = ACTED
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .iter()
-        .filter(|(_, _, until)| now < *until)
-        .map(|(d, p, _)| (*d, *p))
+        .filter(|(_, p, until)| p.is_none() && now < *until)
+        .map(|(d, _, _)| *d)
         .collect();
-    if driven.iter().any(|(_, p)| *p == Some(pid)) {
-        return true;
+    if driven.is_empty() {
+        return false;
     }
     let shown = windows::all();
-    driven.iter().filter(|(_, p)| p.is_none()).any(|(d, _)| {
+    driven.iter().any(|d| {
         let area = super::cg::display_bounds(*d);
         shown
             .iter()
