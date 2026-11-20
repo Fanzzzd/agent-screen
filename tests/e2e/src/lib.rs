@@ -531,7 +531,10 @@ fn start_sign(name: &str) {
     let Some(mut sign) = self::sign().take() else {
         return;
     };
-    if manifest::hands_off(name) {
+    let acts = manifest::user_acts(name);
+    if let Some(text) = acts {
+        sign.say(&format!("count 3 {name}: {text}"));
+    } else if manifest::hands_off(name) {
         sign.say(&format!(
             "count 3 {name}: don't touch the mouse or keyboard / 请勿操作鼠标和键盘"
         ));
@@ -543,7 +546,10 @@ fn start_sign(name: &str) {
     sleep_ms(3000);
     sign.say(&format!("badge {name}"));
     *self::sign() = Some(sign);
-    watch_for_you();
+    // The user's input is what the script asked for.
+    if acts.is_none() {
+        watch_for_you();
+    }
 }
 
 /// Start the sign's process, once: the wait for the user shows on it too.

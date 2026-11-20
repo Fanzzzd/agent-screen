@@ -165,6 +165,11 @@ pub struct Script {
     /// mutes their sound, or puts windows, alerts, cards or focus on their
     /// screen. Its sign asks the user to keep their hands off.
     pub hands_off: bool,
+    /// What the user does during the run, as the script asks, in English
+    /// and Chinese: its sign shows this in orange instead of asking them to
+    /// keep their hands off, and their input doesn't count against the run.
+    /// Empty for none.
+    pub user_acts: &'static str,
     /// `run` builds the debug app for it before the countdown.
     pub app: bool,
     /// The most displays it makes. `suite` holds it back until the display
@@ -179,6 +184,11 @@ pub struct Script {
 impl Script {
     const fn hands_off(mut self) -> Script {
         self.hands_off = true;
+        self
+    }
+
+    const fn user_acts(mut self, text: &'static str) -> Script {
+        self.user_acts = text;
         self
     }
 
@@ -216,6 +226,7 @@ const fn script(
         tier,
         drive,
         hands_off: false,
+        user_acts: "",
         app: true,
         displays,
         env: &[],
@@ -255,10 +266,14 @@ pub const SCRIPTS: &[Script] = &[
     script("cursormenu", &[Elements], Full, Agent, 1),
     script("demo", &[], Full, Hook, 3)
         .manual("it records the README's demo and writes docs/media/demo.gif"),
-    script("diafocused", &[AgentInput, Browser], Full, Agent, 1).manual(
+    script("diafocused", &[AgentInput, Browser], Full, Agent, 1)
+        .user_acts("Keep typing in your browser window / 请在你的浏览器窗口里继续打字")
+        .manual(
         "it needs your own browser in front: run it with E2E_BROWSER=\"Google Chrome\" E2E_CHROME=1 while a Chrome window of yours has focus; Dia skips until it is verified",
     ),
-    script("diashared", &[AgentInput, Browser], Full, Agent, 1).manual(
+    script("diashared", &[AgentInput, Browser], Full, Agent, 1)
+        .user_acts("Keep typing in your Dia window / 请在你的 Dia 窗口里继续打字")
+        .manual(
         "it drives your own Dia: run it with E2E_DIA=1 while you type in another Dia window",
     ),
     script("displaychange", &[Peek, Displays], Full, Hook, 2).hands_off(),
@@ -364,6 +379,11 @@ pub fn find(name: &str) -> Option<&'static Script> {
 /// the manifest doesn't know asks too.
 pub fn hands_off(name: &str) -> bool {
     find(name).is_none_or(|s| s.hands_off)
+}
+
+/// What the script's sign asks the user to do during the run, if anything.
+pub fn user_acts(name: &str) -> Option<&'static str> {
+    find(name).map(|s| s.user_acts).filter(|t| !t.is_empty())
 }
 
 /// Whether `run` builds the debug app for the script.
