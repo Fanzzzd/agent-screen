@@ -462,6 +462,19 @@ pub fn on_screen_frames() -> Vec<(u32, i64, Rect)> {
     out
 }
 
+/// Id, layer and bounds of every on-screen window, including desktop elements
+/// (wallpaper) and this app's windows. Matches `on_screen_ids()`'s window set
+/// in a single WindowServer call.
+pub fn on_screen_frames_with_desktop() -> Vec<(u32, i64, Rect)> {
+    let mut out = Vec::new();
+    list_raw(
+        CGWindowListOption::OptionOnScreenOnly,
+        0,
+        |_, window_id, layer, bounds, _| out.push((window_id, layer, bounds)),
+    );
+    out
+}
+
 mod cf {
     use std::ffi::c_void;
     pub type Ref = *const c_void;
