@@ -180,7 +180,8 @@ impl<H> Displays<H> {
     /// Resolve which Agent Display owns `target` from `bounds` and `displays`
     /// through the single model rule (`effective_agent_display`) and then
     /// evaluate [`Displays::held_by_at`] (#204, M4).
-    pub fn held_by_bounds_at(
+    #[cfg(test)]
+    fn held_by_bounds_at(
         &self,
         asking: DisplayId,
         target: WindowTarget,
