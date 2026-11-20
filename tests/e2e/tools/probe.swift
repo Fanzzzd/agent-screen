@@ -1,6 +1,9 @@
 // Read-only lookups for the end-to-end tests.
 //
 //   probe windows PID         on-screen windows of PID as JSON lines
+//   probe allwindows PID      as windows, with windows not on screen too
+//   probe hideloop PID S      hide PID whenever it shows, every 20 ms for S seconds
+//   probe unhide PID          unhide PID without activating it; "shown" once it isn't hidden
 //   probe displays            how many Agent Screen virtual displays are active
 //   probe bounds ID           display ID's global bounds in points
 //   probe idle                seconds since the user last touched a key or the pointer
@@ -45,6 +48,34 @@ switch args[1] {
 case "windows":
   let pid = Int32(args[2])!
   let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as! [[String: Any]]
+  for w in list where (w[kCGWindowOwnerPID as String] as? Int32) == pid {
+    let b = w[kCGWindowBounds as String] as! [String: Double]
+    print("{\"id\":\(w[kCGWindowNumber as String] as! Int),\"layer\":\(w[kCGWindowLayer as String] as! Int),\"x\":\(b["X"]!),\"y\":\(b["Y"]!),\"width\":\(b["Width"]!),\"height\":\(b["Height"]!)}")
+  }
+case "hideloop":
+  // Hide PID every 20 ms for SECONDS whenever it shows, from before it
+  // checks in, as an app the user hid: its windows never draw.
+  let pid = pid_t(args[2])!
+  let end = Date(timeIntervalSinceNow: Double(args[3])!)
+  while Date() < end {
+    if let app = NSRunningApplication(processIdentifier: pid), !app.isHidden { app.hide() }
+    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+  }
+case "unhide":
+  // As the user showing a hidden app again from the Dock's menu, without
+  // bringing it to the front.
+  let pid = pid_t(args[2])!
+  let app = NSRunningApplication(processIdentifier: pid)
+  _ = app?.unhide()
+  let end = Date(timeIntervalSinceNow: 1)
+  while Date() < end, app?.isHidden == true {
+    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+  }
+  print(app?.isHidden == false ? "shown" : "hidden")
+case "allwindows":
+  // As windows, with the windows not on screen too, as a hidden app's.
+  let pid = Int32(args[2])!
+  let list = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as! [[String: Any]]
   for w in list where (w[kCGWindowOwnerPID as String] as? Int32) == pid {
     let b = w[kCGWindowBounds as String] as! [String: Double]
     print("{\"id\":\(w[kCGWindowNumber as String] as! Int),\"layer\":\(w[kCGWindowLayer as String] as! Int),\"x\":\(b["X"]!),\"y\":\(b["Y"]!),\"width\":\(b["Width"]!),\"height\":\(b["Height"]!)}")

@@ -576,14 +576,14 @@ async fn press_at(
             "windowId": target.window_id,
             "route": "accessibility",
             "note": format!(
-                "{why}, so the click went to \"{label}\" as an accessibility press, with no mouse events. \"{label}\" lists no accessibility press action, as the elements of a page in Dia don't, and there was no visible change within {wait} ms: the press may not have acted, or the page may still be loading. Take a screenshot before retrying.",
+                "{why}, so the click went to \"{label}\" as an accessibility press, not a posted click. \"{label}\" lists no accessibility press action, as the elements of a page in Dia don't, and there was no visible change within {wait} ms: the press may not have acted, or the page may still be loading. Take a screenshot before retrying.",
                 wait = EFFECT_WAIT.as_millis(),
             ),
             "changed": null,
         }));
     }
     let what = format!(
-        "{why}, so the click went to \"{label}\" as an accessibility press, with no mouse events"
+        "{why}, so the click went to \"{label}\" as an accessibility press, not a posted click"
     );
     let (note, changed) = outcome(&what, pressed, seen)?;
     Ok(json!({
@@ -735,13 +735,13 @@ fn outcome(
     match (seen, error) {
         (Effect::Seen, None) => Ok((
             format!(
-                "{what}. The window changed after it. A page sees a click event but no mousedown or mouseup."
+                "{what}. The window changed after it. A press in Chrome gives the page trusted pointer, mouse and click events, as a click does; another app may send its page only a click."
             ),
             Some(true),
         )),
         (Effect::Seen, Some(error)) => Ok((
             format!(
-                "{what}. The app answered with an error ({error:?}), but the window changed after it, so the press ran. A page sees a click event but no mousedown or mouseup."
+                "{what}. The app answered with an error ({error:?}), but the window changed after it, so the press ran. A press in Chrome gives the page trusted pointer, mouse and click events, as a click does; another app may send its page only a click."
             ),
             Some(true),
         )),
@@ -753,7 +753,7 @@ fn outcome(
         )),
         (Effect::Unknown, None) => Ok((
             format!(
-                "{what}. Accessibility didn't show the window's contents before and after, so Agent Screen can't say whether the press did anything: take a screenshot to check. A page sees a click event but no mousedown or mouseup."
+                "{what}. Accessibility didn't show the window's contents before and after, so Agent Screen can't say whether the press did anything: take a screenshot to check. A press in Chrome gives the page trusted pointer, mouse and click events, as a click does; another app may send its page only a click."
             ),
             None,
         )),
