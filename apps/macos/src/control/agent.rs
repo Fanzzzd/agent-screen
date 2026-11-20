@@ -6142,8 +6142,34 @@ async fn launch_now(
         // catch's too, once the app says it is a window (#270), unless the
         // user has acted in the app since (ADR 0007).
         if taken.is_none()
-            && let Some(window) = catch.as_ref().and_then(|c| c.undescribed())
+            && let Some(kept) = catch.as_ref().and_then(|c| c.undescribed())
         {
+            // Without its number from the app, the app's one new window in
+            // the system's list is it; none or several, wait on.
+            let window = match kept {
+                Some(window) => Some(window),
+                None => {
+                    let before = before.clone();
+                    off(cx, move || {
+                        let mut new = windows::all().into_iter().filter(|w| {
+                            w.target.pid == pid
+                                && w.layer == 0
+                                && !before.contains(&w.target.window_id)
+                        });
+                        match (new.next(), new.next()) {
+                            (Some(w), None) => Some(w.target.window_id),
+                            _ => None,
+                        }
+                    })
+                    .await
+                }
+            };
+            let Some(window) = window else {
+                if asked_at.elapsed() < UNDESCRIBED_WAIT {
+                    continue;
+                }
+                break;
+            };
             let target = WindowTarget {
                 pid,
                 window_id: window,

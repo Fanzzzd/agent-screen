@@ -460,8 +460,9 @@ struct Target {
     /// The last window taken.
     taken: Mutex<Option<u32>>,
     /// The first window the app made that it couldn't describe as it
-    /// showed, as a busy app does (#270): the launch's watch decides it.
-    undescribed: Mutex<Option<u32>>,
+    /// showed, as a busy app does (#270), by its number where the app
+    /// gave even that: the launch's watch decides it.
+    undescribed: Mutex<Option<Option<u32>>>,
     /// Set while a launch of the same app runs its own catch.
     paused: AtomicBool,
     /// Take only a window that shows this file.
@@ -597,8 +598,9 @@ impl Catch {
     }
 
     /// The first window the app made that it couldn't describe as it
-    /// showed, which a launch's catch would have taken.
-    pub fn undescribed(&self) -> Option<u32> {
+    /// showed, which a launch's catch would have taken: Some(None) when
+    /// the app didn't give its number either.
+    pub fn undescribed(&self) -> Option<Option<u32>> {
         *lock(unsafe { &(*self.target).undescribed })
     }
 
@@ -663,8 +665,8 @@ extern "C" fn created(
                     target.document.is_some(),
                     *left,
                 );
-                if keeps && let Some(id) = ax::window_id(window) {
-                    *undescribed = Some(id);
+                if keeps {
+                    *undescribed = Some(ax::window_id(window));
                     *left = after;
                 }
             }
