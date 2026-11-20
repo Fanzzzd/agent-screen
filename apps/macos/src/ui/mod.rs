@@ -4,6 +4,7 @@ pub mod help_card;
 pub mod input_bar;
 pub mod peek;
 pub mod pointer;
+pub mod queue_card;
 pub mod recordings;
 pub mod reply_field;
 pub mod report_card;
