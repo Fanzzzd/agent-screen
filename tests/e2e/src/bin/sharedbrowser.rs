@@ -33,8 +33,8 @@
 //! same harness takes posted keys as before.
 //!
 //! Needs an Electron.app: `target/e2e/Electron.app`, or E2E_ELECTRON.
-//! Puts a window and the front on your main screen for about half a
-//! minute, and clicks the Viewer once with the real pointer; keep your
+//! Puts a window and the front on your main screen for about two
+//! minutes, and clicks the Viewer once with the real pointer; keep your
 //! hands off the keyboard and mouse.
 //!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e sharedbrowser
@@ -69,7 +69,7 @@ fn main() -> ExitCode {
     run(|| {
         allow_on_your_screen(
             "Electron",
-            120_000,
+            180_000,
             "the harness's user window stands in for your own browser window, on your screen on purpose",
         );
         let before = snapshot();

@@ -6,7 +6,7 @@ use super::help_card::{
     BUTTONS, Badge, GAP, HelpCard, PADDING, RADIUS, Tone, card_button, label_row, painted, picture,
     reason_text, title_row, zh,
 };
-use super::shell::tell;
+use super::shell::{Shell, tell};
 use super::theme::{self, Theme};
 use crate::core::Core;
 use crate::i18n::t;
@@ -16,7 +16,7 @@ use core_video::pixel_buffer::CVPixelBuffer;
 use gpui::{
     Bounds, Context, HighlightStyle, InteractiveElement, IntoElement, ObjectFit, ParentElement,
     PathBuilder, Pixels, Role, SharedString, StatefulInteractiveElement, Styled, StyledText,
-    Window, canvas, div, point, prelude::FluentBuilder, px, surface,
+    WeakEntity, Window, canvas, div, point, prelude::FluentBuilder, px, surface,
 };
 use std::cell::{Cell, RefCell};
 
@@ -41,6 +41,7 @@ impl HelpCard {
             queue_picture(d.id, size, frame, &view, theme)
         });
         let asking = matches!(view.phase, Phase::Asking { .. });
+        let waiting = waiting_row(core, theme, &self.shell);
         let border_pad = if asking { 4. } else { 2. };
         let root = div()
             .id("help-card")
@@ -173,6 +174,7 @@ impl HelpCard {
                             .children(rows),
                     )
                 })
+                .children(waiting)
                 .child(scope)
                 .child(
                     div()
@@ -240,6 +242,7 @@ impl HelpCard {
                 .child(reason_text(reason, zh))
                 .children(picture)
                 .child(label_row(label, right, theme))
+                .children(waiting)
                 .child(scope_lines(None, stop_hint(), zh, theme))
                 .child(
                     div()
@@ -1061,4 +1064,67 @@ fn paint_pointer(
     if let Ok(path) = outline.build() {
         window.paint_path(path, gpui::black());
     }
+}
+
+/// The actions waiting for the user to leave an app, as the tiles' waiting
+/// line says, while the card shows for something else: one row with Let
+/// the agent continue, whose press runs every action waiting on that app
+/// (`control::front_hold`). None while none waits.
+fn waiting_row(core: &Core, theme: &Theme, shell: &WeakEntity<Shell>) -> Option<gpui::Div> {
+    let waiting: Vec<(DisplayId, String, String)> = core
+        .displays
+        .list
+        .iter()
+        .filter(|d| d.is_live() && !d.takeover)
+        .filter_map(|d| {
+            let app = core.input_queue.waiting_line(d.id)?;
+            Some((d.id, d.agent_name().to_string(), app))
+        })
+        .collect();
+    let (display, agent, app) = waiting.first()?.clone();
+    let text = match waiting.len() {
+        1 => tf!(
+            "{agent} waits for you to leave {app}",
+            "{agent} 等你离开 {app}"
+        ),
+        n => tf!(
+            "{n} agents wait for you to leave {app}",
+            "{n} 个 Agent 等你离开 {app}"
+        ),
+    };
+    let shell = shell.clone();
+    Some(
+        div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .pt(px(6.))
+            .border_t_1()
+            .border_color(theme.hairline)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(12.))
+                    .text_color(theme.label)
+                    .child(text),
+            )
+            .child(
+                card_button(
+                    "input-let-continue",
+                    t("Let the agent continue", "让 Agent 继续"),
+                    Tone::Accent,
+                    theme,
+                )
+                .flex_none()
+                .h(px(24.))
+                .px(px(10.))
+                .text_size(px(11.))
+                .on_click(move |_, window, cx| {
+                    super::shell::let_continue(&shell, display, window, cx);
+                }),
+            ),
+    )
 }
