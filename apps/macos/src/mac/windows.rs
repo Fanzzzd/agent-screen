@@ -630,6 +630,52 @@ pub fn on_display(display: DisplayId) -> Vec<Window> {
     filter_on_display(display, &windows, &online, &owners)
 }
 
+/// Whether `window_id` is currently on `display` (honoring `RECORDED_OWNERS`,
+/// ADR 0018) or on screen elsewhere, using one zero-string-allocation
+/// WindowServer scan instead of `on_display` + `cg::on_screen_ids`.
+pub fn window_presence(display: DisplayId, window_id: u32) -> (bool, bool) {
+    let Some((pid, layer, bounds)) = cg::on_screen_window_frame(window_id) else {
+        return (false, false);
+    };
+    let own = std::process::id() as i32;
+    let eligible =
+        pid != own && (0..=8).contains(&layer) && bounds.width > 40.0 && bounds.height > 40.0;
+    if !eligible {
+        return (false, true);
+    }
+    let online = online_display_areas();
+    let owners = recorded_owners_snapshot();
+    let here = window_belongs_on_display(display, window_id, &bounds, &online, &owners);
+    (here, !here)
+}
+
+fn window_belongs_on_display(
+    display: DisplayId,
+    window_id: u32,
+    bounds: &Rect,
+    online_displays: &[(DisplayId, Rect, bool)],
+    recorded_owners: &BTreeMap<u32, DisplayId>,
+) -> bool {
+    let Some(&(_, area, is_agent)) = online_displays.iter().find(|&&(id, _, _)| id == display)
+    else {
+        return false;
+    };
+    if !is_agent {
+        let others: Vec<Rect> = online_displays
+            .iter()
+            .filter(|&&(id, _, _)| id != display)
+            .map(|&(_, r, _)| r)
+            .collect();
+        return belongs(bounds, &area, &others);
+    }
+    agent_screen_model::arrangement::effective_agent_display(
+        bounds,
+        online_displays,
+        recorded_owners.get(&window_id).copied(),
+    )
+    .is_some_and(|(owner, _)| owner == display)
+}
+
 /// Menus open on a display: an app's pop-up menus, as a web page's select
 /// shows, at the pop-up menu level (kCGPopUpMenuWindowLevel).
 pub fn menus_on(display: DisplayId) -> Vec<u32> {
@@ -1137,5 +1183,28 @@ mod tests {
         let on_user = filter_on_display(1, &windows, &online, &owners);
         assert_eq!(on_user.len(), 1);
         assert_eq!(on_user[0].target.window_id, 12);
+
+        // `window_belongs_on_display` must match `filter_on_display` for every
+        // display/window pair (user display and recorded-owner agent displays).
+        for display_id in [1, 7, 8] {
+            let expected: HashSet<u32> = filter_on_display(display_id, &windows, &online, &owners)
+                .into_iter()
+                .map(|w| w.target.window_id)
+                .collect();
+            for w in &windows {
+                assert_eq!(
+                    window_belongs_on_display(
+                        display_id,
+                        w.target.window_id,
+                        &w.bounds,
+                        &online,
+                        &owners
+                    ),
+                    expected.contains(&w.target.window_id),
+                    "mismatch for display {display_id} window {}",
+                    w.target.window_id
+                );
+            }
+        }
     }
 }

@@ -997,6 +997,16 @@ impl Budget {
     }
 }
 
+const ITEM_NAMES: [&str; 4] = ["AXRole", "AXValue", "AXTitle", "AXChildren"];
+const BELONGS_NAMES: [&str; 2] = ["AXRole", "AXWindow"];
+const NEW_WINDOW_NAMES: [&str; 4] = [
+    "AXTitle",
+    "AXChildren",
+    "AXMenuItemCmdChar",
+    "AXMenuItemCmdModifiers",
+];
+const DOCK_NAMES: [&str; 4] = ["AXRole", "AXSubrole", "AXTitle", "AXParent"];
+
 /// A row's name: its first static text in depth-first pre-order, within
 /// three levels and 40 elements, that `real_click::names_row` takes, or
 /// else its own title or description. The walk stops at that text.
@@ -1015,25 +1025,25 @@ fn item_name(item: &AXUIElement, budget: &Budget) -> Option<String> {
             return;
         }
         *seen += 1;
-        if depth > 0 && string_attribute(e, "AXRole").as_deref() == Some("AXStaticText") {
-            let text = budget
-                .arm(e)
-                .then(|| string_attribute(e, "AXValue"))
-                .flatten()
+        let Some(values) = multiple_values_with(e, &ITEM_NAMES, &ITEM_NAMES_ARRAY) else {
+            return;
+        };
+        let role = values[0].downcast_ref::<CFString>().map(|s| s.to_string());
+        if depth > 0 && role.as_deref() == Some("AXStaticText") {
+            let text = values[1]
+                .downcast_ref::<CFString>()
+                .map(|s| s.to_string())
                 .filter(|t| !t.trim().is_empty())
                 .or_else(|| {
-                    budget
-                        .arm(e)
-                        .then(|| string_attribute(e, "AXTitle"))
-                        .flatten()
+                    values[2]
+                        .downcast_ref::<CFString>()
+                        .map(|s| s.to_string())
+                        .filter(|t| !t.trim().is_empty())
                 });
             texts.extend(text);
             return;
         }
-        if !budget.arm(e) {
-            return;
-        }
-        for child in elements_attribute(e, "AXChildren") {
+        for child in elements(&values[3]) {
             walk(&child, depth + 1, seen, texts, budget);
         }
     }
@@ -1093,17 +1103,12 @@ pub fn belongs(element: &AXUIElement, target: WindowTarget, allow_menu: bool) ->
     {
         return Some(false);
     }
-    let name = CFString::from_static_str("AXRole");
-    let mut value: *const CFType = std::ptr::null();
-    let error = unsafe { element.copy_attribute_value(&name, NonNull::from(&mut value)) };
-    if error == AXError::CannotComplete {
-        return None;
-    }
-    if error != AXError::Success || value.is_null() {
-        return Some(false);
-    }
-    let value = unsafe { CFRetained::from_raw(NonNull::new_unchecked(value as *mut CFType)) };
-    let Some(role) = value.downcast_ref::<CFString>().map(|r| r.to_string()) else {
+    let values = match multiple_values_result(element, &BELONGS_NAMES, &BELONGS_NAMES_ARRAY) {
+        Ok(v) => v,
+        Err(AXError::CannotComplete) => return None,
+        Err(_) => return Some(false),
+    };
+    let Some(role) = values[0].downcast_ref::<CFString>().map(|r| r.to_string()) else {
         return Some(false);
     };
     if allow_menu
@@ -1115,15 +1120,17 @@ pub fn belongs(element: &AXUIElement, target: WindowTarget, allow_menu: bool) ->
     let Some(window) = window_or_sheet(target) else {
         return Some(false);
     };
+    let owner_window = values[1]
+        .downcast_ref::<AXUIElement>()
+        .map(|w| unsafe { CFRetained::retain(NonNull::from(w)) });
+    if owner_window.is_some_and(|owner| owner == window) {
+        return Some(true);
+    }
     let element = unsafe { CFRetained::retain(NonNull::from(element)) };
-    // AXWindow is a direct association in many apps; some web elements
-    // expose only AXParent. Both must name this live window.
-    Some(
-        element_attribute(&element, "AXWindow").is_some_and(|owner| owner == window)
-            || agent_screen_model::tree::within(element, &window, |e| {
-                element_attribute(e, "AXParent")
-            }),
-    )
+    // Some web elements expose only AXParent. Both must name this live window.
+    Some(agent_screen_model::tree::within(element, &window, |e| {
+        element_attribute(e, "AXParent")
+    }))
 }
 
 /// Lookups of the text focus made on the main thread, which none should be.
@@ -2160,6 +2167,63 @@ pub enum NewWindow {
     NotReady,
 }
 
+fn collect_new_window_entries(menus: &[Element]) -> (Vec<MenuEntry>, Vec<Element>) {
+    let mut entries = Vec::new();
+    let mut elements_out = Vec::new();
+    let parse_item = |item: &AXUIElement, parent: Option<String>| {
+        if let Some(values) = multiple_values_with(item, &NEW_WINDOW_NAMES, &NEW_WINDOW_NAMES_ARRAY)
+        {
+            let title_opt = values[0].downcast_ref::<CFString>().map(|s| s.to_string());
+            let submenu = elements(&values[1]);
+            let shortcut = values[2]
+                .downcast_ref::<CFString>()
+                .map(|s| s.to_string())
+                .and_then(|key| {
+                    let mods = values[3]
+                        .downcast_ref::<CFNumber>()
+                        .and_then(|n| n.as_i64())
+                        .unwrap_or(0);
+                    format_shortcut(&key, mods)
+                });
+            let entry = MenuEntry {
+                title: title_opt.clone().unwrap_or_default(),
+                shortcut,
+                parent,
+                has_submenu: !submenu.is_empty(),
+            };
+            (entry, title_opt, submenu)
+        } else {
+            let title_opt = string_attribute(item, "AXTitle");
+            let submenu = elements_attribute(item, "AXChildren");
+            let entry = MenuEntry {
+                title: title_opt.clone().unwrap_or_default(),
+                shortcut: shortcut(item),
+                parent,
+                has_submenu: !submenu.is_empty(),
+            };
+            (entry, title_opt, submenu)
+        }
+    };
+    for title in menus {
+        for menu in elements_attribute(title, "AXChildren") {
+            for item in elements_attribute(&menu, "AXChildren") {
+                let (entry, parent, submenu) = parse_item(&item, None);
+                entries.push(entry);
+                elements_out.push(item);
+                for sub in submenu {
+                    for inner in elements_attribute(&sub, "AXChildren") {
+                        let (mut inner_entry, _, _) = parse_item(&inner, parent.clone());
+                        inner_entry.has_submenu = false;
+                        entries.push(inner_entry);
+                        elements_out.push(inner);
+                    }
+                }
+            }
+        }
+    }
+    (entries, elements_out)
+}
+
 /// Presses the item `pick_new_window` chooses in a running app's menus.
 pub fn press_new_window(pid: i32) -> NewWindow {
     let Some(bar) = element_attribute(&application(pid), "AXMenuBar") else {
@@ -2169,30 +2233,7 @@ pub fn press_new_window(pid: i32) -> NewWindow {
     if menus.is_empty() {
         return NewWindow::NotReady;
     }
-    let mut entries = Vec::new();
-    let mut elements = Vec::new();
-    let entry = |item: &AXUIElement, parent: Option<String>, has_submenu: bool| MenuEntry {
-        title: string_attribute(item, "AXTitle").unwrap_or_default(),
-        shortcut: shortcut(item),
-        parent,
-        has_submenu,
-    };
-    for title in &menus {
-        for menu in elements_attribute(title, "AXChildren") {
-            for item in elements_attribute(&menu, "AXChildren") {
-                let submenu = elements_attribute(&item, "AXChildren");
-                entries.push(entry(&item, None, !submenu.is_empty()));
-                elements.push(item.clone());
-                let parent = string_attribute(&item, "AXTitle");
-                for sub in submenu {
-                    for inner in elements_attribute(&sub, "AXChildren") {
-                        entries.push(entry(&inner, parent.clone(), false));
-                        elements.push(inner);
-                    }
-                }
-            }
-        }
-    }
+    let (entries, elements) = collect_new_window_entries(&menus);
     match pick_new_window(&entries) {
         None => NewWindow::Missing,
         Some(i) => {
@@ -2389,6 +2430,26 @@ thread_local! {
             MENU_NAMES.iter().map(|n| CFString::from_static_str(n)).collect();
         CFArray::from_retained_objects(&names)
     };
+    static ITEM_NAMES_ARRAY: CFRetained<CFArray<CFString>> = {
+        let names: Vec<CFRetained<CFString>> =
+            ITEM_NAMES.iter().map(|n| CFString::from_static_str(n)).collect();
+        CFArray::from_retained_objects(&names)
+    };
+    static BELONGS_NAMES_ARRAY: CFRetained<CFArray<CFString>> = {
+        let names: Vec<CFRetained<CFString>> =
+            BELONGS_NAMES.iter().map(|n| CFString::from_static_str(n)).collect();
+        CFArray::from_retained_objects(&names)
+    };
+    static NEW_WINDOW_NAMES_ARRAY: CFRetained<CFArray<CFString>> = {
+        let names: Vec<CFRetained<CFString>> =
+            NEW_WINDOW_NAMES.iter().map(|n| CFString::from_static_str(n)).collect();
+        CFArray::from_retained_objects(&names)
+    };
+    static DOCK_NAMES_ARRAY: CFRetained<CFArray<CFString>> = {
+        let names: Vec<CFRetained<CFString>> =
+            DOCK_NAMES.iter().map(|n| CFString::from_static_str(n)).collect();
+        CFArray::from_retained_objects(&names)
+    };
 }
 
 fn multiple_values(element: &AXUIElement) -> Option<Vec<CFRetained<CFType>>> {
@@ -2400,6 +2461,14 @@ fn multiple_values_with(
     expected: &[&str],
     cache: &'static std::thread::LocalKey<CFRetained<CFArray<CFString>>>,
 ) -> Option<Vec<CFRetained<CFType>>> {
+    multiple_values_result(element, expected, cache).ok()
+}
+
+fn multiple_values_result(
+    element: &AXUIElement,
+    expected: &[&str],
+    cache: &'static std::thread::LocalKey<CFRetained<CFArray<CFString>>>,
+) -> Result<Vec<CFRetained<CFType>>, AXError> {
     let mut raw: *const CFArray = std::ptr::null();
     let error = cache.with(|names| unsafe {
         element.copy_multiple_attribute_values(
@@ -2408,15 +2477,22 @@ fn multiple_values_with(
             NonNull::from(&mut raw),
         )
     });
-    if error != AXError::Success || raw.is_null() {
-        return None;
+    if error != AXError::Success {
+        return Err(error);
+    }
+    if raw.is_null() {
+        return Err(AXError::Failure);
     }
     let array: CFRetained<CFArray> =
         unsafe { CFRetained::from_raw(NonNull::new_unchecked(raw as *mut CFArray)) };
     let array: &CFArray<CFType> =
         unsafe { &*(&*array as *const CFArray as *const CFArray<CFType>) };
     let values = array.to_vec();
-    (values.len() == expected.len()).then_some(values)
+    if values.len() == expected.len() {
+        Ok(values)
+    } else {
+        Err(AXError::Failure)
+    }
 }
 
 /// A digest of what a page shows: each element's role, subrole, title,
@@ -2476,13 +2552,70 @@ pub fn dock_app_at(dock: i32, at: (f64, f64)) -> Option<String> {
     let mut element = unsafe { CFRetained::from_raw(raw) };
     // The icon, or a part of it, such as its running indicator.
     for _ in 0..4 {
-        if string_attribute(&element, "AXRole").as_deref() == Some("AXDockItem") {
-            return (string_attribute(&element, "AXSubrole").as_deref()
-                == Some("AXApplicationDockItem"))
-            .then(|| string_attribute(&element, "AXTitle"))
-            .flatten();
+        let values = multiple_values_with(&element, &DOCK_NAMES, &DOCK_NAMES_ARRAY)?;
+        if values[0]
+            .downcast_ref::<CFString>()
+            .is_some_and(|s| s.to_string() == "AXDockItem")
+        {
+            let is_app = values[1]
+                .downcast_ref::<CFString>()
+                .is_some_and(|s| s.to_string() == "AXApplicationDockItem");
+            return is_app
+                .then(|| values[2].downcast_ref::<CFString>().map(|s| s.to_string()))
+                .flatten();
         }
-        element = element_attribute(&element, "AXParent")?;
+        let parent = values[3].downcast_ref::<AXUIElement>()?;
+        element = unsafe { CFRetained::retain(NonNull::from(parent)) };
     }
     None
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use super::*;
+
+    fn collect_unbatched(menus: &[Element]) -> Vec<MenuEntry> {
+        let mut entries = Vec::new();
+        let entry = |item: &AXUIElement, parent: Option<String>, has_submenu: bool| MenuEntry {
+            title: string_attribute(item, "AXTitle").unwrap_or_default(),
+            shortcut: shortcut(item),
+            parent,
+            has_submenu,
+        };
+        for title in menus {
+            for menu in elements_attribute(title, "AXChildren") {
+                for item in elements_attribute(&menu, "AXChildren") {
+                    let submenu = elements_attribute(&item, "AXChildren");
+                    entries.push(entry(&item, None, !submenu.is_empty()));
+                    let parent = string_attribute(&item, "AXTitle");
+                    for sub in submenu {
+                        for inner in elements_attribute(&sub, "AXChildren") {
+                            entries.push(entry(&inner, parent.clone(), false));
+                        }
+                    }
+                }
+            }
+        }
+        entries
+    }
+
+    #[test]
+    fn batched_new_window_menu_scan_matches_unbatched_exactly() {
+        let Some(finder) = super::super::app::running_pid(std::path::Path::new(
+            "/System/Library/CoreServices/Finder.app",
+        )) else {
+            return;
+        };
+        let Some(bar) = element_attribute(&application(finder), "AXMenuBar") else {
+            return;
+        };
+        let menus = elements_attribute(&bar, "AXChildren");
+        if menus.is_empty() {
+            return;
+        }
+        let expected = collect_unbatched(&menus);
+        let (actual, _) = collect_new_window_entries(&menus);
+        assert_eq!(actual, expected);
+        assert_eq!(pick_new_window(&actual), pick_new_window(&expected));
+    }
 }
