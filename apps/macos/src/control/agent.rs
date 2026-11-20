@@ -6588,6 +6588,8 @@ fn change_pixels(size: (f64, f64)) -> (u32, u32) {
 /// Before an action: have the display's changes counted, so the stream is
 /// running by the time the screenshot after it waits for the display to
 /// settle. A stream started only then misses changes while it starts.
+/// Keeps `"agent-warm"` subscribed for 30 s so the capture stream stays warm
+/// without leaving CPU luma counting (`"agent"`) on between settles.
 fn watch_for_changes(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) {
     let Some(streams) = crate::ui::stream::global() else {
         return;
@@ -6595,13 +6597,33 @@ fn watch_for_changes(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) {
     let size = core
         .read_with(cx, |c, _| c.displays.get(id).map(|d| (d.width, d.height)))
         .unwrap_or(DEFAULT_SIZE);
-    streams.update(cx, |s, cx| s.want(id, "agent", 30, change_pixels(size), cx));
-    ACTION_BASE.with(|b| b.borrow_mut().insert(id, Instant::now()));
+    let px = change_pixels(size);
+    streams.update(cx, |s, cx| {
+        s.want(id, "agent-warm", 30, px, cx);
+        s.want(id, "agent", 30, px, cx);
+    });
+    let at = Instant::now();
+    ACTION_BASE.with(|b| b.borrow_mut().insert(id, at));
+    AGENT_COUNT_AT.with(|a| a.borrow_mut().insert(id, at));
+    // Safety valve if an action is sent without a follow-up `wait_until_still`
+    // (for example, direct control-socket `click`): stop CPU luma scanning
+    // after 2 s while keeping `"agent-warm"` alive for 30 s.
+    let streams_weak = streams.downgrade();
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        cx.background_executor().timer(Duration::from_secs(2)).await;
+        let still_same = AGENT_COUNT_AT.with(|a| a.borrow().get(&id).copied() == Some(at));
+        let settling = AGENT_SETTLING.with(|s| s.borrow().get(&id).copied().unwrap_or(0) > 0);
+        if still_same && !settling {
+            AGENT_COUNT_AT.with(|a| a.borrow_mut().remove(&id));
+            let _ = streams_weak.update(cx, |s, cx| s.want(id, "agent", 0, (0, 0), cx));
+        }
+    })
+    .detach();
     keep_counting(id, cx);
 }
 
-/// Keep the display's change count running for a while: the next action
-/// usually follows, and a stream that is already counting sees its change.
+/// Keep the display's capture stream warm for 30 s without holding `"agent"`
+/// CPU luma counting active between settles.
 fn keep_counting(id: DisplayId, cx: &mut AsyncApp) {
     let Some(streams) = crate::ui::stream::global() else {
         return;
@@ -6616,7 +6638,7 @@ fn keep_counting(id: DisplayId, cx: &mut AsyncApp) {
         let latest = AGENT_ACTIVE.with(|a| a.borrow().get(&id).copied());
         if latest == Some(wanted) {
             AGENT_ACTIVE.with(|a| a.borrow_mut().remove(&id));
-            let _ = streams.update(cx, |s, cx| s.want(id, "agent", 0, (0, 0), cx));
+            let _ = streams.update(cx, |s, cx| s.want(id, "agent-warm", 0, (0, 0), cx));
         }
     })
     .detach();
@@ -6629,7 +6651,13 @@ async fn wait_until_still(id: DisplayId, size: (f64, f64), cx: &mut AsyncApp) {
             .await;
         return;
     };
-    streams.update(cx, |s, cx| s.want(id, "agent", 30, change_pixels(size), cx));
+    let px = change_pixels(size);
+    let latest = streams.update(cx, |s, cx| {
+        s.want(id, "agent-warm", 30, px, cx);
+        s.want(id, "agent", 30, px, cx);
+        s.latest(id)
+    });
+    AGENT_SETTLING.with(|s| *s.borrow_mut().entry(id).or_default() += 1);
     let start = Instant::now();
     // The stream has been counting since the action, so no change after it
     // is lost to a stream still starting. An app may draw what an action
@@ -6641,21 +6669,45 @@ async fn wait_until_still(id: DisplayId, size: (f64, f64), cx: &mut AsyncApp) {
         .with(|b| b.borrow_mut().remove(&id))
         .filter(|at| at.elapsed() < Duration::from_secs(5))
         .unwrap_or(start);
-    let mut last = streams.read_with(cx, |s, _| s.changes(id));
-    let mut quiet_since = start;
-    while start.elapsed() < Duration::from_millis(1500) {
-        let now = streams.read_with(cx, |s, _| s.changes(id));
-        if now != last {
-            last = now;
-            quiet_since = Instant::now();
-        } else if quiet_since.elapsed() >= Duration::from_millis(120)
-            && since.elapsed() >= Duration::from_millis(500)
-        {
-            break;
+    // Watch `Latest::changes` off the main thread instead of hopping onto the
+    // UI thread every 30 ms. Uses the executor's timer so no worker thread blocks.
+    let bg = cx.background_executor().clone();
+    cx.background_executor()
+        .spawn(async move {
+            let read_changes = || {
+                latest
+                    .as_ref()
+                    .map(|l| l.changes.load(std::sync::atomic::Ordering::Relaxed))
+            };
+            let mut last = read_changes();
+            let mut quiet_since = start;
+            while start.elapsed() < Duration::from_millis(1500) {
+                let now = read_changes();
+                if now != last {
+                    last = now;
+                    quiet_since = Instant::now();
+                } else if quiet_since.elapsed() >= Duration::from_millis(120)
+                    && since.elapsed() >= Duration::from_millis(500)
+                {
+                    break;
+                }
+                bg.timer(Duration::from_millis(30)).await;
+            }
+        })
+        .await;
+    let remaining = AGENT_SETTLING.with(|s| {
+        let mut map = s.borrow_mut();
+        let next = map.get(&id).copied().unwrap_or(1).saturating_sub(1);
+        if next == 0 {
+            map.remove(&id);
+        } else {
+            map.insert(id, next);
         }
-        cx.background_executor()
-            .timer(Duration::from_millis(30))
-            .await;
+        next
+    });
+    if remaining == 0 {
+        AGENT_COUNT_AT.with(|a| a.borrow_mut().remove(&id));
+        streams.update(cx, |s, cx| s.want(id, "agent", 0, (0, 0), cx));
     }
     keep_counting(id, cx);
 }
@@ -6674,6 +6726,13 @@ thread_local! {
         std::cell::RefCell::new(std::collections::HashMap::new());
     /// When each display's last action began.
     static ACTION_BASE: std::cell::RefCell<std::collections::HashMap<DisplayId, Instant>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+    /// Last `watch_for_changes` stamp so the 2 s safety timer only clears
+    /// stale counting when no newer action arrived.
+    static AGENT_COUNT_AT: std::cell::RefCell<std::collections::HashMap<DisplayId, Instant>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+    /// Number of active `wait_until_still` waits per display.
+    static AGENT_SETTLING: std::cell::RefCell<std::collections::HashMap<DisplayId, usize>> =
         std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
