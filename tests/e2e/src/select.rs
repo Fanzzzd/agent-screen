@@ -116,6 +116,7 @@ pub const PATHS: &[(&str, &[Area])] = &[
     ("crates/model/src/report.rs", &[Settings]),
     ("crates/model/src/returns.rs", &[WindowAccess]),
     ("crates/model/src/screen_edge.rs", &[InputQueue]),
+    ("crates/model/src/scroll.rs", &[AgentInput]),
     ("crates/model/src/selection.rs", &[Elements]),
     ("crates/model/src/shared_app.rs", &[AgentInput]),
     ("crates/model/src/substitute.rs", &[Elements, Browser]),

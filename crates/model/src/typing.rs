@@ -5,6 +5,11 @@
 //! parentheses or an autocompletion do, or change its case, but a dropped
 //! key leaves one out.
 
+/// The text as typed: a Windows line ending, \r\n, is one Return.
+pub fn typed_text(text: &str) -> String {
+    text.replace("\r\n", "\n")
+}
+
 /// Whether `typed` shows in `shown`, in order, with anything between.
 pub fn landed(typed: &str, shown: &str) -> bool {
     let fold = |c: char| {
@@ -20,7 +25,12 @@ pub fn landed(typed: &str, shown: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::landed;
+    use super::{landed, typed_text};
+
+    #[test]
+    fn a_windows_line_ending_is_one_return() {
+        assert_eq!(typed_text("a\r\nb\nc\rd"), "a\nb\nc\rd");
+    }
 
     #[test]
     fn all_of_it_landed() {
