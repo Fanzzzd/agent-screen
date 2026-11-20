@@ -861,19 +861,22 @@ impl Channel {
         let url = info["url"].as_str().unwrap_or_default();
         let mut addressless = self.addressless.lock().unwrap_or_else(|e| e.into_inner());
         addressless.retain(|_, at| at.elapsed() < Duration::from_secs(LINK_SECS));
-        let decided = if created {
-            let through_pipe = self.creating.load(Ordering::SeqCst) > 0
-                || self
-                    .created_until
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .is_some_and(|until| Instant::now() < until);
-            new_page(
-                info.get("openerId").is_some(),
-                through_pipe,
+        let opener = info.get("openerId").is_some();
+        let (through_pipe, driven) = if created {
+            (
+                self.creating.load(Ordering::SeqCst) > 0
+                    || self
+                        .created_until
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .is_some_and(|until| Instant::now() < until),
                 super::catch::agent_drove(self.pid),
-                url,
             )
+        } else {
+            (false, false)
+        };
+        let decided = if created {
+            new_page(opener, through_pipe, driven, url)
         } else if addressless.contains_key(target) {
             // It was a page from outside with no address: only the address
             // is new.
@@ -892,7 +895,10 @@ impl Channel {
                     .or_insert_with(Instant::now);
             }
             NewPage::Keep => {
-                log::debug!("devtools: pid {} keeps its new page {target}", self.pid);
+                log::debug!(
+                    "devtools: pid {} keeps its new page {target}: opener {opener}, through the pipe {through_pipe}, agent drove it {driven}",
+                    self.pid
+                );
                 addressless.remove(target);
             }
             NewPage::Forward => {

@@ -498,6 +498,9 @@ fn activated(control: &Control, pid: u32, stand_in: bool) {
 /// it; Agent Screen closes its page there and opens it in the user's own
 /// browser, here a headless stand-in on the stand-in's profile (#235).
 fn forwarded(control: &Control, b: &Browser, port: u16, log: &Log, pid: u32) {
+    // The agent's last launch_app counts as driving the instance for 3 s
+    // (`ACTION_WINDOW`): a page that opens then is the agent's and stays.
+    sleep_ms(3500);
     let from = mark(log);
     sh_lenient(
         "/usr/bin/open",
