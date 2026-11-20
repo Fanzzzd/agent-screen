@@ -23,7 +23,120 @@ use control::server::{self, Event};
 use futures::StreamExt;
 use gpui::{ActivationPolicy, App, AppContext, AsyncApp};
 
-/// Warnings always, debug lines in debug builds, to stderr.
+use std::io::{BufWriter, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{OnceLock, mpsc};
+use std::time::Duration;
+
+enum LogItem {
+    Line(String),
+    Flush(mpsc::SyncSender<()>),
+}
+
+/// Non-blocking FIFO log writer backed by a single writer thread so stderr
+/// backpressure never stalls the main UI thread. Uses an unbounded MPSC queue
+/// so lines are never dropped or reordered; `flush()` drains every queued line,
+/// and `enter_direct_mode()` flushes before switching panicking/exiting calls
+/// to direct writes.
+struct AsyncWriter {
+    tx: mpsc::Sender<LogItem>,
+    direct: AtomicBool,
+}
+
+const FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
+
+impl AsyncWriter {
+    fn spawn<W: Write + Send + 'static>(sink: W) -> Self {
+        let (tx, rx) = mpsc::channel::<LogItem>();
+        let _ = std::thread::Builder::new()
+            .name("agent-screen-log".into())
+            .spawn(move || Self::run(rx, sink));
+        Self {
+            tx,
+            direct: AtomicBool::new(false),
+        }
+    }
+
+    fn run<W: Write>(rx: mpsc::Receiver<LogItem>, sink: W) {
+        let mut out = BufWriter::new(sink);
+        while let Ok(first) = rx.recv() {
+            let mut flush_acks = Vec::new();
+            Self::handle_item(first, &mut out, &mut flush_acks);
+            while let Ok(next) = rx.try_recv() {
+                Self::handle_item(next, &mut out, &mut flush_acks);
+            }
+            let _ = out.flush();
+            for ack in flush_acks {
+                let _ = ack.send(());
+            }
+        }
+        let _ = out.flush();
+    }
+
+    fn handle_item<W: Write>(
+        item: LogItem,
+        out: &mut BufWriter<W>,
+        flush_acks: &mut Vec<mpsc::SyncSender<()>>,
+    ) {
+        match item {
+            LogItem::Line(line) => {
+                let _ = out.write_all(line.as_bytes());
+            }
+            LogItem::Flush(ack) => {
+                let _ = out.flush();
+                flush_acks.push(ack);
+            }
+        }
+    }
+
+    fn write_line(&self, line: String) {
+        if self.direct.load(Ordering::Acquire) {
+            let mut stderr = std::io::stderr().lock();
+            let _ = stderr.write_all(line.as_bytes());
+            let _ = stderr.flush();
+            return;
+        }
+        if let Err(mpsc::SendError(LogItem::Line(line))) = self.tx.send(LogItem::Line(line)) {
+            let mut stderr = std::io::stderr().lock();
+            let _ = stderr.write_all(line.as_bytes());
+            let _ = stderr.flush();
+        }
+    }
+
+    fn flush(&self) {
+        let (ack_tx, ack_rx) = mpsc::sync_channel::<()>(1);
+        if self.tx.send(LogItem::Flush(ack_tx)).is_ok() {
+            let _ = ack_rx.recv_timeout(FLUSH_TIMEOUT);
+        }
+    }
+
+    /// Flush every queued line and route any subsequent log lines (for example
+    /// during panic cleanup) straight to stderr synchronously.
+    fn enter_direct_mode(&self) {
+        self.flush();
+        self.direct.store(true, Ordering::Release);
+        self.flush();
+    }
+}
+
+static LOG_WRITER: OnceLock<AsyncWriter> = OnceLock::new();
+
+fn log_writer() -> &'static AsyncWriter {
+    LOG_WRITER.get_or_init(|| {
+        extern "C" fn flush_at_exit() {
+            if let Some(writer) = LOG_WRITER.get() {
+                writer.enter_direct_mode();
+            }
+        }
+        unsafe {
+            libc::atexit(flush_at_exit);
+        }
+        AsyncWriter::spawn(std::io::stderr())
+    })
+}
+
+/// Warnings always, debug lines in debug builds, to stderr off the calling
+/// thread.
 struct Logger;
 
 impl log::Log for Logger {
@@ -39,14 +152,19 @@ impl log::Log for Logger {
     fn log(&self, record: &log::Record) {
         // AGENTSCREEN_LOG_ALL=1 adds the libraries' lines, GPUI's errors
         // among them.
-        static ALL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        static ALL: OnceLock<bool> = OnceLock::new();
         let all = *ALL.get_or_init(|| std::env::var_os("AGENTSCREEN_LOG_ALL").is_some());
         if self.enabled(record.metadata()) && (all || record.target().starts_with("AgentScreen")) {
-            eprintln!("Agent Screen {}: {}", record.level(), record.args());
+            let line = format!("Agent Screen {}: {}\n", record.level(), record.args());
+            log_writer().write_line(line);
         }
     }
 
-    fn flush(&self) {}
+    fn flush(&self) {
+        if let Some(writer) = LOG_WRITER.get() {
+            writer.flush();
+        }
+    }
 }
 
 impl Logger {
@@ -239,6 +357,9 @@ fn main() {
     // the crash report keeps no message: the log keeps it, and where.
     let report = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        if let Some(writer) = LOG_WRITER.get() {
+            writer.enter_direct_mode();
+        }
         lifecycle::line(&format!(
             "panic: {info}\n{}",
             std::backtrace::Backtrace::force_capture()
@@ -247,6 +368,7 @@ fn main() {
         mac::display::restore_connect_policy_after_panic();
         mac::claims::delete();
         web::delete_state();
+        log::logger().flush();
     }));
     // An app that died making a display left new displays extending.
     mac::display::restore_connect_policy();
@@ -360,6 +482,9 @@ fn main() {
             Err(error) => eprintln!("Agent Screen: control socket failed: {error}"),
         }
     });
+    if let Some(writer) = LOG_WRITER.get() {
+        writer.enter_direct_mode();
+    }
 }
 
 #[cfg(test)]
@@ -405,5 +530,123 @@ mod logger_tests {
             false,
             false
         ));
+    }
+
+    #[test]
+    fn async_writer_preserves_order_and_drops_no_lines_across_threads() {
+        use std::sync::{Arc, Mutex};
+
+        struct SharedBuf(Arc<Mutex<Vec<u8>>>);
+        impl Write for SharedBuf {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let writer = Arc::new(AsyncWriter::spawn(SharedBuf(Arc::clone(&buf))));
+        let mut handles = Vec::new();
+        for tid in 0..4 {
+            let writer = Arc::clone(&writer);
+            handles.push(std::thread::spawn(move || {
+                for seq in 0..500 {
+                    writer.write_line(format!("t{tid}:{seq}\n"));
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        writer.flush();
+
+        let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2000);
+        let mut next = [0usize; 4];
+        for line in lines {
+            let (t, s) = line.split_once(':').unwrap();
+            let tid: usize = t[1..].parse().unwrap();
+            let seq: usize = s.parse().unwrap();
+            assert_eq!(seq, next[tid], "reordered line for thread {tid}");
+            next[tid] += 1;
+        }
+        assert_eq!(next, [500; 4]);
+    }
+
+    #[test]
+    fn async_writer_does_not_block_caller_on_slow_sink_and_flushes_all() {
+        use std::sync::{Arc, Mutex};
+        use std::time::Instant;
+
+        struct SlowSink {
+            out: Arc<Mutex<Vec<u8>>>,
+            delay: Duration,
+        }
+        impl Write for SlowSink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                std::thread::sleep(self.delay);
+                self.out.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let out = Arc::new(Mutex::new(Vec::new()));
+        let writer = AsyncWriter::spawn(SlowSink {
+            out: Arc::clone(&out),
+            delay: Duration::from_millis(20),
+        });
+        let start = Instant::now();
+        for i in 0..10 {
+            writer.write_line(format!("line-{i}\n"));
+        }
+        let enqueue_elapsed = start.elapsed();
+        assert!(
+            enqueue_elapsed < Duration::from_millis(50),
+            "enqueue should not block on slow sink; took {enqueue_elapsed:?}"
+        );
+        writer.flush();
+        let text = String::from_utf8(out.lock().unwrap().clone()).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 10);
+        for (i, line) in lines.iter().enumerate() {
+            assert_eq!(*line, format!("line-{i}"));
+        }
+    }
+
+    #[test]
+    fn async_writer_direct_mode_drains_queued_lines_before_switching() {
+        use std::sync::{Arc, Mutex};
+
+        struct SharedBuf(Arc<Mutex<Vec<u8>>>);
+        impl Write for SharedBuf {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let writer = AsyncWriter::spawn(SharedBuf(Arc::clone(&buf)));
+        for i in 0..50 {
+            writer.write_line(format!("queued-{i}\n"));
+        }
+        writer.enter_direct_mode();
+        assert!(writer.direct.load(Ordering::Acquire));
+        let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 50);
+        for (i, line) in lines.iter().enumerate() {
+            assert_eq!(*line, format!("queued-{i}"));
+        }
     }
 }
