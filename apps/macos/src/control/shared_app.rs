@@ -9,6 +9,7 @@
 //! names the window that holds focus. The rules are in
 //! `agent_screen_model::shared_app`.
 
+use super::off;
 use super::server::ControlError;
 use crate::keychord::KeyChord;
 use crate::mac::shared_app::{self as beside, Hit, Selection};
@@ -32,10 +33,6 @@ pub struct Beside {
     pub target: WindowTarget,
     /// The window that has focus, the user's.
     pub focused: u32,
-}
-
-async fn off<R: Send + 'static>(cx: &AsyncApp, f: impl FnOnce() -> R + Send + 'static) -> R {
-    cx.background_executor().spawn(async move { f() }).await
 }
 
 /// The state of `target`'s app, and its focused window when it is the
