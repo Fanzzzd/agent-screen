@@ -1801,6 +1801,85 @@ pub fn put_back_wallpaper(saved: Option<(std::path::PathBuf, Vec<u8>)>) {
     }
 }
 
+// MARK: Front and window order while an action runs
+
+/// The front app's changes while `act` runs, from `probe fronts`, polled
+/// every 10 ms: "epoch-ms pid name" per line.
+///
+/// With `harness`, the window order too: "epoch-ms order:above" when the
+/// harness's top window on the main screen is above the front app's,
+/// "order:below" or "order:apart" otherwise, at each change.
+pub fn fronts_during<T>(
+    seconds: u64,
+    harness: Option<&str>,
+    act: impl FnOnce() -> T,
+) -> Result<(T, Vec<String>)> {
+    let probe = tool("probe")?;
+    let fronts = std::process::Command::new(&probe)
+        .args(["fronts", &seconds.to_string()])
+        .stdout(std::process::Stdio::piped())
+        .spawn()?;
+    let order = match harness {
+        Some(pid) => Some(
+            std::process::Command::new(&probe)
+                .args(["above", pid, &seconds.to_string()])
+                .stdout(std::process::Stdio::piped())
+                .spawn()?,
+        ),
+        None => None,
+    };
+    sleep_ms(200);
+    let result = act();
+    let output = fronts.wait_with_output()?;
+    let mut lines: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(String::from)
+        .collect();
+    if let Some(order) = order {
+        let output = order.wait_with_output()?;
+        lines.extend(
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|l| l.split_once(' '))
+                .map(|(at, how)| format!("{at} order:{how}")),
+        );
+        lines.sort();
+    }
+    Ok((result, lines))
+}
+
+/// The window of the app sampled with `fronts_during` rose above your front app's after it had been
+/// below it: `order:above` lines after the first `order:below`.
+pub fn raised(fronts: &[String]) -> Vec<String> {
+    let Some(below) = fronts.iter().position(|l| l.ends_with(" order:below")) else {
+        return Vec::new();
+    };
+    fronts[below..]
+        .iter()
+        .filter(|l| l.ends_with(" order:above"))
+        .cloned()
+        .collect()
+}
+
+/// The app `harness` came back to the front after another app had it: lines of
+/// `fronts` naming pid `harness` after one that doesn't.
+pub fn taken_back(fronts: &[String], harness: &str) -> Vec<String> {
+    let fronts: Vec<String> = fronts
+        .iter()
+        .filter(|l| !l.contains(" order:"))
+        .cloned()
+        .collect();
+    let is_harness = |l: &String| l.split_whitespace().nth(1) == Some(harness);
+    let Some(left) = fronts.iter().position(|l| !is_harness(l)) else {
+        return Vec::new();
+    };
+    fronts[left..]
+        .iter()
+        .filter(|l| is_harness(l))
+        .cloned()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::names_profile;
