@@ -6083,7 +6083,30 @@ async fn launch_now(
             drop(catch);
             return unclaim_and_already_running(core, id, pid, name, &instances_before, cx).await;
         }
-        let taken = catch.as_ref().and_then(|c| c.taken());
+        let mut taken = catch.as_ref().and_then(|c| c.taken());
+        // A window the busy app couldn't describe as it showed is the
+        // catch's too, once the app says it is a window (#270).
+        if taken.is_none()
+            && let Some(window) = catch.as_ref().and_then(|c| c.undescribed())
+        {
+            let target = WindowTarget {
+                pid,
+                window_id: window,
+            };
+            let described = off(cx, move || {
+                ax::window_element(target)
+                    .and_then(|w| ax::string_attribute(&w, "AXRole"))
+                    .is_some_and(|role| role == "AXWindow")
+            })
+            .await;
+            if described {
+                taken = Some(window);
+            } else if was_running && tick < 200 {
+                // Waiting for it, up to 5 s: the launch doesn't give up
+                // meanwhile.
+                continue;
+            }
+        }
         let open_failed = poll_open(&mut opened);
         // A window already caught is the app's answer; keep it even if
         // `open` reports a failure, so it isn't left unclaimed.

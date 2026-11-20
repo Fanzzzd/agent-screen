@@ -298,6 +298,20 @@ pub fn same_page(asked: &str, shown: &str) -> bool {
     matches!((parts(asked), parts(shown)), (Some(a), Some(b)) if a == b)
 }
 
+/// Whether a catch keeps a window its app couldn't describe as it showed,
+/// as a busy app's (#270), for the launch to take once the app describes
+/// it: only a launch's own catch, one not kept past the launch, not
+/// returning windows to the user, not waiting for a file, and with a
+/// window still to take.
+pub fn keeps_undescribed(
+    kept: bool,
+    returning: bool,
+    for_document: bool,
+    left: Option<usize>,
+) -> bool {
+    !kept && !returning && !for_document && left != Some(0)
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -522,6 +536,16 @@ mod tests {
         assert!(!same_page(asked, "http://127.0.0.1:5001/agent"));
         assert!(!same_page(asked, "about:blank"));
         assert!(!same_page(asked, ""));
+    }
+
+    #[test]
+    fn only_a_launchs_catch_keeps_a_window_the_app_cant_describe_yet() {
+        assert!(keeps_undescribed(false, false, false, Some(1)));
+        assert!(keeps_undescribed(false, false, false, None));
+        assert!(!keeps_undescribed(false, false, false, Some(0)));
+        assert!(!keeps_undescribed(true, false, false, Some(1)));
+        assert!(!keeps_undescribed(false, true, false, None));
+        assert!(!keeps_undescribed(false, false, true, Some(1)));
     }
 
     fn menu_item(title: &str, shortcut: Option<&str>) -> MenuEntry {

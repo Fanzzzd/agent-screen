@@ -459,6 +459,9 @@ struct Target {
     left: Mutex<Option<usize>>,
     /// The last window taken.
     taken: Mutex<Option<u32>>,
+    /// The first window the app made that it couldn't describe as it
+    /// showed, as a busy app does (#270): the launch's watch decides it.
+    undescribed: Mutex<Option<u32>>,
     /// Set while a launch of the same app runs its own catch.
     paused: AtomicBool,
     /// Take only a window that shows this file.
@@ -537,6 +540,7 @@ impl Catch {
                 screen,
                 left: Mutex::new(limit),
                 taken: Mutex::new(None),
+                undescribed: Mutex::new(None),
                 paused: AtomicBool::new(false),
                 document,
                 kept: AtomicBool::new(false),
@@ -592,6 +596,12 @@ impl Catch {
         unsafe { (*self.target).pid }
     }
 
+    /// The first window the app made that it couldn't describe as it
+    /// showed, which a launch's catch would have taken.
+    pub fn undescribed(&self) -> Option<u32> {
+        *lock(unsafe { &(*self.target).undescribed })
+    }
+
     /// The window id of the last window taken, if any.
     pub fn taken(&self) -> Option<u32> {
         *lock(unsafe { &(*self.target).taken })
@@ -642,6 +652,18 @@ extern "C" fn created(
                 target.pid,
                 ax::window_id(window)
             );
+            // A launch's catch that would take it: the launch takes it
+            // once the app describes it, rather than give up waiting.
+            let launching = agent_screen_model::launch::keeps_undescribed(
+                target.kept.load(Ordering::Relaxed),
+                target.home.is_some(),
+                target.document.is_some(),
+                *lock(&target.left),
+            );
+            let mut undescribed = lock(&target.undescribed);
+            if launching && undescribed.is_none() {
+                *undescribed = ax::window_id(window);
+            }
         }
         return;
     }
