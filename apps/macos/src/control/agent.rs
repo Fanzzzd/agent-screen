@@ -5140,6 +5140,433 @@ async fn launch(
     result
 }
 
+async fn start_key_hold(
+    user: WindowTarget,
+    cx: &mut AsyncApp,
+) -> Option<crate::mac::key_hold::Hold> {
+    off(cx, move || {
+        crate::mac::input::is_front(user.pid)
+            .then(|| crate::mac::key_hold::start(user))
+            .flatten()
+    })
+    .await
+}
+
+async fn finish_key_hold(
+    hold: &mut Option<crate::mac::key_hold::Hold>,
+    end: agent_screen_model::key_hold::End,
+    cx: &mut AsyncApp,
+) {
+    if let Some(id) = hold.take().map(|h| h.detach()) {
+        off(cx, move || crate::mac::key_hold::finish(id, end)).await;
+    }
+}
+
+async fn unclaim_and_already_running(
+    core: &Entity<Core>,
+    id: DisplayId,
+    pid: i32,
+    name: &str,
+    instances_before: &[i32],
+    cx: &mut AsyncApp,
+) -> Result<Launched, ControlError> {
+    core.update(cx, |c, _| {
+        if let Some(d) = c.displays.get_mut(id) {
+            d.started.remove(&pid);
+        }
+    });
+    already_running(core, id, name, instances_before, cx).await
+}
+
+/// Start a Chromium or Electron app with a private DevTools pipe (ADR 0010,
+/// ADR 0022). Returns the spawned pid and a one-shot outcome channel on
+/// success; `None` falls back to `open_in_background`.
+async fn spawn_piped_browser(
+    core: &Entity<Core>,
+    name: &str,
+    path: &std::path::Path,
+    bounds: Rect,
+    first: Option<&str>,
+    start: &Start,
+    cx: &mut AsyncApp,
+) -> Option<(i32, std::sync::mpsc::Receiver<bool>)> {
+    let path = path.to_path_buf();
+    // A browser opens its windows on the display, never on the user's
+    // screen first (#123).
+    let browser = off(cx, {
+        let path = path.clone();
+        move || app::handles_web(&path)
+    })
+    .await;
+    // Started while a spare display is being made, it would lose
+    // that place: let the spare come first, up to 2 s.
+    for _ in 0..100 {
+        if !browser || !core.read_with(cx, |c, _| c.making_spare()) {
+            break;
+        }
+        cx.background_executor()
+            .timer(Duration::from_millis(20))
+            .await;
+    }
+    let mut arguments = if browser {
+        agent_screen_model::launch::browser_window_switches(bounds)
+    } else {
+        Vec::new()
+    };
+    arguments.extend(start.open_arguments());
+    // The agents' instance shows no window as it starts: Chromium shows
+    // its startup window with activation, which takes the user's front
+    // app. Its first window comes through the pipe, which opens windows
+    // without activating it (ADR 0022). A browser that keeps its pages
+    // in windows of its own, as Dia, opens its startup window without
+    // activation and makes none through the pipe.
+    let through_pipe = start.agents_start && {
+        let path = path.clone();
+        off(cx, move || {
+            app::bundle_id_at(&path)
+                .is_none_or(|id| agent_screen_model::agent_browser::pipe_makes_windows(&id))
+        })
+        .await
+    };
+    let first_page = if through_pipe {
+        arguments.push(agent_screen_model::agent_browser::NO_STARTUP_WINDOW.into());
+        Some(first.unwrap_or("about:blank").to_string())
+    } else {
+        arguments.extend(first.map(String::from));
+        None
+    };
+    let environment = start.environment.clone();
+    let started = off(cx, move || {
+        hold_launch_for_tests();
+        devtools::spawn(&path, &arguments, &environment)
+    })
+    .await;
+    match started {
+        Ok(pid) => {
+            if start.agents_start
+                && let Some(profile) = start
+                    .arguments
+                    .iter()
+                    .find(|a| a.starts_with("--user-data-dir="))
+            {
+                devtools::mark_agents(pid, profile);
+            }
+            if let Some(url) = first_page {
+                let margin = agent_screen_model::launch::WINDOW_MARGIN;
+                let frame = bounds.inset(margin, margin);
+                cx.background_executor()
+                    .spawn(async move {
+                        let made = devtools::channel(pid, Duration::from_secs(15))
+                            .ok_or_else(|| "no pipe within 15 s".to_string())
+                            .and_then(|c| c.new_window(&url, frame));
+                        log::info!(
+                            "launch: the agents' instance {pid}'s first window through its pipe: {made:?}"
+                        );
+                    })
+                    .detach();
+            }
+            let (done, outcome) = std::sync::mpsc::channel();
+            let _ = done.send(true);
+            Some((pid, outcome))
+        }
+        Err(e) => {
+            log::warn!("launch: couldn't start {name} with a pipe ({e}); opening it");
+            None
+        }
+    }
+}
+
+enum RunningWindowStop {
+    Failed(ControlError),
+    Missing(&'static str),
+}
+
+/// Ask a running app for a new window: through the agents' instance pipe
+/// (ADR 0022), or through the app's New Window menu item with retries for an
+/// app that just started.
+#[allow(clippy::too_many_arguments)]
+async fn request_running_window(
+    core: &Entity<Core>,
+    id: DisplayId,
+    pid: i32,
+    name: &str,
+    bounds: Rect,
+    target: Option<&str>,
+    is_url: bool,
+    agents: Option<&AgentsInstance>,
+    cx: &mut AsyncApp,
+) -> Result<Option<(String, PageWindow)>, RunningWindowStop> {
+    // An app that has just started may not have its menus yet.
+    let mut asked = ax::NewWindow::NotReady;
+    let mut pipe_page = None;
+    // The agents' instance gets its window, and the URL in it, through
+    // its pipe, never through its menus or LaunchServices (ADR 0022).
+    if let Some(agents) = agents.cloned() {
+        let url = target.filter(|_| is_url).map(String::from);
+        let url_for_page = url.clone();
+        let opened = {
+            let agents = agents.clone();
+            off(cx, move || new_window_in(&agents, url.as_deref(), bounds)).await
+        };
+        let failed = match opened {
+            Ok((_, PageWindow::Frameless)) => {
+                // Into the agents' window on this display, through the
+                // page it shows.
+                let (only, url) = (agents.pid, url_for_page.clone());
+                let into = off(cx, move || {
+                    let window = windows::on_display(id)
+                        .into_iter()
+                        .find(|w| w.target.pid == only && w.layer == 0)
+                        .ok_or("keeps its pages in its own windows, which its pipe can't open, and has no window on this display; call launch_app again once its window is here".to_string())?;
+                    if let Some(url) = url {
+                        devtools::channel(only, Duration::from_secs(1))
+                            .ok_or("doesn't answer on its pipe".to_string())?
+                            .navigate_visible_page(bounds, &url)
+                            .map_err(|e| format!("couldn't open the page in its window on this display: {e}"))?;
+                    }
+                    Ok::<_, String>(window.target.window_id)
+                })
+                .await;
+                match into {
+                    Ok(_) => {
+                        asked = ax::NewWindow::Pressed;
+                        pipe_page = Some((String::new(), PageWindow::Frameless));
+                        None
+                    }
+                    Err(e) => Some(e),
+                }
+            }
+            Ok(page) => {
+                asked = ax::NewWindow::Pressed;
+                pipe_page = Some(page);
+                None
+            }
+            Err(e) => Some(e),
+        };
+        if let Some(e) = failed {
+            return Err(RunningWindowStop::Failed(ControlError::failed(format!(
+                "the agents' {name} {e}"
+            ))));
+        }
+    }
+    for _ in 0..10 {
+        if agents.is_some() {
+            break;
+        }
+        asked = cx
+            .background_executor()
+            .spawn(async move { ax::press_new_window(pid) })
+            .await;
+        if asked != ax::NewWindow::NotReady {
+            break;
+        }
+        cx.background_executor()
+            .timer(Duration::from_millis(150))
+            .await;
+    }
+    // Just started and no window yet: its menus may not have the item
+    // yet. Give them up to 3 s.
+    let just_started = || {
+        off(cx, move || {
+            app::launched_within(pid, LATE_WINDOW_WAIT)
+                && !windows::all()
+                    .iter()
+                    .any(|w| w.target.pid == pid && w.layer == 0)
+        })
+    };
+    // Only this display's own launch has a watch that moves the window.
+    let started_here = core.read_with(cx, |c, _| {
+        c.displays.get(id).is_some_and(|d| d.started.contains(&pid))
+    });
+    // This display's own launch answers at once: its watch moves the
+    // window when it comes.
+    if asked == ax::NewWindow::Missing && !started_here && just_started().await {
+        for _ in 0..20 {
+            cx.background_executor()
+                .timer(Duration::from_millis(150))
+                .await;
+            asked = cx
+                .background_executor()
+                .spawn(async move { ax::press_new_window(pid) })
+                .await;
+            if asked != ax::NewWindow::Missing {
+                break;
+            }
+        }
+    }
+    let starting = asked == ax::NewWindow::Missing && just_started().await;
+    let missing = match asked {
+        ax::NewWindow::Pressed => None,
+        ax::NewWindow::Disabled => Some("app_busy"),
+        // The first launch's watch moves its window when it comes.
+        ax::NewWindow::Missing if started_here && starting => Some("still_starting"),
+        // Started by the user or another session moments ago.
+        ax::NewWindow::Missing if starting => Some("just_started"),
+        ax::NewWindow::Missing => Some("no_new_window"),
+        ax::NewWindow::NotReady => Some("menus_unreadable"),
+    };
+    match missing {
+        Some(reason) => Err(RunningWindowStop::Missing(reason)),
+        None => Ok(pipe_page),
+    }
+}
+
+/// Send a URL to a running app's newly opened window before placing it,
+/// trying its address field first and falling back to `open_in_background`.
+async fn open_url_in_new_window(
+    new_window: WindowTarget,
+    path: &std::path::Path,
+    target: Option<&str>,
+    was_running: bool,
+    is_url: bool,
+    uses_agents_instance: bool,
+    cx: &mut AsyncApp,
+) -> Option<bool> {
+    match (was_running && is_url && !uses_agents_instance)
+        .then_some(target)
+        .flatten()
+    {
+        // The agents' instance opened the URL in the window itself.
+        None if uses_agents_instance && is_url => Some(true),
+        Some(target) => {
+            // Into the new window's address field where there is
+            // one Agent Screen knows; else the system sends the URL.
+            let url = target.to_string();
+            let in_field = cx
+                .background_executor()
+                .spawn(async move { ax::open_in_address_field(new_window, &url) })
+                .await;
+            log::debug!("launch: URL through the address field: {in_field}");
+            Some(
+                in_field
+                    || match open_in_background(
+                        path.to_path_buf(),
+                        Some(target.to_string()),
+                        false,
+                        &Start::default(),
+                        cx,
+                    )
+                    .await
+                    {
+                        Some(outcome) => {
+                            cx.background_executor()
+                                .spawn(async move {
+                                    outcome
+                                        .recv_timeout(Duration::from_secs(10))
+                                        .unwrap_or(false)
+                                })
+                                .await
+                        }
+                        None => false,
+                    },
+            )
+        }
+        None => None,
+    }
+}
+
+/// Watch for the URL to show in `window`, then hand key focus back to the
+/// user's window and release any held keys (#110).
+fn spawn_url_handback(
+    window: WindowTarget,
+    url: String,
+    detected: Instant,
+    hold: Option<crate::mac::key_hold::Hold>,
+    user_window: Option<WindowTarget>,
+    cx: &mut AsyncApp,
+) -> gpui::Task<bool> {
+    let held = hold.map(|h| h.detach());
+    cx.background_executor().spawn(async move {
+        let shown = shows_url(window, &url, detected);
+        // The hold makes the user's window key, then sends
+        // on what it held. Without one going on, focus goes
+        // back here.
+        let ran = held.is_some_and(|id| {
+            crate::mac::key_hold::finish(id, agent_screen_model::key_hold::End::HandedBack)
+        });
+        if !ran
+            && let Some(user) = user_window
+            && crate::mac::input::is_front(user.pid)
+            && ax::focused_window_id(user.pid) == Some(window.window_id)
+        {
+            let given = ax::make_main(user);
+            log::debug!("launch: key focus back to the user's window: {given}");
+        }
+        shown
+    })
+}
+
+/// Check whether `document` is already shown in a pre-existing window; if not,
+/// watch for a late window showing it so it does not stay on the user's screen.
+/// Returns `(shown_already, watching_started)`.
+async fn watch_late_document(
+    core: &Entity<Core>,
+    id: DisplayId,
+    pid: i32,
+    before: &std::collections::HashSet<u32>,
+    document: Option<std::path::PathBuf>,
+    document_catch: Option<crate::mac::catch::Catch>,
+    cx: &mut AsyncApp,
+) -> (bool, bool) {
+    let shown_already = match document.clone() {
+        Some(d) => {
+            let before = before.clone();
+            cx.background_executor()
+                .spawn(async move {
+                    windows::all().iter().any(|w| {
+                        w.target.pid == pid
+                            && before.contains(&w.target.window_id)
+                            && shows_document(w.target, &d)
+                    })
+                })
+                .await
+        }
+        None => false,
+    };
+    let watching = document
+        .filter(|_| !shown_already)
+        .filter(|d| core.update(cx, |c, _| c.watching.insert((pid, d.clone()))));
+    let Some(document) = watching else {
+        return (shown_already, false);
+    };
+    // A catch for the file's window moves it as it appears; the poll
+    // covers an app that names the document only after.
+    let core = core.clone();
+    let before = before.clone();
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        for _ in 0..200 {
+            cx.background_executor()
+                .timer(Duration::from_millis(150))
+                .await;
+            let taken = document_catch.as_ref().and_then(|c| c.taken());
+            let (seen, file) = (before.clone(), document.clone());
+            let late = cx
+                .background_executor()
+                .spawn(async move {
+                    windows::all().into_iter().find(|w| {
+                        w.target.pid == pid
+                            && w.layer == 0
+                            && !seen.contains(&w.target.window_id)
+                            && (taken == Some(w.target.window_id)
+                                || shows_document(w.target, &file))
+                    })
+                })
+                .await;
+            if let Some(late) = late {
+                let _ = settle(&core, late.target, id, cx).await;
+                break;
+            }
+            if !takes_windows(&core, id, cx) {
+                break;
+            }
+        }
+        drop(document_catch);
+        core.update(cx, |c, _| c.watching.remove(&(pid, document)));
+    })
+    .detach();
+    (shown_already, true)
+}
+
 async fn launch_now(
     core: &Entity<Core>,
     id: DisplayId,
@@ -5237,91 +5664,12 @@ async fn launch_now(
         .await;
     let mut spawned = None;
     let opening = if piped {
-        let (path, first) = (path.clone(), first.clone());
-        // A browser opens its windows on the display, never on the user's
-        // screen first (#123).
-        let browser = off(cx, {
-            let path = path.clone();
-            move || app::handles_web(&path)
-        })
-        .await;
-        // Started while a spare display is being made, it would lose
-        // that place: let the spare come first, up to 2 s.
-        for _ in 0..100 {
-            if !browser || !core.read_with(cx, |c, _| c.making_spare()) {
-                break;
-            }
-            cx.background_executor()
-                .timer(Duration::from_millis(20))
-                .await;
-        }
-        let mut arguments = if browser {
-            agent_screen_model::launch::browser_window_switches(bounds)
-        } else {
-            Vec::new()
-        };
-        arguments.extend(start.open_arguments());
-        // The agents' instance shows no window as it starts: Chromium shows
-        // its startup window with activation, which takes the user's front
-        // app. Its first window comes through the pipe, which opens windows
-        // without activating it (ADR 0022). A browser that keeps its pages
-        // in windows of its own, as Dia, opens its startup window without
-        // activation and makes none through the pipe.
-        let through_pipe = start.agents_start && {
-            let path = path.clone();
-            off(cx, move || {
-                app::bundle_id_at(&path)
-                    .is_none_or(|id| agent_screen_model::agent_browser::pipe_makes_windows(&id))
-            })
+        spawn_piped_browser(core, name, &path, bounds, first.as_deref(), start, cx)
             .await
-        };
-        let first_page = if through_pipe {
-            arguments.push(agent_screen_model::agent_browser::NO_STARTUP_WINDOW.into());
-            Some(first.clone().unwrap_or_else(|| "about:blank".into()))
-        } else {
-            arguments.extend(first);
-            None
-        };
-        let environment = start.environment.clone();
-        let started = off(cx, move || {
-            hold_launch_for_tests();
-            devtools::spawn(&path, &arguments, &environment)
-        })
-        .await;
-        match started {
-            Ok(pid) => {
+            .map(|(pid, outcome)| {
                 spawned = Some(pid);
-                if start.agents_start
-                    && let Some(profile) = start
-                        .arguments
-                        .iter()
-                        .find(|a| a.starts_with("--user-data-dir="))
-                {
-                    devtools::mark_agents(pid, profile);
-                }
-                if let Some(url) = first_page {
-                    let margin = agent_screen_model::launch::WINDOW_MARGIN;
-                    let frame = bounds.inset(margin, margin);
-                    cx.background_executor()
-                        .spawn(async move {
-                            let made = devtools::channel(pid, Duration::from_secs(15))
-                                .ok_or_else(|| "no pipe within 15 s".to_string())
-                                .and_then(|c| c.new_window(&url, frame));
-                            log::info!(
-                                "launch: the agents' instance {pid}'s first window through its pipe: {made:?}"
-                            );
-                        })
-                        .detach();
-                }
-                let (done, outcome) = std::sync::mpsc::channel();
-                let _ = done.send(true);
-                Some(outcome)
-            }
-            Err(e) => {
-                log::warn!("launch: couldn't start {name} with a pipe ({e}); opening it");
-                None
-            }
-        }
+                outcome
+            })
     } else {
         None
     };
@@ -5473,12 +5821,7 @@ async fn launch_now(
         catch.is_some()
     );
     if single_instance_risk && off(cx, quit(pid)).await {
-        core.update(cx, |c, _| {
-            if let Some(d) = c.displays.get_mut(id) {
-                d.started.remove(&pid);
-            }
-        });
-        return already_running(core, id, name, &instances_before, cx).await;
+        return unclaim_and_already_running(core, id, pid, name, &instances_before, cx).await;
     }
     // Started hidden: once its windows sit on the display, show them there.
     if !was_running {
@@ -5511,163 +5854,53 @@ async fn launch_now(
     // their front app, until Agent Screen hands it back: hold their keys
     // meanwhile and send them on to their window after (#110).
     let mut hold = match user_window {
-        Some(user) if asked_for_window => {
-            off(cx, move || {
-                crate::mac::input::is_front(user.pid)
-                    .then(|| crate::mac::key_hold::start(user))
-                    .flatten()
-            })
-            .await
-        }
+        Some(user) if asked_for_window => start_key_hold(user, cx).await,
         _ => None,
     };
     // The page the agents' instance's pipe opened for this launch, and
     // whether it went into a window on the display that was open already.
     let mut pipe_page: Option<(String, PageWindow)> = None;
     if asked_for_window {
-        // An app that has just started may not have its menus yet.
-        let mut asked = ax::NewWindow::NotReady;
-        // The agents' instance gets its window, and the URL in it, through
-        // its pipe, never through its menus or LaunchServices (ADR 0022).
-        if let Some(agents) = agents.clone() {
-            let url = target.filter(|_| is_url).map(String::from);
-            let url_for_page = url.clone();
-            let opened = {
-                let agents = agents.clone();
-                off(cx, move || new_window_in(&agents, url.as_deref(), bounds)).await
-            };
-            let failed = match opened {
-                Ok((_, PageWindow::Frameless)) => {
-                    // Into the agents' window on this display, through the
-                    // page it shows.
-                    let (only, url) = (agents.pid, url_for_page.clone());
-                    let into = off(cx, move || {
-                        let window = windows::on_display(id)
-                            .into_iter()
-                            .find(|w| w.target.pid == only && w.layer == 0)
-                            .ok_or("keeps its pages in its own windows, which its pipe can't open, and has no window on this display; call launch_app again once its window is here".to_string())?;
-                        if let Some(url) = url {
-                            devtools::channel(only, Duration::from_secs(1))
-                                .ok_or("doesn't answer on its pipe".to_string())?
-                                .navigate_visible_page(bounds, &url)
-                                .map_err(|e| format!("couldn't open the page in its window on this display: {e}"))?;
-                        }
-                        Ok::<_, String>(window.target.window_id)
-                    })
-                    .await;
-                    match into {
-                        Ok(_) => {
-                            asked = ax::NewWindow::Pressed;
-                            pipe_page = Some((String::new(), PageWindow::Frameless));
-                            None
-                        }
-                        Err(e) => Some(e),
-                    }
-                }
-                Ok(page) => {
-                    asked = ax::NewWindow::Pressed;
-                    pipe_page = Some(page);
-                    None
-                }
-                Err(e) => Some(e),
-            };
-            if let Some(e) = failed {
-                if let Some(id) = hold.take().map(|h| h.detach()) {
-                    off(cx, move || {
-                        crate::mac::key_hold::finish(
-                            id,
-                            agent_screen_model::key_hold::End::NoWindow,
-                        )
-                    })
-                    .await;
-                }
+        match request_running_window(
+            core,
+            id,
+            pid,
+            name,
+            bounds,
+            target,
+            is_url,
+            agents.as_ref(),
+            cx,
+        )
+        .await
+        {
+            Ok(page) => pipe_page = page,
+            Err(stop) => {
+                // No window will take the user's focus: what was held goes to
+                // their window, which still has it.
+                finish_key_hold(&mut hold, agent_screen_model::key_hold::End::NoWindow, cx).await;
                 drop(catch);
-                return Err(ControlError::failed(format!("the agents' {name} {e}")));
-            }
-        }
-        for _ in 0..10 {
-            if agents.is_some() {
-                break;
-            }
-            asked = cx
-                .background_executor()
-                .spawn(async move { ax::press_new_window(pid) })
-                .await;
-            if asked != ax::NewWindow::NotReady {
-                break;
-            }
-            cx.background_executor()
-                .timer(Duration::from_millis(150))
-                .await;
-        }
-        // Just started and no window yet: its menus may not have the item
-        // yet. Give them up to 3 s.
-        let just_started = || {
-            off(cx, move || {
-                app::launched_within(pid, LATE_WINDOW_WAIT)
-                    && !windows::all()
-                        .iter()
-                        .any(|w| w.target.pid == pid && w.layer == 0)
-            })
-        };
-        // Only this display's own launch has a watch that moves the window.
-        let started_here = core.read_with(cx, |c, _| {
-            c.displays.get(id).is_some_and(|d| d.started.contains(&pid))
-        });
-        // This display's own launch answers at once: its watch moves the
-        // window when it comes.
-        if asked == ax::NewWindow::Missing && !started_here && just_started().await {
-            for _ in 0..20 {
-                cx.background_executor()
-                    .timer(Duration::from_millis(150))
-                    .await;
-                asked = cx
-                    .background_executor()
-                    .spawn(async move { ax::press_new_window(pid) })
-                    .await;
-                if asked != ax::NewWindow::Missing {
-                    break;
-                }
-            }
-        }
-        let starting = asked == ax::NewWindow::Missing && just_started().await;
-        let missing = match asked {
-            ax::NewWindow::Pressed => None,
-            ax::NewWindow::Disabled => Some("app_busy"),
-            // The first launch's watch moves its window when it comes.
-            ax::NewWindow::Missing if started_here && starting => Some("still_starting"),
-            // Started by the user or another session moments ago.
-            ax::NewWindow::Missing if starting => Some("just_started"),
-            ax::NewWindow::Missing => Some("no_new_window"),
-            ax::NewWindow::NotReady => Some("menus_unreadable"),
-        };
-        if let Some(reason) = missing {
-            // No window will take the user's focus: what was held goes to
-            // their window, which still has it.
-            if let Some(id) = hold.take().map(|h| h.detach()) {
-                off(cx, move || {
-                    crate::mac::key_hold::finish(id, agent_screen_model::key_hold::End::NoWindow)
-                })
-                .await;
-            }
-            drop(catch);
-            if is_url {
-                let next = if matches!(reason, "just_started" | "still_starting") {
-                    "wait a few seconds and call launch_app again".to_string()
-                } else {
-                    format!("ask the user to quit {name}, then call launch_app again")
+                return match stop {
+                    RunningWindowStop::Failed(err) => Err(err),
+                    RunningWindowStop::Missing(reason) if is_url => {
+                        let next = if matches!(reason, "just_started" | "still_starting") {
+                            "wait a few seconds and call launch_app again".to_string()
+                        } else {
+                            format!("ask the user to quit {name}, then call launch_app again")
+                        };
+                        Err(ControlError::failed(format!(
+                            "{name} is running and can't open a new window now ({reason}), so the URL was not opened; {next}"
+                        )))
+                    }
+                    RunningWindowStop::Missing(reason) => Ok(Launched {
+                        window: None,
+                        was_running,
+                        reason: Some(reason),
+                        pid: None,
+                        shared: false,
+                    }),
                 };
-                return Err(ControlError::failed(format!(
-                    "{name} is running and can't open a new window now ({reason}), so the URL was not opened; {next}"
-                )));
             }
-            return Ok(Launched {
-                window: None,
-                was_running,
-                reason: Some(reason),
-                pid: None,
-                shared: false,
-            });
         }
     }
     let asked_at = Instant::now();
@@ -5734,12 +5967,7 @@ async fn launch_now(
             .await;
         if single_instance_risk && tick % 8 == 0 && off(cx, quit(pid)).await {
             drop(catch);
-            core.update(cx, |c, _| {
-                if let Some(d) = c.displays.get_mut(id) {
-                    d.started.remove(&pid);
-                }
-            });
-            return already_running(core, id, name, &instances_before, cx).await;
+            return unclaim_and_already_running(core, id, pid, name, &instances_before, cx).await;
         }
         let taken = catch.as_ref().and_then(|c| c.taken());
         let open_failed = poll_open(&mut opened);
@@ -5784,12 +6012,7 @@ async fn launch_now(
                 if let Some(ended) = hold.take() {
                     ended.detach();
                 }
-                hold = off(cx, move || {
-                    crate::mac::input::is_front(user.pid)
-                        .then(|| crate::mac::key_hold::start(user))
-                        .flatten()
-                })
-                .await;
+                hold = start_key_hold(user, cx).await;
                 log::debug!(
                     "launch: keys held again for the late window: {}",
                     hold.is_some()
@@ -5799,78 +6022,30 @@ async fn launch_now(
             // where the user's typing goes until Agent Screen hands focus
             // back (#110): send the URL now, before placing the window, so
             // that comes sooner. The browser opens it in its key window.
-            let opened = match (was_running && is_url && agents.is_none())
-                .then_some(target)
-                .flatten()
-            {
-                // The agents' instance opened the URL in the window itself.
-                None if agents.is_some() && is_url => Some(true),
-                Some(target) => {
-                    // Into the new window's address field where there is
-                    // one Agent Screen knows; else the system sends the URL.
-                    let (new_window, url) = (fresh.target, target.to_string());
-                    let in_field = cx
-                        .background_executor()
-                        .spawn(async move { ax::open_in_address_field(new_window, &url) })
-                        .await;
-                    log::debug!("launch: URL through the address field: {in_field}");
-                    Some(
-                        in_field
-                            || match open_in_background(
-                                path.clone(),
-                                Some(target.to_string()),
-                                false,
-                                &Start::default(),
-                                cx,
-                            )
-                            .await
-                            {
-                                Some(outcome) => {
-                                    cx.background_executor()
-                                        .spawn(async move {
-                                            outcome
-                                                .recv_timeout(Duration::from_secs(10))
-                                                .unwrap_or(false)
-                                        })
-                                        .await
-                                }
-                                None => false,
-                            },
-                    )
-                }
-                None => None,
-            };
+            let opened = open_url_in_new_window(
+                fresh.target,
+                &path,
+                target,
+                was_running,
+                is_url,
+                agents.is_some(),
+                cx,
+            )
+            .await;
             // While the window is placed, watch for the URL, and give the
             // user's window its key focus back the moment it shows: placing
             // takes most of a second, all of it with the user typing into
             // the new window (#110). The focus record is refused in the
             // front app, so it goes through accessibility, as a click would.
             let handback = match (opened, target) {
-                (Some(true), Some(url)) => {
-                    let (window, url) = (fresh.target, url.to_string());
-                    let held = hold.take().map(|h| h.detach());
-                    Some(cx.background_executor().spawn(async move {
-                        let shown = shows_url(window, &url, detected);
-                        // The hold makes the user's window key, then sends
-                        // on what it held. Without one going on, focus goes
-                        // back here.
-                        let ran = held.is_some_and(|id| {
-                            crate::mac::key_hold::finish(
-                                id,
-                                agent_screen_model::key_hold::End::HandedBack,
-                            )
-                        });
-                        if !ran
-                            && let Some(user) = user_window
-                            && crate::mac::input::is_front(user.pid)
-                            && ax::focused_window_id(user.pid) == Some(window.window_id)
-                        {
-                            let given = ax::make_main(user);
-                            log::debug!("launch: key focus back to the user's window: {given}");
-                        }
-                        shown
-                    }))
-                }
+                (Some(true), Some(url)) => Some(spawn_url_handback(
+                    fresh.target,
+                    url.to_string(),
+                    detected,
+                    hold.take(),
+                    user_window,
+                    cx,
+                )),
                 _ => None,
             };
             let placed = settle(core, fresh.target, id, cx).await?;
@@ -5901,15 +6076,7 @@ async fn launch_now(
             // Otherwise the call's end hands it back, as after any input.
             if settled {
                 core.update(cx, |c, _| c.forwarder(id)).keys_done().await;
-                if let Some(id) = hold.take().map(|h| h.detach()) {
-                    off(cx, move || {
-                        crate::mac::key_hold::finish(
-                            id,
-                            agent_screen_model::key_hold::End::HandedBack,
-                        )
-                    })
-                    .await;
-                }
+                finish_key_hold(&mut hold, agent_screen_model::key_hold::End::HandedBack, cx).await;
             }
             // An app started in the background drops the first click on its
             // window, which only makes the window key: spend it here.
@@ -5945,78 +6112,18 @@ async fn launch_now(
     }
     keep_catch(core, id, catch, cx);
     log::debug!("launch: {name} made no window of Agent Screen's (gave up early: {gave_up})");
-    if let Some(id) = hold.take().map(|h| h.detach()) {
-        off(cx, move || {
-            crate::mac::key_hold::finish(id, agent_screen_model::key_hold::End::NoWindow)
-        })
-        .await;
-    }
+    finish_key_hold(&mut hold, agent_screen_model::key_hold::End::NoWindow, cx).await;
     // A slow launch can open its window after we stop waiting. Keep watching
     // so it does not stay on the user's screen: for an app Agent Screen
     // started, any new window; for a running app, the one showing the file.
-    let core = core.clone();
-    // The app showed the file in a window it had before; otherwise its
-    // window is still to come, and the watcher above moves it.
-    let shown_already = match document.clone() {
-        Some(d) => {
-            let before = before.clone();
-            cx.background_executor()
-                .spawn(async move {
-                    windows::all().iter().any(|w| {
-                        w.target.pid == pid
-                            && before.contains(&w.target.window_id)
-                            && shows_document(w.target, &d)
-                    })
-                })
-                .await
-        }
-        None => false,
-    };
-    let watching = document
-        .clone()
-        .filter(|_| !shown_already)
-        .filter(|d| core.update(cx, |c, _| c.watching.insert((pid, d.clone()))));
-    if let Some(document) = watching {
-        // A catch for the file's window moves it as it appears; the poll
-        // covers an app that names the document only after.
-        let catch = document_catch.take();
-        cx.spawn(async move |cx: &mut AsyncApp| {
-            for _ in 0..200 {
-                cx.background_executor()
-                    .timer(Duration::from_millis(150))
-                    .await;
-                let taken = catch.as_ref().and_then(|c| c.taken());
-                let (seen, file) = (before.clone(), document.clone());
-                let late = cx
-                    .background_executor()
-                    .spawn(async move {
-                        windows::all().into_iter().find(|w| {
-                            w.target.pid == pid
-                                && w.layer == 0
-                                && !seen.contains(&w.target.window_id)
-                                && (taken == Some(w.target.window_id)
-                                    || shows_document(w.target, &file))
-                        })
-                    })
-                    .await;
-                if let Some(late) = late {
-                    let _ = settle(&core, late.target, id, cx).await;
-                    break;
-                }
-                if !takes_windows(&core, id, cx) {
-                    break;
-                }
-            }
-            drop(catch);
-            core.update(cx, |c, _| c.watching.remove(&(pid, document)));
-        })
-        .detach();
-    } else if !was_running {
+    let (shown_already, watching) =
+        watch_late_document(core, id, pid, &before, document, document_catch.take(), cx).await;
+    if !watching && !was_running {
         // The kept catch takes the first window the moment it opens, unless
         // the user is clicking or typing then; the watch is for an app that
         // won't take observers yet. The cold start counts from the launch.
         watch_cold_start(
-            &core,
+            core,
             id,
             pid,
             before,
