@@ -1479,9 +1479,44 @@ fn evacuate_spare_windows(spares: &[DisplayId]) {
     }
 }
 
+/// Bounded O(1) wake signal for event-driven observers. Pushing into a
+/// bounded channel with `try_send` coalesces notifications while active so
+/// memory never grows between idle drains.
+pub(crate) struct WakeTx(std::sync::Mutex<futures::channel::mpsc::Sender<()>>);
+
+impl WakeTx {
+    pub(crate) fn notify(&self) {
+        let _ = self
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .try_send(());
+    }
+}
+
+pub(crate) fn wake_channel() -> (WakeTx, futures::channel::mpsc::Receiver<()>) {
+    let (tx, rx) = futures::channel::mpsc::channel(1);
+    (WakeTx(std::sync::Mutex::new(tx)), rx)
+}
+
 pub fn watch_alerts(core: Entity<Core>, cx: &mut App) {
+    use futures::StreamExt;
+    let (tx, mut rx) = wake_channel();
+    cx.observe(&core, move |_, _| {
+        tx.notify();
+    })
+    .detach();
     cx.spawn(async move |cx: &mut AsyncApp| {
         loop {
+            if core.read_with(cx, |c, _| c.virtual_ids().is_empty()) {
+                // Sleep with zero timer wakeups until a display appears.
+                if rx.next().await.is_none() {
+                    break;
+                }
+                while rx.try_recv().is_ok() {}
+                continue;
+            }
+            while rx.try_recv().is_ok() {}
             cx.background_executor().timer(Duration::from_secs(1)).await;
             let (ids, spares) = core.read_with(cx, |c, _| (c.virtual_ids(), c.spare_ids()));
             if ids.is_empty() {
@@ -1778,5 +1813,24 @@ mod tests {
         assert_eq!(started_on_3.as_deref(), Some("s1"));
         assert!(rebound_3);
         assert!(input_queue.owner(7, 3).is_ok());
+    }
+
+    #[test]
+    fn wake_channel_coalesces_many_notifications_without_unbounded_growth() {
+        let (tx, mut rx) = wake_channel();
+        for _ in 0..10_000 {
+            tx.notify();
+        }
+        let mut drained = 0usize;
+        while rx.try_recv().is_ok() {
+            drained += 1;
+        }
+        // `futures::channel::mpsc::channel(1)` caps capacity at 1 + senders (2).
+        assert!((1..=2).contains(&drained));
+        assert!(rx.try_recv().is_err());
+
+        tx.notify();
+        assert!(rx.try_recv().is_ok());
+        assert!(rx.try_recv().is_err());
     }
 }

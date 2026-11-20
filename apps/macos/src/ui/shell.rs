@@ -684,10 +684,21 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
     let checked = shell.downgrade();
     cx.spawn(async move |cx: &mut AsyncApp| {
         loop {
-            let fast = checked
-                .update(cx, |shell, _| shell.setup.is_some() || assist::is_shown())
-                .unwrap_or(false);
-            let wait = if fast { 400 } else { 2000 };
+            let (fast, complete) = checked
+                .update(cx, |shell, _| {
+                    (
+                        shell.setup.is_some() || assist::is_shown(),
+                        shell.permissions.complete(),
+                    )
+                })
+                .unwrap_or((false, false));
+            let wait = if fast {
+                400
+            } else if complete {
+                10_000
+            } else {
+                2_000
+            };
             cx.background_executor()
                 .timer(Duration::from_millis(wait))
                 .await;
@@ -705,11 +716,29 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
     })
     .detach();
     // Windows come and go without telling us; recount once a second while
-    // Peek or the Viewer shows the counts.
+    // Peek or the Viewer shows the counts. When completely idle (no displays,
+    // no visible panels, no active Input Queue work), back off to 5 s so the
+    // idle app wakes rarely; Core notifications still wake sync immediately.
     let counted = shell.downgrade();
     cx.spawn(async move |cx: &mut AsyncApp| {
         loop {
-            cx.background_executor().timer(Duration::from_secs(1)).await;
+            let active = counted
+                .update(cx, |shell, cx| {
+                    let core = shell.core.read(cx);
+                    !core.displays.list.is_empty()
+                        || shell.peek_shown
+                        || shell.viewer_open
+                        || shell.loan_running
+                        || shell.restoring
+                        || core.input_queue.queue.grant().is_some()
+                        || core.input_queue.queue.pending_end().is_some()
+                        || core.input_queue.queue.waiting().next().is_some()
+                        || !crate::mac::real_input::watching()
+                })
+                .unwrap_or(false);
+            cx.background_executor()
+                .timer(Duration::from_secs(if active { 1 } else { 5 }))
+                .await;
             if counted
                 .update(cx, |shell, cx| {
                     shell.core.update(cx, |core, cx| {
@@ -5439,30 +5468,60 @@ fn beep() {
 /// there: AeroSpace's `move-mouse monitor-lazy-center` does when focus
 /// moves to a window on an Agent Display.
 fn cursor_guard(core: Entity<Core>, cx: &mut App) {
+    use futures::StreamExt;
+    let (tx, mut rx) = crate::core::wake_channel();
+    cx.observe(&core, move |_, _| {
+        tx.notify();
+    })
+    .detach();
     cx.spawn(async move |cx: &mut AsyncApp| {
         let mut last_good: Option<(f64, f64)> = None;
+        let mut cached_bounds: (u64, Vec<DisplayId>, Vec<Rect>) = (0, Vec::new(), Vec::new());
         loop {
             let ids: Vec<DisplayId> =
                 cx.update(|cx| core.read(cx).displays.list.iter().map(|d| d.id).collect());
-            let idle = ids.is_empty();
-            cx.background_executor()
-                .timer(Duration::from_millis(if idle { 500 } else { 33 }))
-                .await;
-            if idle {
+            if ids.is_empty() {
+                // Sleep with zero timer wakeups until a display appears.
+                if rx.next().await.is_none() {
+                    break;
+                }
+                while rx.try_recv().is_ok() {}
                 continue;
             }
-            // Reading the cursor asks WindowServer: off the UI thread.
-            last_good = cx
-                .background_spawn(async move { pull_cursor_back(&ids, last_good) })
+            while rx.try_recv().is_ok() {}
+            cx.background_executor()
+                .timer(Duration::from_millis(33))
                 .await;
+            let stamp = cg::display_change_stamp();
+            let cache_valid = cached_bounds.0 == stamp && cached_bounds.1 == ids;
+            let bounds_in = if cache_valid {
+                Some(cached_bounds.2.clone())
+            } else {
+                None
+            };
+            // Reading the cursor asks WindowServer: off the UI thread.
+            let ids_bg = ids.clone();
+            let (next_good, bounds) = cx
+                .background_spawn(async move {
+                    let bounds = bounds_in.unwrap_or_else(|| {
+                        ids_bg.iter().copied().map(cg::display_bounds).collect()
+                    });
+                    let next = pull_cursor_back(&bounds, last_good);
+                    (next, bounds)
+                })
+                .await;
+            last_good = next_good;
+            if !cache_valid {
+                cached_bounds = (stamp, ids, bounds);
+            }
         }
     })
     .detach();
 }
 
-/// Put the cursor back where it last was off `ids`, if it is on one of
+/// Put the cursor back where it last was off `areas`, if it is on one of
 /// them. Where it is now when that is a good place.
-fn pull_cursor_back(ids: &[DisplayId], last_good: Option<(f64, f64)>) -> Option<(f64, f64)> {
+fn pull_cursor_back(areas: &[Rect], last_good: Option<(f64, f64)>) -> Option<(f64, f64)> {
     // An approved Input Queue drag holds the pointer there on purpose; the
     // grant's end puts it back, or the guard does once the user takes it.
     if crate::mac::real_input::in_use() {
@@ -5473,7 +5532,7 @@ fn pull_cursor_back(ids: &[DisplayId], last_good: Option<(f64, f64)>) -> Option<
     };
     let at = objc2_core_graphics::CGEvent::location(Some(&event));
     let at = (at.x, at.y);
-    if !ids.iter().any(|&id| cg::display_bounds(id).contains(at)) {
+    if !areas.iter().any(|area| area.contains(at)) {
         return Some(at);
     }
     let back = last_good.unwrap_or_else(|| cg::display_bounds(cg::main_display()).mid());

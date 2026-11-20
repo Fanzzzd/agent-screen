@@ -1035,11 +1035,16 @@ pub fn outset(content: NSRect, [top, left, bottom, right]: [f64; 4]) -> NSRect {
     inset(content, [-top, -left, -bottom, -right])
 }
 
-/// Each window with a margin takes mouse events only with the pointer over
-/// its content. Called on every move, and when a window moves or resizes.
+/// Each visible window with a margin takes mouse events only with the
+/// pointer over its content. Called on every move, and when a window moves
+/// or resizes. Skips hidden windows to avoid WindowServer fence IPCs while
+/// Peek, the Viewer and cards are closed.
 pub fn follow_pointer(at: NSPoint) {
     MARGINS.with(|m| {
         for (window, margin) in m.borrow().iter() {
+            if !window.isVisible() {
+                continue;
+            }
             let content = inset(window.frame(), *margin);
             let over = at.x >= content.origin.x
                 && at.x <= content.origin.x + content.size.width
@@ -1210,6 +1215,7 @@ pub fn give_up_keys(window: &NSWindow) {
     GIVING_BACK.store(true, Ordering::Relaxed);
     window.orderOut(None);
     window.orderFrontRegardless();
+    follow_pointer(NSEvent::mouseLocation());
     later(|| GIVING_BACK.store(false, Ordering::Relaxed));
 }
 
@@ -1325,9 +1331,11 @@ pub fn later(f: impl FnOnce() + 'static) {
     main.wake_up();
 }
 
-/// Show without taking the keyboard from the user's app.
+/// Show without taking the keyboard from the user's app. Refresh mouse-ignore
+/// state for an unmoved pointer since `follow_pointer` skips hidden windows.
 pub fn order_front(window: &NSWindow) {
     window.orderFrontRegardless();
+    follow_pointer(NSEvent::mouseLocation());
 }
 
 pub fn order_out(window: &NSWindow) {

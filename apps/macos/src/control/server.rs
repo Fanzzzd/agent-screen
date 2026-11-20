@@ -240,11 +240,20 @@ fn sweep_orphans(shared: &Shared) {
     let ps = &shared.processes;
     for (connection, peer) in peers {
         let pid = peer.pid;
+        if pid == shared.app {
+            continue;
+        }
+        // Only processes adopted by launchd (parent == 1) can be orphans.
+        // Check parent before reading executable path and KERN_PROCARGS2 argv.
+        let parent = ps.parent(pid);
+        if parent != Some(1) {
+            continue;
+        }
         let executable = ps.executable(pid);
         let arguments = ps.arguments(pid);
         let now = agent_screen_model::mcp_process::Peer {
             pid,
-            parent: ps.parent(pid),
+            parent,
             executable: executable.as_deref(),
             arguments: arguments.as_deref(),
         };
