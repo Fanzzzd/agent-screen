@@ -1807,7 +1807,7 @@ impl Worker {
             self.focus(target);
         }
         // Keys go to the window clicked, not to one that opened earlier.
-        if let Some(within) = display_of(target.window_id) {
+        if let Some(within) = within_display {
             self.known = windows
                 .iter()
                 .filter(|h| h.layer == 0 && within.contains(h.bounds.mid()))
@@ -2585,8 +2585,39 @@ pub fn foreign_window_at(
     display: crate::model::DisplayId,
     at: (f64, f64),
 ) -> Option<(WindowTarget, crate::model::DisplayId)> {
+    // Only inspects `top.host` and `top.layer`, which `mark_panels` never
+    // changes, so no `remote_panels` (`OptionAll`) scan is needed.
     let owners = super::windows::recorded_owners_snapshot();
-    foreign_recorded_top_window_in(&hits(), display, at, &owners)
+    foreign_recorded_top_window_in(&hits_on_screen(), display, at, &owners)
+}
+
+/// Combined foreign-window guard and top-window lookup for an agent click
+/// at `at` on `display`, using a single hit list. Returns `Err((host, owner))`
+/// when a foreign recorded window is topmost at `at`, else `Ok(window_at)`.
+pub fn click_check_at(
+    display: crate::model::DisplayId,
+    at: (f64, f64),
+) -> Result<Option<(WindowTarget, Rect)>, (WindowTarget, crate::model::DisplayId)> {
+    let list = hits();
+    let owners = super::windows::recorded_owners_snapshot();
+    click_check_in(&list, display, at, &owners)
+}
+
+fn click_check_in(
+    list: &[Hit],
+    display: crate::model::DisplayId,
+    at: (f64, f64),
+    owners: &std::collections::BTreeMap<u32, crate::model::DisplayId>,
+) -> Result<Option<(WindowTarget, Rect)>, (WindowTarget, crate::model::DisplayId)> {
+    if let Some(foreign) = foreign_recorded_top_window_in(list, display, at, owners) {
+        return Err(foreign);
+    }
+    let target = list
+        .iter()
+        .find(|h| h.bounds.contains(at))
+        .filter(|h| h.layer == 0 && h.target == h.host)
+        .map(|h| (h.target, h.bounds));
+    Ok(target)
 }
 
 /// Candidate Accessibility owner PIDs for an open `NSMenu` (`layer == 101`):
@@ -2643,16 +2674,66 @@ fn resolve_menu_pids(
     pids
 }
 
+/// Windows input can reach, front to back, without scanning off-screen
+/// remote panels.
+fn hits_on_screen() -> Vec<Hit> {
+    let menu = CGWindowLevelForKey(CGWindowLevelKey::MainMenuWindowLevelKey) as i64;
+    let status = CGWindowLevelForKey(CGWindowLevelKey::StatusWindowLevelKey) as i64;
+    cg::on_screen_hit_candidates(menu, status)
+        .into_iter()
+        .map(|(target, layer, bounds)| Hit {
+            host: target,
+            target,
+            bounds,
+            layer,
+        })
+        .collect()
+}
+
+/// Short-lived cache of `cg::remote_panels()` keyed by the on-screen window
+/// layout (`PanelKey`), matching `DragSight`'s invariant with a 500 ms TTL so
+/// an out-of-process `.appex` swap behind an unmoved host window refreshes too.
+const PANEL_CACHE_TTL: Duration = Duration::from_millis(500);
+type PanelCacheEntry = (Vec<PanelKey>, Instant, Vec<cg::WindowInfo>);
+static PANEL_CACHE: std::sync::Mutex<Option<PanelCacheEntry>> = std::sync::Mutex::new(None);
+
+fn panel_keys(list: &[Hit]) -> Vec<PanelKey> {
+    list.iter().map(|h| (h.host, h.layer, h.bounds)).collect()
+}
+
+fn panel_cache_valid(entry: &PanelCacheEntry, key: &[PanelKey], now: Instant) -> bool {
+    entry.0.as_slice() == key && now.saturating_duration_since(entry.1) < PANEL_CACHE_TTL
+}
+
+fn cached_remote_panels(list: &[Hit]) -> Vec<cg::WindowInfo> {
+    let key = panel_keys(list);
+    let now = Instant::now();
+    if let Some(entry) = PANEL_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        && panel_cache_valid(entry, &key, now)
+    {
+        return entry.2.clone();
+    }
+    let panels = cg::remote_panels();
+    *PANEL_CACHE.lock().unwrap_or_else(|e| e.into_inner()) =
+        Some((key, Instant::now(), panels.clone()));
+    panels
+}
+
 /// Windows input can reach, front to back. The desktop is left out on
 /// purpose: a click on Finder's desktop window counts as a wallpaper click,
 /// and with "click wallpaper to reveal desktop" on (the default since macOS
 /// 14) it slides every window on every display aside, the user's included.
 fn hits() -> Vec<Hit> {
-    let menu = CGWindowLevelForKey(CGWindowLevelKey::MainMenuWindowLevelKey) as i64;
-    let status = CGWindowLevelForKey(CGWindowLevelKey::StatusWindowLevelKey) as i64;
-    hit_list(cg::on_screen_windows(), cg::remote_panels(), menu, status)
+    let mut list = hits_on_screen();
+    let panels = cached_remote_panels(&list);
+    mark_panels(&mut list, &panels);
+    list
 }
 
+#[cfg(test)]
 fn hit_list(
     on_screen: Vec<cg::WindowInfo>,
     panels: Vec<cg::WindowInfo>,
@@ -2802,9 +2883,7 @@ fn resolve_real_click(
 pub fn on_list(at: (f64, f64)) -> bool {
     // Pid and bounds are all the rule reads: no panel lookup, as this runs
     // on the main thread at every press.
-    let menu = CGWindowLevelForKey(CGWindowLevelKey::MainMenuWindowLevelKey) as i64;
-    let status = CGWindowLevelForKey(CGWindowLevelKey::StatusWindowLevelKey) as i64;
-    is_list(&reachable(cg::on_screen_windows(), menu, status), at)
+    is_list(&hits_on_screen(), at)
 }
 
 /// Whether a press at `at` hits a list or panel of `list`'s windows, front
@@ -3688,5 +3767,83 @@ mod popup_tests {
             777_003,
             t0 + VIEWER_DRAG_GUARD_TTL
         ));
+    }
+
+    #[test]
+    fn panel_cache_invalidates_on_layout_change_or_ttl() {
+        let host = Hit {
+            host: WindowTarget {
+                pid: 10,
+                window_id: 100,
+            },
+            target: WindowTarget {
+                pid: 10,
+                window_id: 100,
+            },
+            bounds: Rect::new(0.0, 0.0, 800.0, 600.0),
+            layer: 0,
+        };
+        let moved = Hit {
+            bounds: Rect::new(10.0, 0.0, 800.0, 600.0),
+            ..host
+        };
+        let t0 = Instant::now();
+        let entry: PanelCacheEntry = (panel_keys(&[host]), t0, Vec::new());
+        assert!(panel_cache_valid(
+            &entry,
+            &panel_keys(&[host]),
+            t0 + Duration::from_millis(100)
+        ));
+        assert!(!panel_cache_valid(
+            &entry,
+            &panel_keys(&[moved]),
+            t0 + Duration::from_millis(10)
+        ));
+        assert!(!panel_cache_valid(
+            &entry,
+            &panel_keys(&[host]),
+            t0 + PANEL_CACHE_TTL
+        ));
+    }
+
+    #[test]
+    fn click_check_in_refuses_foreign_and_returns_owned_top_window() {
+        let pt = (150.0, 150.0);
+        let foreign = Hit {
+            host: WindowTarget {
+                pid: 11,
+                window_id: 101,
+            },
+            target: WindowTarget {
+                pid: 11,
+                window_id: 101,
+            },
+            bounds: Rect::new(100.0, 100.0, 300.0, 200.0),
+            layer: 0,
+        };
+        let own = Hit {
+            host: WindowTarget {
+                pid: 22,
+                window_id: 202,
+            },
+            target: WindowTarget {
+                pid: 22,
+                window_id: 202,
+            },
+            bounds: Rect::new(100.0, 100.0, 300.0, 200.0),
+            layer: 0,
+        };
+        let mut owners = std::collections::BTreeMap::new();
+        owners.insert(101, 7);
+        owners.insert(202, 8);
+
+        assert_eq!(
+            click_check_in(&[foreign, own], 8, pt, &owners),
+            Err((foreign.host, 7))
+        );
+        assert_eq!(
+            click_check_in(&[own, foreign], 8, pt, &owners),
+            Ok(Some((own.target, own.bounds)))
+        );
     }
 }

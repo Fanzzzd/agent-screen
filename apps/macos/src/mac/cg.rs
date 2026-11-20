@@ -265,6 +265,49 @@ pub fn on_screen_where(keep: impl Fn(i32, i64, Rect) -> bool) -> Vec<WindowInfo>
     )
 }
 
+/// Ids of on-screen windows of other processes that `keep` takes by pid,
+/// layer and bounds, desktop elements left out. Reads no strings or alpha.
+pub fn on_screen_ids_where(keep: impl Fn(i32, i64, Rect) -> bool) -> Vec<u32> {
+    let me = std::process::id() as i32;
+    let mut out = Vec::new();
+    list_raw(
+        CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements,
+        0,
+        |pid, window_id, layer, bounds, _| {
+            if pid != me && keep(pid, layer, bounds) {
+                out.push(window_id);
+            }
+        },
+    );
+    out
+}
+
+/// On-screen windows input can reach, front to back, without reading window
+/// titles. Filters by layer, alpha and owner before allocating anything.
+pub fn on_screen_hit_candidates(menu: i64, status: i64) -> Vec<(WindowTarget, i64, Rect)> {
+    let me = std::process::id() as i32;
+    let mut out = Vec::new();
+    list_raw(
+        CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements,
+        0,
+        |pid, window_id, layer, bounds, info| {
+            if pid == me || !(0..1000).contains(&layer) || layer == menu || layer == status {
+                return;
+            }
+            let alpha = unsafe { cf::float(info, cf::kCGWindowAlpha) }.unwrap_or(1.0);
+            if alpha <= 0.0 {
+                return;
+            }
+            let owner = unsafe { cf::string(info, cf::kCGWindowOwnerName) };
+            if owner == "Window Server" || owner == "Dock" {
+                return;
+            }
+            out.push((WindowTarget { pid, window_id }, layer, bounds));
+        },
+    );
+    out
+}
+
 /// Every normal window of other processes, hidden, minimized and on other
 /// Spaces included.
 pub fn all_windows() -> Vec<WindowInfo> {

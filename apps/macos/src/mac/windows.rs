@@ -207,24 +207,19 @@ impl Grab {
 /// documents, floating panels such as inspectors, and modal panels and
 /// alerts (levels 0 to 8). Menus, the Dock and status items sit higher.
 pub fn all() -> Vec<Window> {
-    let own = std::process::id() as i32;
-    cg::on_screen_windows()
-        .into_iter()
-        .filter(|w| {
-            (0..=8).contains(&w.layer)
-                && w.target.pid != own
-                && w.bounds.width > 40.0
-                && w.bounds.height > 40.0
-        })
-        .map(|w| Window {
-            target: w.target,
-            app: w.owner_name,
-            title: w.title,
-            bounds: w.bounds,
-            layer: w.layer,
-            off_display: false,
-        })
-        .collect()
+    cg::on_screen_where(|_, layer, bounds| {
+        (0..=8).contains(&layer) && bounds.width > 40.0 && bounds.height > 40.0
+    })
+    .into_iter()
+    .map(|w| Window {
+        target: w.target,
+        app: w.owner_name,
+        title: w.title,
+        bounds: w.bounds,
+        layer: w.layer,
+        off_display: false,
+    })
+    .collect()
 }
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -638,13 +633,8 @@ pub fn on_display(display: DisplayId) -> Vec<Window> {
 /// Menus open on a display: an app's pop-up menus, as a web page's select
 /// shows, at the pop-up menu level (kCGPopUpMenuWindowLevel).
 pub fn menus_on(display: DisplayId) -> Vec<u32> {
-    let own = std::process::id() as i32;
     let area = cg::display_bounds(display);
-    cg::on_screen_windows()
-        .into_iter()
-        .filter(|w| w.layer == 101 && w.target.pid != own && w.bounds.intersects(&area))
-        .map(|w| w.target.window_id)
-        .collect()
+    cg::on_screen_ids_where(|_, layer, bounds| layer == 101 && bounds.intersects(&area))
 }
 
 /// Move document windows that grew past the display's edges, such as
