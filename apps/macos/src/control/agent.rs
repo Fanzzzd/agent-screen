@@ -5675,7 +5675,11 @@ async fn launch_now(
     let started = Instant::now();
     // Windows already on screen, or claimed by any display, aren't new.
     let mut before: std::collections::HashSet<u32> = off(cx, || {
-        windows::all().iter().map(|w| w.target.window_id).collect()
+        cg::on_screen_ids_where(|_, layer, bounds| {
+            (0..=8).contains(&layer) && bounds.width > 40.0 && bounds.height > 40.0
+        })
+        .into_iter()
+        .collect()
     })
     .await;
     before.extend(core.read_with(cx, |c, _| {
@@ -5690,17 +5694,18 @@ async fn launch_now(
     // The agents' instance of a browser the user runs is the only one this
     // launch may use (ADR 0022).
     let only = agents.as_ref().map(|a| a.pid);
-    let pids = {
-        let path = path.clone();
+    let process_watch =
+        std::sync::Arc::new(std::sync::Mutex::new(app::ProcessWatch::new(&path, only)));
+    let poll_pids = {
+        let watch = std::sync::Arc::clone(&process_watch);
         move || {
-            let mut pids = app::running_pids(&path);
-            if let Some(only) = only {
-                pids.retain(|&p| p == only);
-            }
-            pids
+            watch
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .poll_running_pids()
         }
     };
-    let instances_before = off(cx, pids.clone()).await;
+    let instances_before = off(cx, poll_pids.clone()).await;
     let was_running = !fresh && !instances_before.is_empty();
     // New windows go straight onto the display, before the user sees them
     // or AeroSpace files them in the user's workspace.
@@ -5710,7 +5715,7 @@ async fn launch_now(
     // opens. A starting app's windows are all Agent Screen's.
     let limit = was_running.then_some(1);
     let catch_from = |pid: i32| crate::mac::catch::Catch::start(pid, id, screen.clone(), limit);
-    let running = off(cx, pids.clone()).await.into_iter().next();
+    let running = instances_before.first().copied();
     // The agents' running instance is shared by every session: its window
     // is the one its pipe made for this page, found below, and a catch
     // could take another session's window first.
@@ -5797,13 +5802,15 @@ async fn launch_now(
     // only one: it hands its launch to the running instance and quits.
     let single_instance_risk = fresh && !instances_before.is_empty();
     let quit = |pid: i32| {
-        let pids = pids.clone();
+        let path = path.clone();
         move || {
             let here = spawned == Some(pid);
+            let alive =
+                !here && only.is_none_or(|o| o == pid) && app::is_bundle_pid_running(pid, &path);
             agent_screen_model::launch::has_quit(
                 here,
                 here && unsafe { libc::kill(pid, 0) } == 0,
-                !here && pids().contains(&pid),
+                alive,
             )
         }
     };
@@ -5813,7 +5820,7 @@ async fn launch_now(
             pid = spawned;
             break;
         }
-        let now = off(cx, pids.clone()).await;
+        let now = off(cx, poll_pids.clone()).await;
         pid = if fresh {
             let new: Vec<i32> = now
                 .into_iter()
@@ -5896,9 +5903,11 @@ async fn launch_now(
                 if hide && !app::is_hidden(pid) {
                     app::hide(pid);
                 }
-                for w in windows::all() {
-                    if w.target.pid == pid && w.layer == 0 && !seen.contains(&w.target.window_id) {
-                        let _ = ax::move_into(w.target, bounds);
+                for window_id in cg::on_screen_ids_where(|p, layer, bounds| {
+                    p == pid && layer == 0 && bounds.width > 40.0 && bounds.height > 40.0
+                }) {
+                    if !seen.contains(&window_id) {
+                        let _ = ax::move_into(WindowTarget { pid, window_id }, bounds);
                     }
                 }
             })

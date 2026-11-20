@@ -33,12 +33,149 @@ pub fn processes_of(bundle: &Path) -> Vec<i32> {
     let mut buffer = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
     process_ids()
         .into_iter()
-        .filter(|&pid| {
-            let length =
-                unsafe { libc::proc_pidpath(pid, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
-            length > 0 && &buffer[..length as usize] == wanted
-        })
+        .filter(|&pid| pid_matches_executable(pid, wanted, &mut buffer))
         .collect()
+}
+
+/// Whether one known `pid` is still a running app instance of `bundle`,
+/// without scanning every process on the Mac.
+pub fn is_bundle_pid_running(pid: i32, bundle: &Path) -> bool {
+    let Some(executable) = cached_main_executable(bundle) else {
+        return false;
+    };
+    let mut buffer = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    pid_matches_executable(pid, executable.as_os_str().as_encoded_bytes(), &mut buffer)
+        && NSRunningApplication::runningApplicationWithProcessIdentifier(pid).is_some()
+}
+
+fn pid_matches_executable(pid: i32, wanted: &[u8], buffer: &mut [u8]) -> bool {
+    matches!(
+        check_pid_executable(pid, wanted, buffer),
+        PidPathCheck::Match
+    )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PidPathCheck {
+    Match,
+    Other,
+    /// Launch trampoline (such as `/usr/libexec/xpcproxy`) that may `exec()`
+    /// into the target binary under the same PID; never cached as unrelated.
+    Trampoline,
+    Failed,
+}
+
+fn is_launch_trampoline(path: &[u8]) -> bool {
+    matches!(path.rsplit(|&b| b == b'/').next(), Some(b"xpcproxy"))
+}
+
+fn classify_pid_path(path: &[u8], wanted: &[u8]) -> PidPathCheck {
+    if path == wanted {
+        PidPathCheck::Match
+    } else if is_launch_trampoline(path) {
+        PidPathCheck::Trampoline
+    } else {
+        PidPathCheck::Other
+    }
+}
+
+fn check_pid_executable(pid: i32, wanted: &[u8], buffer: &mut [u8]) -> PidPathCheck {
+    let length =
+        unsafe { libc::proc_pidpath(pid, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
+    if length <= 0 {
+        PidPathCheck::Failed
+    } else {
+        classify_pid_path(&buffer[..length as usize], wanted)
+    }
+}
+
+/// Incremental 20 ms process poller for `launch_app`. Records only PIDs that
+/// were already running another non-trampoline executable during the first
+/// (pre-launch) scan, evicting any PID that exits. Every launch trampoline
+/// (such as `/usr/libexec/xpcproxy`, even if already present at the first
+/// scan), every PID whose `proc_pidpath` failed, and every PID that appears
+/// after the first scan is re-checked on every 20 ms tick so cold launches are
+/// never delayed.
+pub struct ProcessWatch {
+    wanted: Option<Vec<u8>>,
+    only: Option<i32>,
+    seeded: bool,
+    preexisting_other: std::collections::HashSet<i32>,
+}
+
+impl ProcessWatch {
+    pub fn new(bundle: &Path, only: Option<i32>) -> Self {
+        let wanted =
+            cached_main_executable(bundle).map(|p| p.as_os_str().as_encoded_bytes().to_vec());
+        Self::with_wanted(wanted, only)
+    }
+
+    fn with_wanted(wanted: Option<Vec<u8>>, only: Option<i32>) -> Self {
+        Self {
+            wanted,
+            only,
+            seeded: false,
+            preexisting_other: std::collections::HashSet::new(),
+        }
+    }
+
+    /// Running app PIDs matching the bundle (and `only` if set), matching
+    /// `running_pids(bundle)` without re-probing pre-existing unrelated PIDs.
+    pub fn poll_running_pids(&mut self) -> Vec<i32> {
+        let mut buffer = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+        self.poll_with(
+            process_ids,
+            |pid, wanted| check_pid_executable(pid, wanted, &mut buffer),
+            |pid| NSRunningApplication::runningApplicationWithProcessIdentifier(pid).is_some(),
+        )
+    }
+
+    fn poll_with(
+        &mut self,
+        list_pids: impl FnOnce() -> Vec<i32>,
+        mut check_path: impl FnMut(i32, &[u8]) -> PidPathCheck,
+        mut is_app: impl FnMut(i32) -> bool,
+    ) -> Vec<i32> {
+        let Some(wanted) = self.wanted.as_deref() else {
+            return Vec::new();
+        };
+        if let Some(only) = self.only {
+            return if check_path(only, wanted) == PidPathCheck::Match && is_app(only) {
+                vec![only]
+            } else {
+                Vec::new()
+            };
+        }
+        let all = list_pids();
+        if self.seeded {
+            let present: std::collections::HashSet<i32> = all.iter().copied().collect();
+            self.preexisting_other.retain(|pid| present.contains(pid));
+        }
+        let first_scan = !self.seeded;
+        self.seeded = true;
+        let mut found = Vec::new();
+        for pid in all {
+            if !first_scan && self.preexisting_other.contains(&pid) {
+                continue;
+            }
+            match check_path(pid, wanted) {
+                PidPathCheck::Match => {
+                    if is_app(pid) {
+                        found.push(pid);
+                    }
+                }
+                PidPathCheck::Other => {
+                    // Only cache PIDs confirmed unrelated before launch; every
+                    // PID that appears later is re-checked on every tick.
+                    if first_scan {
+                        self.preexisting_other.insert(pid);
+                    }
+                }
+                PidPathCheck::Trampoline | PidPathCheck::Failed => {}
+            }
+        }
+        found
+    }
 }
 
 fn cached_main_executable(bundle: &Path) -> Option<PathBuf> {
@@ -884,5 +1021,100 @@ mod tests {
         assert!(!read_handles_web(Path::new(
             "/System/Applications/Calculator.app"
         )));
+    }
+
+    #[test]
+    fn process_watch_and_single_pid_check_match_running_pids() {
+        let finder = Path::new("/System/Library/CoreServices/Finder.app");
+        let expected = running_pids(finder);
+        let mut watch = ProcessWatch::new(finder, None);
+        // First tick (full scan) and subsequent incremental ticks must agree.
+        assert_eq!(watch.poll_running_pids(), expected);
+        assert_eq!(watch.poll_running_pids(), expected);
+        if let Some(&pid) = expected.first() {
+            assert!(is_bundle_pid_running(pid, finder));
+            assert!(!is_bundle_pid_running(
+                pid,
+                Path::new("/System/Applications/Calculator.app")
+            ));
+            let mut only_watch = ProcessWatch::new(finder, Some(pid));
+            assert_eq!(only_watch.poll_running_pids(), vec![pid]);
+        }
+    }
+
+    #[test]
+    fn process_watch_catches_xpcproxy_exec_failed_pidpath_and_pid_reuse_immediately() {
+        use std::collections::HashMap;
+
+        let target = b"/Applications/Demo.app/Contents/MacOS/Demo";
+        let mut watch = ProcessWatch::with_wanted(Some(target.to_vec()), None);
+        let mut probed = Vec::new();
+
+        let run = |watch: &mut ProcessWatch,
+                   pids: Vec<i32>,
+                   paths: &HashMap<i32, Option<&[u8]>>,
+                   apps: &[i32],
+                   probed: &mut Vec<i32>| {
+            probed.clear();
+            watch.poll_with(
+                || pids,
+                |pid, wanted| {
+                    probed.push(pid);
+                    match paths.get(&pid).copied().flatten() {
+                        None => PidPathCheck::Failed,
+                        Some(p) => classify_pid_path(p, wanted),
+                    }
+                },
+                |pid| apps.contains(&pid),
+            )
+        };
+
+        // Tick 1 (pre-launch): 10 and 20 are unrelated, 15 is an already-running
+        // xpcproxy trampoline, and 30 fails proc_pidpath.
+        let mut paths: HashMap<i32, Option<&[u8]>> = HashMap::from([
+            (10, Some(b"/usr/sbin/syslogd".as_slice())),
+            (15, Some(b"/usr/libexec/xpcproxy".as_slice())),
+            (20, Some(b"/usr/bin/other".as_slice())),
+            (30, None),
+        ]);
+        assert_eq!(
+            run(&mut watch, vec![10, 15, 20, 30], &paths, &[], &mut probed),
+            Vec::<i32>::new()
+        );
+        assert_eq!(probed, vec![10, 15, 20, 30]);
+
+        // Tick 2: new PID 99 spawns as xpcproxy (not yet exec'd into Demo),
+        // preexisting PID 15 is still xpcproxy, preexisting PID 20 exits,
+        // and PID 30 still fails proc_pidpath.
+        paths.insert(99, Some(b"/usr/libexec/xpcproxy".as_slice()));
+        assert_eq!(
+            run(&mut watch, vec![10, 15, 30, 99], &paths, &[], &mut probed),
+            Vec::<i32>::new()
+        );
+        // Preexisting PID 10 is skipped; 15 (pre-existing xpcproxy), 30 (failed),
+        // and 99 (new) are all probed.
+        assert_eq!(probed, vec![15, 30, 99]);
+
+        // Tick 3: both 15 (pre-existing xpcproxy) and 99 (post-launch xpcproxy)
+        // exec into Demo under the same PIDs; PID 20 is reused by another Demo
+        // instance; PID 30 stops failing and matches.
+        paths.insert(15, Some(target.as_slice()));
+        paths.insert(99, Some(target.as_slice()));
+        paths.insert(20, Some(target.as_slice()));
+        paths.insert(30, Some(target.as_slice()));
+        assert_eq!(
+            run(
+                &mut watch,
+                vec![10, 15, 20, 30, 99],
+                &paths,
+                &[15, 20, 30, 99],
+                &mut probed
+            ),
+            vec![15, 20, 30, 99]
+        );
+        // Preexisting PID 10 was still skipped; 15 (pre-existing xpcproxy -> exec),
+        // 20 (reused), 30 (previously failed), and 99 (new xpcproxy -> exec)
+        // were all caught on the very next tick.
+        assert_eq!(probed, vec![15, 20, 30, 99]);
     }
 }
