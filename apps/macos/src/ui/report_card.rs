@@ -180,7 +180,7 @@ impl Render for ReportCard {
                         }),
                     )
                     .child(
-                        card_button("report-later", t("Not Now", "稍后"), Tone::Plain, &theme)
+                        card_button("report-later", t("Not Now", "暂不"), Tone::Plain, &theme)
                             .px(px(14.))
                             .on_click(move |_, _, cx| {
                                 tell(&later, cx, move |shell, cx| shell.decline_report(id, cx))

@@ -346,7 +346,7 @@ impl Render for HelpCard {
                             "{where_it_is}{}",
                             tf!(
                                 " Hand Over moves “{window}” to {agent}'s display.",
-                                "交给它后，“{window}”会挪到 {agent} 的显示器上。"
+                                "交给它后，“{window}”会移到 {agent} 的显示器上。"
                             )
                         ),
                         keep_label,
@@ -448,7 +448,7 @@ impl Render for HelpCard {
                     .child(
                         card_button(
                             "control-keep",
-                            t("Keep Control", "继续接管"),
+                            t("Keep Control", "保持接手"),
                             Tone::Plain,
                             &theme,
                         )
@@ -488,7 +488,7 @@ impl Render for HelpCard {
             .map(|f| f.read(cx).content.chars().count())
             .filter(|&n| n > REPLY_CHARS);
         card(
-            tf!("{agent} needs your help", "{agent} 需要你帮忙"),
+            tf!("{agent} needs your help", "{agent} 需要你的协助"),
             reason,
             Badge::Waiting,
             &theme,
@@ -603,7 +603,7 @@ fn answer_row(
         .child(
             card_button(
                 "help-give",
-                t("Give a Window", "给它窗口"),
+                t("Give a Window", "交出窗口"),
                 Tone::Plain,
                 theme,
             )
@@ -807,7 +807,7 @@ fn card(title: String, reason: String, badge: Badge, theme: &Theme) -> gpui::Sta
             title,
             Some(badge),
         ))
-        .child(reason_text(reason, false).h(px(REASON)))
+        .child(reason_text(reason, zh()).h(px(REASON)))
 }
 
 /// How a button stands out.

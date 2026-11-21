@@ -2854,7 +2854,7 @@ impl Shell {
         let display = core.displays.get(id)?;
         let menu = native::Menu::new(&display.label());
         menu.action(
-            t("Open Viewer", "打开查看器"),
+            t("Open Viewer", "打开 Viewer"),
             MenuAction::OpenDisplay { display: id },
         );
         if crate::web::preview_url(id).is_some() {
@@ -2938,7 +2938,7 @@ impl Shell {
             )),
             None => menu.disabled(t(
                 "No agent has loaded the tools yet",
-                "还没有 agent 加载工具",
+                "尚无 agent 加载工具",
             )),
         };
         menu.separator();
@@ -2969,7 +2969,7 @@ impl Shell {
         }
         let create = menu.action(t("New Display", "新建显示器"), MenuAction::CreateDisplay);
         native::set_key_equivalent(&create, "n", true, false, false, false);
-        menu.action(t("Recordings…", "录制回看…"), MenuAction::OpenRecordings);
+        menu.action(t("Recordings…", "录制列表…"), MenuAction::OpenRecordings);
         menu.separator();
         // Agents, wallpaper, AeroSpace and the optional helpers.
         let settings = menu.action(t("Settings…", "设置…"), MenuAction::OpenSettings);
@@ -3195,7 +3195,7 @@ impl Shell {
                     ),
                     &tf!(
                         "Your AeroSpace config assigns workspace {} to a monitor by number, in workspace-to-monitor-force-assignment. Agent displays count as monitors and take those numbers, so the workspace lands on an agent's display and Agent Screen can't move it. Use the monitor's name instead, like 2 = 'DELL', or install Agent Screen's AeroSpace and add ignored-monitors.",
-                        "你的 AeroSpace 配置在 workspace-to-monitor-force-assignment 里按编号把工作区 {} 分给了某块显示器。Agent 显示器也算显示器，会占用这些编号，所以这个工作区落到了 Agent 的显示器上，Agent Screen 挪不动它。改用显示器名称，例如 2 = 'DELL'；或者安装 Agent Screen 版 AeroSpace 并加上 ignored-monitors。",
+                        "你的 AeroSpace 配置在 workspace-to-monitor-force-assignment 中按编号把工作区 {} 分配给了某块显示器。Agent 显示器也计入编号，因此该工作区落到了 agent 的显示器上，Agent Screen 无法移动它。请改用显示器名称，例如 2 = 'DELL'；或安装 Agent Screen 版 AeroSpace 并添加 ignored-monitors。",
                         pinned.join(", ")
                     ),
                     t("Open Config", "打开配置"),
@@ -3482,23 +3482,23 @@ impl Shell {
                 (
                     tf!(
                         "{names} didn't come back to your screen",
-                        "{names} 没能回到你的屏幕"
+                        "{names} 未能回到你的屏幕"
                     ),
                     t(
                         "It is still on the agent's display. Take Back can try again.",
-                        "它还在 agent 的显示器上，可以再点“取回”试一次。",
+                        "它仍在 agent 的显示器上，可再点“取回”重试。",
                     ),
                 )
             } else {
                 (
                     tf!(
                         "{} windows didn't come back to your screen",
-                        "{} 个窗口没能回到你的屏幕",
+                        "{} 个窗口未能回到你的屏幕",
                         stuck.len()
                     ),
                     t(
                         "They are still on the agent's display. Take Back can try again.",
-                        "它们还在 agent 的显示器上，可以再点“取回”试一次。",
+                        "它们仍在 agent 的显示器上，可再点“取回”重试。",
                     ),
                 )
             };
@@ -3989,7 +3989,7 @@ impl Shell {
                 cx,
             ))),
             titlebar: Some(TitlebarOptions {
-                title: Some(t("Recordings", "录制回看").into()),
+                title: Some(t("Recordings", "录制列表").into()),
                 ..Default::default()
             }),
             window_min_size: Some(size(px(720.), px(440.))),
@@ -4187,7 +4187,7 @@ impl Shell {
         panel.setAllowsMultipleSelection(false);
         panel.setMessage(Some(&objc2_foundation::NSString::from_str(t(
             "Choose a picture for agents' displays. You see it in the Viewer and in recordings; agents' screenshots leave it out.",
-            "为 agent 的显示器选一张壁纸。它出现在 Viewer 和录屏里，agent 截图时不包含它。",
+            "为 agent 的显示器选择壁纸。它显示在 Viewer 和录制中，不含在 agent 截图里。",
         ))));
         let types: Vec<objc2::rc::Retained<objc2_foundation::NSString>> =
             ["png", "jpg", "jpeg", "heic", "tiff", "gif", "webp"]
@@ -4344,9 +4344,9 @@ impl Shell {
             let lines: Vec<String> = outcomes
                 .iter()
                 .map(|o| match &o.result {
-                    None => tf!("{}: not installed", "{}：没有安装", o.client),
+                    None => tf!("{}: not installed", "{}：未安装", o.client),
                     Some(Ok(Done::Already)) => {
-                        tf!("{}: already connected", "{}：已经接入", o.client)
+                        tf!("{}: already connected", "{}：已接入", o.client)
                     }
                     Some(Ok(Done::Connected)) => tf!(
                         "{}: connected for all projects",
@@ -4378,13 +4378,13 @@ impl Shell {
             } else if failed {
                 tf!(
                     "To try in Terminal, where your agents' PATH is set:\n\"{}\" mcp install",
-                    "可以在终端里重试，那里有 agent 需要的 PATH：\n\"{}\" mcp install",
+                    "可在终端中重试，终端里有 agent 所需的 PATH：\n\"{}\" mcp install",
                     exe.display()
                 )
             } else {
                 t(
                     "Start a new agent session to load the tools.",
-                    "新开一个 agent 会话就能用上这些工具。",
+                    "新建 agent 会话即可加载这些工具。",
                 )
                 .to_string()
             };
@@ -5174,7 +5174,7 @@ impl Shell {
     fn ignore_in_aerospace(&mut self, cx: &mut Context<Self>) {
         let why = t(
             "AeroSpace manages every display, Agent Screen's too. It shows one of your workspaces on each new display, which takes those windows off your screen and into the agent's screenshots, and it files the agents' new windows in your workspace, so they pass over your screen first.",
-            "AeroSpace 会管理所有显示器，包括 Agent Screen 的。每建一块显示器，它就把你的一个工作区放上去，那些窗口会从你屏幕上消失，出现在 Agent 的截图里。Agent 打开的新窗口也会被它登记到你的工作区，先在你屏幕上闪一下。",
+            "AeroSpace 会管理所有显示器，包括 Agent Screen 的显示器。每新建一块显示器，它会把你的一个工作区放上去，其中的窗口会离开你的屏幕，出现在 agent 的截图中。它还会把 agent 新开的窗口归入你的工作区，使其先在你的屏幕上闪过。",
         );
         if self.aerospace == Some(aerospace::Ignoring::Unsupported) {
             let commands = "brew tap fanzzzd/agent-screen
@@ -5186,13 +5186,13 @@ open -a AeroSpace";
             let go = native::confirm(
                 t(
                     "This AeroSpace can't leave displays alone",
-                    "这个版本的 AeroSpace 还不能不管显示器",
+                    "此版本的 AeroSpace 无法忽略显示器",
                 ),
                 &format!(
                     "{why}\n\n{}",
                     t(
                         "Agent Screen's build of AeroSpace adds the option it needs and keeps your config. The guide shows the five Terminal commands; they're on your clipboard.",
-                        "Agent Screen 提供的 AeroSpace 加上了需要的选项，你的配置不变。说明页里有 5 条终端命令，已经复制到剪贴板。",
+                        "Agent Screen 版 AeroSpace 已加入所需选项，并保留你的配置。说明页列出了 5 条终端命令，已复制到剪贴板。",
                     ),
                 ),
                 t("Copy Commands and Open Guide", "复制命令并打开说明"),
@@ -5215,7 +5215,7 @@ open -a AeroSpace";
         let go = native::confirm(
             t(
                 "Let AeroSpace leave Agent Screen's displays alone?",
-                "让 AeroSpace 不管 Agent Screen 的显示器？",
+                "让 AeroSpace 忽略 Agent Screen 的显示器？",
             ),
             &format!(
                 "{why}
@@ -5253,14 +5253,14 @@ open -a AeroSpace";
                         ),
                         None => t(
                             "You had no config; this one is AeroSpace's default plus that line.",
-                            "你原来没有配置文件；新文件是 AeroSpace 的默认配置加上这一行。",
+                            "你原先没有配置文件；新文件为 AeroSpace 默认配置加上这一行。",
                         )
                         .to_string(),
                     };
                     native::alert(
                         t(
                             "AeroSpace now leaves Agent Screen's displays alone",
-                            "AeroSpace 不再管 Agent Screen 的显示器了",
+                            "AeroSpace 已忽略 Agent Screen 的显示器",
                         ),
                         &format!(
                             "{}\n\n{old}",
@@ -5275,15 +5275,15 @@ open -a AeroSpace";
                 Err(failed) => {
                     log::warn!("AeroSpace refused ignored-monitors: {}", failed.reason);
                     let state = if failed.unchanged {
-                        t("Your config is as it was.", "你的配置没有变。")
+                        t("Your config is as it was.", "配置未改动。")
                     } else {
                         t(
                             "Agent Screen couldn't put your old config back; it's in the .before-agent-screen file beside it.",
-                            "Agent Screen 没能把旧配置放回去；它在旁边的 .before-agent-screen 文件里。",
+                            "Agent Screen 未能恢复旧配置；旧配置保存在同目录的 .before-agent-screen 文件中。",
                         )
                     };
                     native::alert(
-                        t("AeroSpace didn't take the change", "AeroSpace 没有接受这个改动"),
+                        t("AeroSpace didn't take the change", "AeroSpace 未接受此改动"),
                         &format!("{state}\n\n{}", failed.reason),
                     );
                 }

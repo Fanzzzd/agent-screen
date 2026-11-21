@@ -41,7 +41,7 @@ impl Status {
                 short: t("Using your keyboard", "正在用你的键盘").into(),
                 long: tf!(
                     "{agent} is typing through your input method. Your keys go to its app until it’s done.",
-                    "{agent} 正在通过你的输入法打字，完成前你的按键会进入它的应用"
+                    "{agent} 正在通过你的输入法输入，完成前你的按键会进入它的 app"
                 ),
                 icon: Some("icons/alert.svg"),
                 color: theme.orange,
@@ -50,10 +50,10 @@ impl Status {
         match display.ended {
             Some(EndReason::Disconnected) => Status {
                 kind: Kind::Disconnected,
-                short: tf!("Disconnected · {windows}", "连接中断 · {windows}"),
+                short: tf!("Disconnected · {windows}", "已断开 · {windows}"),
                 long: tf!(
                     "{agent} disconnected. Its windows are still here.",
-                    "{agent} 的连接中断了，窗口还在这里"
+                    "{agent} 已断开连接，窗口仍在这里"
                 ),
                 icon: Some("icons/alert.svg"),
                 color: theme.secondary,
@@ -101,7 +101,7 @@ impl Status {
                     short: t("Created by you", "你新建的").into(),
                     long: t(
                         "Created by you. No agent is using it.",
-                        "你新建的显示器，没有 agent 在用",
+                        "你新建的显示器，未被 agent 使用",
                     )
                     .into(),
                     icon: None,
@@ -261,7 +261,7 @@ mod tests {
 
         let mut lost = display(true);
         lost.end(7, EndReason::Disconnected);
-        assert_eq!(status(&lost, 1).long, "Codex 的连接中断了，窗口还在这里");
+        assert_eq!(status(&lost, 1).long, "Codex 已断开连接，窗口仍在这里");
     }
 
     #[test]

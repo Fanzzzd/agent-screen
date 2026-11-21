@@ -104,16 +104,16 @@ impl Render for Setup {
             let status = match self.agent.clone() {
                 Some(agent) => tf!(
                     "{agent} loaded Agent Screen's tools. Ask your agent to create a display: its apps run there, off your screen.",
-                    "{agent} 已加载 Agent Screen 的工具。让 agent 创建显示器，它的 app 会在旁边运行，不占你的屏幕。"
+                    "{agent} 已加载 Agent Screen 的工具。让 agent 创建显示器，它的 app 将在其中运行，不占用你的屏幕。"
                 ),
                 None if !self.registered.is_empty() => t(
                     "Start a new agent session and ask it to create a display. Its apps run there, off your screen.",
-                    "开一个新的 agent 会话，让它创建显示器。它的 app 会在旁边运行，不占你的屏幕。",
+                    "新建一个 agent 会话，让它创建显示器。它的 app 将在其中运行，不占用你的屏幕。",
                 )
                 .to_string(),
                 None => t(
                     "Connect your agent below, then ask it to create a display.",
-                    "在下面接入 agent，再让它创建显示器。",
+                    "先在下方接入 agent，再让它创建显示器。",
                 )
                 .to_string(),
             };
@@ -163,7 +163,7 @@ impl Render for Setup {
                         .max_w(px(380.))
                         .child(t(
                             "Agents use apps on a display beside yours. Agent Screen needs to see that display and to click and type for the agent.",
-                            "Agent 在旁边的显示器上操作 app。Agent Screen 要看到那块显示器，也要替 agent 点击和输入。",
+                            "Agent 在独立的显示器上操作 app。Agent Screen 需要读取该显示器的画面，并代 agent 点击和输入。",
                         )),
                 )
         };
@@ -218,7 +218,7 @@ impl Render for Setup {
                             .text_color(theme.secondary)
                             .child(t(
                                 "Used only on this Mac. Turn off anytime in System Settings.",
-                                "权限只用在这台 Mac 上，随时可以在系统设置里关掉。",
+                                "权限仅在本机使用，可随时在系统设置中关闭。",
                             )),
                     )
                     .child(button(
@@ -226,7 +226,7 @@ impl Render for Setup {
                         if ready {
                             t("Done", "完成")
                         } else {
-                            t("Not Now", "稍后")
+                            t("Not Now", "暂不")
                         }
                         .into(),
                         // Connect is the next step until an agent loads the tools.
@@ -421,12 +421,12 @@ impl Setup {
         let detail = if self.notifications == notify::Auth::Denied {
             t(
                 "Off in System Settings. Turn on Allow Notifications for Agent Screen.",
-                "在系统设置里关着。打开 Agent Screen 的“允许通知”。",
+                "已在系统设置中关闭。请开启 Agent Screen 的“允许通知”。",
             )
         } else {
             t(
                 "When an agent needs your help or is done",
-                "agent 需要你帮忙或用完显示器时提醒你",
+                "Agent 需要协助或结束使用显示器时提醒你",
             )
         };
         let color = if on { green() } else { theme.accent };
@@ -448,7 +448,7 @@ impl Setup {
         let action = if on {
             done(t("On", "已开启"))
         } else if self.colorsync_busy {
-            busy(t("Waiting for your password…", "等你输入密码…"), theme)
+            busy(t("Waiting for your password…", "等待输入密码…"), theme)
         } else {
             button(
                 "setup-colorsync",
@@ -465,22 +465,22 @@ impl Setup {
             .into_any_element()
         };
         let detail = match &self.colorsync_error {
-            Some(error) => tf!("Didn't work: {error}", "没有成功：{error}"),
+            Some(error) => tf!("Didn't work: {error}", "未成功：{error}"),
             None if on => t(
                 "Keeps many displays from making your Mac stutter",
-                "屏幕多了 Mac 也不卡",
+                "多块显示器时保持系统流畅",
             )
             .to_string(),
             None => t(
                 "Keeps many displays from making your Mac stutter. Asks for your administrator password once",
-                "屏幕多了 Mac 也不卡。需要输入一次管理员密码",
+                "多块显示器时保持系统流畅。需输入一次管理员密码",
             )
             .to_string(),
         };
         let color = if on { green() } else { theme.accent };
         item(
             badge("icons/display.svg", color, on),
-            t("Smooth Display Changes", "显示器切换不卡顿").into(),
+            t("Smooth Display Changes", "流畅切换显示器").into(),
             detail.into(),
             None,
             action,
@@ -502,13 +502,13 @@ impl Setup {
         };
         let detail = if self.wallpaper.is_some() {
             t(
-                "Your picture, in the Viewer and recordings. Agents' screenshots leave it out",
-                "你选的图片，出现在 Viewer 和录屏里，agent 截图不含它",
+                "Your picture. Not in agents' screenshots",
+                "你选的图片，不含在 agent 截图里",
             )
         } else {
             t(
-                "Agent Screen's, which names each display. Agents' screenshots leave it out",
-                "Agent Screen 自带的，标出每块显示器。agent 截图不含它",
+                "Names each display. Not in screenshots",
+                "标出每块显示器，不含在截图里",
             )
         };
         let choose = button(
@@ -575,19 +575,19 @@ impl Setup {
         let detail = if ignoring {
             t(
                 "Leaves Agent Screen's displays alone",
-                "不管 Agent Screen 的显示器",
+                "忽略 Agent Screen 的显示器",
             )
         } else {
             t(
                 "Otherwise it puts your workspaces on agents' displays",
-                "不然它会把你的工作区放到 agent 的显示器上",
+                "否则会把你的工作区放到 agent 的显示器上",
             )
         };
         let note = (!self.pinned.is_empty()).then(|| {
             (
                 tf!(
-                    "Workspace {} is pinned to a monitor number an agent's display took",
-                    "工作区 {} 按编号固定到了一块显示器，这个编号被 agent 的显示器占了",
+                    "Workspace {} is pinned to a monitor number an agent uses",
+                    "工作区 {} 固定的显示器编号已被 agent 占用",
                     self.pinned.join(", ")
                 ),
                 theme.orange,
@@ -597,7 +597,7 @@ impl Setup {
             badge("icons/tiles.svg", color, ignoring && self.pinned.is_empty()),
             t(
                 "Keep AeroSpace Off Agent Displays",
-                "让 AeroSpace 不管 Agent 显示器",
+                "让 AeroSpace 忽略 Agent 显示器",
             )
             .into(),
             detail.into(),
@@ -661,13 +661,13 @@ impl Setup {
         let on = self.reports_on;
         let detail = if on {
             t(
-                "Agents' bug reports wait on a card for you to review and open on GitHub",
-                "agent 的问题报告先在卡片上等你检查，再由你在 GitHub 打开",
+                "Agents' reports wait on a card for your review",
+                "Agent 的报告先在卡片上由你审阅",
             )
         } else {
             t(
                 "Off. Agents only show you their report",
-                "已关闭。agent 只把报告交给你",
+                "已关闭。Agent 仅向你展示报告",
             )
         };
         let action = button(
@@ -704,14 +704,14 @@ impl Setup {
                 "icons/display.svg",
                 t(
                     "Show agent displays and take screenshots",
-                    "看到显示器上的画面，给你看，也给 agent 截图",
+                    "显示 Agent 显示器的画面并截图",
                 ),
             ),
             Permission::Accessibility => (
                 "icons/pointer.svg",
                 t(
                     "Click, type and place windows for agents",
-                    "替 agent 点击、输入，把窗口摆到显示器上",
+                    "代 agent 点击、输入和摆放窗口",
                 ),
             ),
         };
@@ -761,7 +761,7 @@ impl Setup {
             Some((
                 t(
                     "Turn on Agent Screen in System Settings. This row updates by itself.",
-                    "在系统设置里打开 Agent Screen 的开关，这里会自动更新",
+                    "在系统设置中打开 Agent Screen 的开关，此处会自动更新",
                 )
                 .to_string(),
                 theme.secondary,

@@ -225,10 +225,7 @@ impl Render for Viewer {
                 .text_size(px(12.))
                 .text_color(theme.accent)
                 .truncate()
-                .child(tf!(
-                    "Drop to hand it over to {agent}",
-                    "松手把窗口交给 {agent}"
-                ))
+                .child(tf!("Drop to give it to {agent}", "松手即交给 {agent}"))
                 .into_any_element()
         } else if matches!(status.kind, Kind::Help | Kind::Takeover) {
             // The reason is the one line the user must read, through the
@@ -399,7 +396,7 @@ fn access_view(
         )
         .child(button(
             "revoke-access",
-            t("Revoke", "收回授权").to_string(),
+            t("Revoke", "撤销授权").to_string(),
             None,
             None,
             theme,
@@ -523,7 +520,7 @@ fn header(
                     id,
                     WindowMenu::Give,
                     match kind {
-                        Kind::Manual => t("Move Here", "放进来"),
+                        Kind::Manual => t("Move Here", "移到这里"),
                         _ => t("Give", "交给"),
                     },
                     // An ended display takes no more windows.
@@ -955,7 +952,7 @@ impl Viewer {
                 .text_size(px(15.))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(theme.label)
-                .child(tf!("Close “{}”?", "关闭「{}」？", sheet.label))
+                .child(tf!("Close “{}”?", "关闭“{}”？", sheet.label))
                 .into_any_element(),
         ];
         if sheet.live {
@@ -971,7 +968,7 @@ impl Viewer {
         let explain = if sheet.items.is_empty() {
             t(
                 "There are no windows on this display.",
-                "这块显示器上没有窗口。",
+                "此显示器上没有窗口。",
             )
         } else {
             t("Choose where these windows go.", "选择这些窗口的去向。")
@@ -1347,7 +1344,7 @@ fn menu_strip(
                     .group_hover("menu-strip", |s| s.opacity(1.))
                     .child(t(
                         "No menus here: no app is open on this display yet",
-                        "这里没有可用的菜单：这块显示器上还没有 app",
+                        "此处无可用菜单：此显示器上尚无 app",
                     )),
             )
         })

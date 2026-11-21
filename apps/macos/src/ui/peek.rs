@@ -744,7 +744,7 @@ fn access_pill(
             div()
                 .id(gpui::ElementId::Name(format!("revoke-{id}").into()))
                 .role(Role::Button)
-                .aria_label(t("Revoke Window Access", "收回窗口授权"))
+                .aria_label(t("Revoke Window Access", "撤销窗口授权"))
                 .flex_none()
                 .size(px(14.))
                 .flex()
