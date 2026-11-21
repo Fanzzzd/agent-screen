@@ -2316,8 +2316,9 @@ fn end_output(list: &Object) -> Value {
             if review.len() == 1 { "" } else { "s" }
         );
         if unset > 0 {
+            let them = if unset == 1 { "it" } else { "them" };
             note.push_str(&format!(
-                " {unset} had no disposition, so the user decides them unprompted."
+                " {unset} had no disposition, so the user decides {them} without your verdict."
             ));
         }
         note
