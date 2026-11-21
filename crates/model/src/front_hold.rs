@@ -19,7 +19,9 @@ pub const RUN_END_MS: u64 = 1200;
 /// After the run, how long actions already sending may take.
 pub const SETTLE_MS: u64 = 300;
 
-/// The longest giving the front back to the user's app may take.
+/// The longest giving the front back to the user's app may take, all of
+/// it: asking for the front, waiting, the focus reads, and an AXMain write
+/// only on a thread of its own, as it can wait on the app.
 pub const GIVE_BACK_MS: u64 = 700;
 
 /// What the key hold needs after that to make the user's window key and

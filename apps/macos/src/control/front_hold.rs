@@ -164,21 +164,40 @@ impl Drop for Clear {
 }
 
 /// Give app `app` the front back, with the user's window `user` key, and
-/// say whether both hold. Blocks up to `GIVE_BACK_MS`.
+/// say whether both hold. Everything here counts against `GIVE_BACK_MS`,
+/// from its first line: the front first, as `give_front` makes `user` key
+/// with it, then, only if it didn't, an AXMain write on a thread of its
+/// own, since that write can wait on the app and the input gate. A late
+/// write lands on the user's own window.
 fn give_back(app: i32, user: WindowTarget) -> bool {
-    let key = || crate::mac::ax::focused_window_id(app) == Some(user.window_id);
-    // Each action's hand-back made the user's window the app's key window;
-    // make sure, as one may have been cut short.
-    if !key() {
-        crate::mac::ax::make_main(user);
-    }
     let asked = Instant::now();
     let limit = Duration::from_millis(GIVE_BACK_MS);
+    let key = || crate::mac::ax::focused_window_id(app) == Some(user.window_id);
     let sent = crate::mac::input::give_front(app, user.window_id);
     let mut activated = false;
-    while crate::mac::input::server_front() != app && asked.elapsed() < limit {
+    let mut made_main = false;
+    loop {
+        let front = crate::mac::input::server_front() == app;
+        // A focus read may take its 0.1 s timeout: none starts that late.
+        let room = asked.elapsed() + Duration::from_millis(100) <= limit;
+        if front && room && key() {
+            crate::mac::input::note_activation(Some(app));
+            return true;
+        }
+        if !room {
+            if front {
+                crate::mac::input::note_activation(Some(app));
+            }
+            return false;
+        }
+        if front && !made_main {
+            // Each action's hand-back made the user's window the app's key
+            // window; one may have been cut short.
+            made_main = true;
+            std::thread::spawn(move || crate::mac::ax::make_main(user));
+        }
         // Some apps, Electron ones and Dia, stay behind: activate them.
-        if !activated && asked.elapsed() >= Duration::from_millis(200) {
+        if !front && !activated && asked.elapsed() >= Duration::from_millis(200) {
             activated = true;
             log::warn!(
                 "front hold: pid {app} didn't take the front back (asked: {sent}); activating it"
@@ -187,9 +206,4 @@ fn give_back(app: i32, user: WindowTarget) -> bool {
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    let front = crate::mac::input::server_front() == app;
-    if front {
-        crate::mac::input::note_activation(Some(app));
-    }
-    front && key()
 }
