@@ -692,7 +692,9 @@ fn spawn_housekeeping_loop(counted: WeakEntity<Shell>, cx: &mut App) {
             if counted
                 .update(cx, |shell, cx| {
                     shell.core.update(cx, |core, cx| {
-                        if core.input_queue.tick() {
+                        // Not short-circuited: both note what changed.
+                        let ticked = core.input_queue.tick();
+                        if core.input_queue.waiting_changed() | ticked {
                             cx.notify();
                         }
                     });
@@ -956,7 +958,10 @@ impl Shell {
         }
         let core = self.core.read(cx);
         let ids: HashSet<DisplayId> = core.displays.list.iter().map(|d| d.id).collect();
-        let asking_count = card::asking_count(&core.displays, core.input_queue.approval_count());
+        let asking_count = card::asking_count(
+            &core.displays,
+            core.input_queue.approval_count() + core.input_queue.waiting_count(),
+        );
         if asking_count != self.asking_count {
             self.asking_count = asking_count;
             self.icon.set_asking_count(asking_count);

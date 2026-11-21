@@ -19,8 +19,15 @@
 //! keyboard, and each answer says nothing was chosen. A click on a link
 //! whose page cancels it succeeds with changed false; the button and the
 //! submit, which change the page, say changed true. A click on the page's
-//! own expander, a span with role button, presses it open. Then, with
-//! your front app back, the same harness takes posted keys as before.
+//! own expander, a span with role button, presses it open. A plain key,
+//! which has no accessibility route there, waits in the Input Queue
+//! (#219): the call answers input_pending, the same call again or
+//! `input_queue wait` runs it in the agent's page once your front app
+//! comes back, with your app staying in front (sampled every 10 ms), and
+//! a withdrawn key never runs. Switching back to the harness then lands in
+//! its user window. A queued double click runs the same way, and one whose
+//! control changed while it waited is not sent. Then, with your front app
+//! back, the same harness takes posted keys as before.
 //!
 //! Needs an Electron.app: `target/e2e/Electron.app`, or E2E_ELECTRON.
 //! Puts a window and the front on your main screen for about half a
@@ -33,8 +40,9 @@
 use std::process::ExitCode;
 
 use agent_screen_tests::{
-    Control, Value, allow_on_your_screen, check, cut, fixture, instance, json, out, probe, restore,
-    run, sh_lenient, skip, sleep_ms, snapshot, start_test_app, stop_test_app, tool, wait_for_idle,
+    Control, Value, allow_on_your_screen, check, cut, fixture, fronts_during, instance, json, out,
+    probe, raised, restore, run, sh_lenient, skip, sleep_ms, snapshot, start_test_app,
+    stop_test_app, taken_back, tool, wait_for_idle,
 };
 use anyhow::{Context, Result, bail};
 
@@ -826,16 +834,29 @@ fn test(
         .find_map(|l| l.strip_prefix("ready ").map(str::to_string))
         .context("the harness's log names no pid")?;
     let pid = pid.as_str();
-    sh_lenient(
-        "/usr/bin/osascript",
-        &[
-            "-e",
-            &format!(
-                "tell application \"System Events\" to set frontmost of (first process whose unix id is {pid}) to true"
-            ),
-        ],
-    );
-    sleep_ms(1000);
+    // Another app may take the front back right away, as Orca has once a
+    // notice arrived: then bring the harness forward once more.
+    for _ in 0..2 {
+        sh_lenient(
+            "/usr/bin/osascript",
+            &[
+                "-e",
+                &format!(
+                    "tell application \"System Events\" to set frontmost of (first process whose unix id is {pid}) to true"
+                ),
+            ],
+        );
+        sleep_ms(1500);
+        let key = lines(log, 0)
+            .iter()
+            .rev()
+            .find(|l| l.starts_with("win user") || l.starts_with("win agent"))
+            .is_some_and(|l| l == "win user focus");
+        if key && front_app() == "Electron" {
+            break;
+        }
+        println!("     the harness didn't stay in front with its user window key; once more");
+    }
     if agent_window(control, id)?.is_none() {
         let electron_on_main: Vec<String> = sh_lenient(tool("onscreen")?, &["main"])
             .lines()
@@ -873,6 +894,9 @@ fn test(
         );
     }
     let from = start.len();
+    // Actions the harness's front blocks wait in the Input Queue; a short
+    // wait keeps their checks fast.
+    control.call("debugFrontWait", json!({ "ms": 1500 }))?;
     let tree0 = tree(control, id, window_id)?;
     let (_, field) = element(&tree0, "agent field")?;
     let (_, press) = element(&tree0, "agent press")?;
@@ -951,9 +975,12 @@ fn test(
     // Your front app back: the harness is in the background, and posted
     // keys reach the agent's window as before.
     if your_front.is_empty() || your_front == "Electron" {
-        println!("     no front app of yours to bring back; the background case is left out");
+        println!(
+            "     no front app of yours to bring back; the queued and background cases are left out"
+        );
         return Ok(());
     }
+    queued(control, id, window_id, log, pid, your_front)?;
     sh_lenient(
         "/usr/bin/osascript",
         &[
@@ -993,6 +1020,358 @@ fn test(
         "and nothing reaches its user window",
         touched.is_empty(),
         format!("{touched:?}"),
+    );
+    Ok(())
+}
+
+/// The input request number a queued action's answer names.
+fn request_number(reply: &Result<Value>) -> Option<u64> {
+    if let Ok(v) = reply {
+        return v["requestId"].as_u64();
+    }
+    let text = said(reply);
+    let at = text.find("input request ")? + "input request ".len();
+    text[at..]
+        .split(|c: char| !c.is_ascii_digit())
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// Brings `your_front` back after `ms`, from another thread, while the
+/// script's call waits: the user leaving the harness.
+fn leave_after(your_front: &str, ms: u64) -> std::thread::JoinHandle<()> {
+    let app = your_front.to_string();
+    std::thread::spawn(move || {
+        sleep_ms(ms);
+        sh_lenient(
+            "/usr/bin/osascript",
+            &["-e", &format!("tell application \"{app}\" to activate")],
+        );
+    })
+}
+
+/// The harness in front with its user window key again, as the user
+/// coming back to it.
+fn harness_in_front(pid: &str, log: &std::path::Path) -> bool {
+    sh_lenient(
+        "/usr/bin/osascript",
+        &[
+            "-e",
+            &format!(
+                "tell application \"System Events\" to tell (first process whose unix id is {pid})
+                    set frontmost to true
+                    perform action \"AXRaise\" of window \"pair user\"
+                end tell"
+            ),
+        ],
+    );
+    sleep_ms(1000);
+    front_app() == "Electron"
+        && lines(log, 0)
+            .iter()
+            .rev()
+            .find(|l| l.starts_with("win user") || l.starts_with("win agent"))
+            .is_some_and(|l| l == "win user focus")
+}
+
+/// The agent's page saw the key `k`, in its field or elsewhere on it.
+fn agent_key(lines: &[String], k: &str) -> bool {
+    lines
+        .iter()
+        .any(|l| l.starts_with("pair agent keydown") && l.ends_with(&format!("\"{k}\"")))
+}
+
+/// Input that reached the user's page.
+fn user_input(lines: &[String]) -> Vec<String> {
+    lines
+        .iter()
+        .filter(|l| {
+            ["keydown", "keydown-page", "input", "submit", "click"]
+                .iter()
+                .any(|e| l.starts_with(&format!("pair user {e} ")))
+        })
+        .cloned()
+        .collect()
+}
+
+/// Actions only the user's front app blocks wait in the Input Queue
+/// (#219). With the harness in front and its user window key, a plain
+/// key has no accessibility route: the call answers input_pending, with
+/// the wait shortened by debugFrontWait. Withdrawn, it never runs. The
+/// same call again waits, and runs the key in the agent's page once your
+/// front app comes back; `input_queue wait` does the same. The user's
+/// page sees none of it.
+fn queued(
+    control: &Control,
+    id: &Value,
+    window_id: u64,
+    log: &std::path::Path,
+    pid: &str,
+    your_front: &str,
+) -> Result<()> {
+    let queue = |action: &str, request: u64| {
+        control.call(
+            "inputQueue",
+            json!({ "sessionKey": KEY, "displayId": id, "action": action, "requestId": request }),
+        )
+    };
+    let from = lines(log, 0).len();
+    let withdrawn = key(control, id, "z");
+    let n1 = request_number(&withdrawn);
+    check(
+        "a plain key beside the user's window answers input_pending with its request",
+        said(&withdrawn).contains("input_pending") && n1.is_some(),
+        cut(&said(&withdrawn), 600),
+    );
+    let gone = n1.map(|n| queue("withdraw", n));
+    check(
+        "input_queue withdraw cancels it",
+        gone.as_ref().is_some_and(|r| r.is_ok()),
+        gone.map(|r| cut(&said(&r), 300)).unwrap_or_default(),
+    );
+
+    let pending = key(control, id, "x");
+    let n2 = request_number(&pending);
+    let status = n2.map(|n| queue("status", n));
+    let status_text = status.as_ref().map(said).unwrap_or_default();
+    check(
+        "a new key is a new request, and its status reads waiting_for_app",
+        said(&pending).contains("input_pending")
+            && n2.is_some()
+            && n2 != n1
+            && status_text.contains("waiting_for_app"),
+        format!(
+            "{} | status {}",
+            cut(&said(&pending), 300),
+            cut(&status_text, 300)
+        ),
+    );
+    let seen = lines(log, from);
+    check(
+        "nothing reached either page while the keys waited",
+        !has(&seen, "pair agent keydown") && user_input(&seen).is_empty(),
+        format!("{seen:?}"),
+    );
+
+    // The real wait, so the call outlasts the user's leaving.
+    control.call("debugFrontWait", json!({ "ms": 0 }))?;
+    let (repeated, fronts) = fronts_during(6, Some(pid), || {
+        let left = leave_after(your_front, 1000);
+        let repeated = key(control, id, "x");
+        let _ = left.join();
+        repeated
+    })?;
+    let seen = lines(log, from);
+    let taken = taken_back(&fronts, pid);
+    let rose = raised(&fronts);
+    check(
+        "the user\'s window of the harness never rose above your front app",
+        rose.is_empty(),
+        format!("{rose:?} | {fronts:?}"),
+    );
+    check(
+        "your app stays in front while the queued key runs",
+        taken.is_empty(),
+        format!("harness in front again {taken:?} | fronts {fronts:?}"),
+    );
+    let keys = seen
+        .iter()
+        .filter(|l| l.starts_with("pair agent keydown"))
+        .count();
+    check(
+        "the same call again waits, and the key reaches the agent's page once your app is in front",
+        repeated.as_ref().is_ok_and(|v| {
+            v["requestId"].as_u64() == n2 && v["waitedSeconds"].as_f64() > Some(0.5)
+        }) && agent_key(&seen, "x")
+            && keys == 1,
+        format!("{} | log {seen:?}", cut(&said(&repeated), 600)),
+    );
+    check(
+        "the withdrawn key never ran, and the user's page saw nothing",
+        !agent_key(&seen, "z") && user_input(&seen).is_empty(),
+        format!("{seen:?}"),
+    );
+
+    let back = switch_back(pid);
+    check(
+        "switching back to the harness after the queued key lands in the user's window",
+        back == "pair user",
+        format!("focused window: {back}"),
+    );
+    control.call("debugFrontWait", json!({ "ms": 1500 }))?;
+    if !harness_in_front(pid, log) {
+        bail!(
+            "the harness didn't come back to the front with its user window key: front {}, log {:?}",
+            front_app(),
+            lines(log, from)
+        );
+    }
+    let from = lines(log, 0).len();
+    let pending = key(control, id, "y");
+    let n3 = request_number(&pending);
+    check(
+        "another key answers input_pending",
+        said(&pending).contains("input_pending") && n3.is_some(),
+        cut(&said(&pending), 300),
+    );
+    let Some(n3) = n3 else { return Ok(()) };
+    control.call("debugFrontWait", json!({ "ms": 0 }))?;
+    let (waited, fronts) = fronts_during(6, Some(pid), || {
+        let left = leave_after(your_front, 1000);
+        let waited = queue("wait", n3);
+        let _ = left.join();
+        waited
+    })?;
+    sleep_ms(300);
+    let seen = lines(log, from);
+    let taken = taken_back(&fronts, pid);
+    let rose = raised(&fronts);
+    check(
+        "the user\'s window of the harness never rose above your front app",
+        rose.is_empty(),
+        format!("{rose:?} | {fronts:?}"),
+    );
+    check(
+        "your app stays in front while the waited key runs",
+        taken.is_empty(),
+        format!("harness in front again {taken:?} | fronts {fronts:?}"),
+    );
+    check(
+        "input_queue wait runs it once your app is in front, and says completed",
+        waited
+            .as_ref()
+            .is_ok_and(|v| v["requests"][0]["state"] == "completed")
+            && agent_key(&seen, "y")
+            && user_input(&seen).is_empty(),
+        format!("{} | log {seen:?}", cut(&said(&waited), 600)),
+    );
+    let back = switch_back(pid);
+    check(
+        "switching back after the waited key lands in the user's window too",
+        back == "pair user",
+        format!("focused window: {back}"),
+    );
+    queued_clicks(control, id, window_id, log, pid, your_front)
+}
+
+/// Bring the harness back to the front, as the user switching back to it,
+/// without raising a window: the title of the window that then has focus.
+fn switch_back(pid: &str) -> String {
+    sh_lenient(
+        "/usr/bin/osascript",
+        &[
+            "-e",
+            &format!(
+                "tell application \"System Events\" to set frontmost of (first process whose unix id is {pid}) to true"
+            ),
+        ],
+    );
+    sleep_ms(1000);
+    focused_window(pid)
+}
+
+/// Queued clicks (#219): a double click beside the user's window waits,
+/// then runs in the agent's page once your app is in front, and switching
+/// back lands in the user's window. A double click whose target changed
+/// while it waited is not sent.
+fn queued_clicks(
+    control: &Control,
+    id: &Value,
+    window_id: u64,
+    log: &std::path::Path,
+    pid: &str,
+    your_front: &str,
+) -> Result<()> {
+    let double = |(x, y): (i64, i64)| {
+        let reply = control.call(
+            "click",
+            json!({ "sessionKey": KEY, "displayId": id, "x": x, "y": y, "count": 2 }),
+        );
+        sleep_ms(300);
+        reply
+    };
+    control.call("debugFrontWait", json!({ "ms": 1500 }))?;
+    if !harness_in_front(pid, log) {
+        bail!(
+            "the harness didn't come back to the front with its user window key: front {}",
+            front_app()
+        );
+    }
+    let t = tree(control, id, window_id)?;
+    let (_, press) = element(&t, "agent press")?;
+    let (_, later) = element(&t, "agent later")?;
+    let from = lines(log, 0).len();
+    let pending = double(press);
+    check(
+        "a double click beside the user's window answers input_pending",
+        said(&pending).contains("input_pending") && request_number(&pending).is_some(),
+        cut(&said(&pending), 300),
+    );
+    control.call("debugFrontWait", json!({ "ms": 0 }))?;
+    let (ran, fronts) = fronts_during(6, Some(pid), || {
+        let left = leave_after(your_front, 1000);
+        let ran = double(press);
+        let _ = left.join();
+        ran
+    })?;
+    let seen = lines(log, from);
+    let taken = taken_back(&fronts, pid);
+    let rose = raised(&fronts);
+    check(
+        "the user\'s window of the harness never rose above your front app",
+        rose.is_empty(),
+        format!("{rose:?} | {fronts:?}"),
+    );
+    check(
+        "the same double click again runs in the agent's page once your app is in front, and your app stays in front",
+        ran.is_ok()
+            && has(&seen, "pair agent dblclick")
+            && taken.is_empty()
+            && user_input(&seen).is_empty(),
+        format!("{} | taken {taken:?} | log {seen:?}", cut(&said(&ran), 400)),
+    );
+    let back = switch_back(pid);
+    check(
+        "switching back after the queued click lands in the user's window",
+        back == "pair user",
+        format!("focused window: {back}"),
+    );
+
+    // What is under a queued click changes while it waits.
+    control.call("debugFrontWait", json!({ "ms": 1500 }))?;
+    if !harness_in_front(pid, log) {
+        bail!(
+            "the harness didn't come back to the front with its user window key: front {}",
+            front_app()
+        );
+    }
+    let from = lines(log, 0).len();
+    let armed = control.call(
+        "click",
+        json!({ "sessionKey": KEY, "displayId": id, "x": later.0, "y": later.1 }),
+    );
+    let pending = double(later);
+    check(
+        "a double click on a control about to change answers input_pending",
+        armed.is_ok() && said(&pending).contains("input_pending"),
+        format!("{} | {}", said(&armed), cut(&said(&pending), 300)),
+    );
+    // The page changes the control 2.5 s after the first click.
+    sleep_ms(2000);
+    control.call("debugFrontWait", json!({ "ms": 0 }))?;
+    let left = leave_after(your_front, 500);
+    let refused = double(later);
+    let _ = left.join();
+    let seen = lines(log, from);
+    check(
+        "once your app is in front, the double click isn't sent, since what was under it changed",
+        refused
+            .as_ref()
+            .is_err_and(|e| e.to_string().contains("was not sent"))
+            && has(&seen, "pair agent later-changed")
+            && !has(&seen, "pair agent later-dblclick"),
+        format!("{} | log {seen:?}", cut(&said(&refused), 400)),
     );
     Ok(())
 }

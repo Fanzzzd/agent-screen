@@ -11,7 +11,8 @@
 //! just used it). The script checks:
 //!
 //! - with "other" focused on the stage, a double click on Login's user
-//!   field is refused and names "other", as before (#110);
+//!   field is not sent: it names "other", as before (#110), and waits in
+//!   the Input Queue for Login to leave the front (#219);
 //! - once "other" is handed over too, the same double click and a `type`
 //!   reach the login window: its title shows the user field focused and
 //!   the text.
@@ -124,6 +125,9 @@ fn test(login: &str) -> Result<()> {
     )?;
     sleep_ms(500);
     stage.call("debugFront", json!({ "pid": pid }))?;
+    // The refused click waits in the Input Queue for the app to leave the
+    // front (#219); a short wait keeps the run short.
+    stage.call("debugFrontWait", json!({ "ms": 1500 }))?;
 
     let login_window = window(&client, id, "login")?;
     let field = [login_window.x + 180.0, login_window.y + 62.0];
@@ -135,10 +139,11 @@ fn test(login: &str) -> Result<()> {
     };
     let refused = double()?;
     check(
-        "with the user's window focused on their screen, the click is refused (#110)",
+        "with the user's window focused on their screen, the click is not sent: it names \"other\" and waits as an input request (#110, #219)",
         refused.is_error
             && refused.text().contains("user's front app")
-            && refused.text().contains("other"),
+            && refused.text().contains("other")
+            && refused.text().contains("input request"),
         refused.text(),
     );
 

@@ -84,6 +84,9 @@ fn main() -> ExitCode {
         sign_step(&format!("Dia: open {user_url} and keep typing"));
         start_test_app(&[("AGENTSCREEN_LANG", "en")])?;
         let control = Control::connect()?;
+        // A refused key waits in the Input Queue for Dia to leave the
+        // front (#219); a short wait keeps the run short.
+        control.call("debugFrontWait", json!({ "ms": 1500 }))?;
         let made = control.call(
             "createDisplay",
             json!({ "sessionKey": KEY, "title": "Dia shared", "width": 1280, "height": 800 }),

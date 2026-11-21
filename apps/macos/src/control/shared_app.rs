@@ -17,7 +17,7 @@ use crate::mac::{ax, windows};
 use crate::model::{DisplayId, WindowTarget};
 use agent_screen_model::shared_app::{
     ClickRoute, Effect, Focused, Front, KeyRoute, TextRoute, Watch, click_route, effect, key_route,
-    text_route, unlisted_press_unclear,
+    press_goes_in, text_route,
 };
 use gpui::AsyncApp;
 use serde_json::{Value, json};
@@ -99,24 +99,42 @@ fn title_of(id: u32) -> String {
     title(windows::find(id), id)
 }
 
+/// An action refused only because the user's window of `target`'s app
+/// has focus, before anything was sent: the caller queues it to run once
+/// that app is no longer in front (`super::front_queue`). `why` says what
+/// blocked it; the error carries the app for the queue.
+fn blocked(target: WindowTarget, why: String) -> ControlError {
+    let app = windows::find(target.window_id).map_or_else(|| "the app".into(), |w| w.app);
+    ControlError {
+        blocked: Some((target.pid, app)),
+        ..ControlError::front_blocked(why)
+    }
+}
+
 const ROUTES: &str = "Beside the user's window, type puts text into the field your last click picked, through accessibility; Return confirms or presses what your last click picked, Escape cancels it, BackSpace and cmd+a edit the picked field, and Tab and shift+Tab move focus to the next or previous element of your page and pick it. Other keys have no route there that can't reach the user's window: use act_on_element, or wait until the user switches to another app. Agent Screen won't switch it for them.";
 
 /// Keys that can't go in beside the user's window.
 pub fn refusal(b: Beside, what: &str) -> ControlError {
     let n = names(b);
-    ControlError::failed(format!(
-        "{app} is the user's front app with their window {user} focused, not your window {agent}. Keys posted to {app} reach {user}, so {what} was not sent, and nothing reached either window. {ROUTES}",
-        app = n.app,
-        user = n.user,
-        agent = n.agent,
-    ))
+    blocked(
+        b.target,
+        format!(
+            "{app} is the user's front app with their window {user} focused, not your window {agent}. Keys posted to {app} reach {user}, so {what} was not sent, and nothing reached either window. {ROUTES}",
+            app = n.app,
+            user = n.user,
+            agent = n.agent,
+        ),
+    )
 }
 
 /// Keys when accessibility didn't say which window has focus.
-pub fn unknown_focus(app: &str) -> ControlError {
-    ControlError::failed(format!(
-        "{app} is the foreground app, but Accessibility could not verify its focused window, so posted keys could reach the user's window. User idleness does not make this routing safe. The pending keys were refused. Use act_on_element set_value or a supported press action, or wait until the user switches to another app before retrying. Agent Screen will not switch it for them."
-    ))
+pub fn unknown_focus(target: WindowTarget, app: &str) -> ControlError {
+    blocked(
+        target,
+        format!(
+            "{app} is the foreground app, but Accessibility could not verify its focused window, so posted keys could reach the user's window. User idleness does not make this routing safe. The pending keys were refused. Use act_on_element set_value or a supported press action, or wait until the user switches to another app before retrying. Agent Screen will not switch it for them."
+        ),
+    )
 }
 
 /// What the agent's last click on each display picked.
@@ -272,12 +290,14 @@ pub async fn click(
         agent = n.agent,
     );
     if click_route(Front::OtherFocused, true, left, count, modifiers) == ClickRoute::Refuse {
-        return Err(ControlError::failed(format!(
-            "{why}, so nothing was sent. Beside the user's window only a single left click without modifiers works, through accessibility: it presses the control under the point or picks the text field there for type. Use act_on_element for other actions, or wait until the user switches to another app."
-        )));
+        return Err(blocked(
+            b.target,
+            format!(
+                "{why}, so nothing was sent. Beside the user's window only a single left click without modifiers works, through accessibility: it presses the control under the point or picks the text field there for type"
+            ),
+        ));
     }
-    let instead = "Click a button, link or text field, use act_on_element, or wait until the user switches to another app.";
-    press_at(id, point, b.target, why, Some(b), instead, cx).await
+    press_at(id, point, b.target, why, Some(b), cx).await
 }
 
 /// Why nothing is posted to a window of the user's front app whose
@@ -417,12 +437,14 @@ pub async fn click_unverified(
 ) -> Result<Value, ControlError> {
     let why = unverified(target, "click");
     if click_route(Front::FocusUnknown, true, left, count, modifiers) == ClickRoute::Refuse {
-        return Err(ControlError::failed(format!(
-            "{why}, so nothing was sent. Until it answers, only a single left click without modifiers works, through accessibility. Retry after a moment, or use act_on_element."
-        )));
+        return Err(blocked(
+            target,
+            format!(
+                "{why}, so nothing was sent. Until it answers, only a single left click without modifiers works, through accessibility"
+            ),
+        ));
     }
-    let instead = "Retry after a moment, when the app answers, or use act_on_element.";
-    press_at(id, point, target, why, None, instead, cx).await
+    press_at(id, point, target, why, None, cx).await
 }
 
 /// A posted press, drag or click on `at` that would reach a window of the
@@ -459,15 +481,13 @@ pub async fn posted_press_allowed(
 
 /// A click at `point` in `target`'s window through accessibility: a press,
 /// or a field picked for type. `why` says why nothing is posted, `check`
-/// is the user's window to keep focused, and `instead` what to do where
-/// nothing takes a press.
+/// is the user's window to keep focused.
 async fn press_at(
     id: DisplayId,
     point: (f64, f64),
     target: WindowTarget,
     why: String,
     check: Option<Beside>,
-    instead: &str,
     cx: &AsyncApp,
 ) -> Result<Value, ControlError> {
     let hit = off(cx, move || {
@@ -499,9 +519,12 @@ async fn press_at(
                     format!("the element there is {r} with {actions}, and nothing it sits in takes AXPress")
                 },
             );
-            return Err(ControlError::failed(format!(
-                "{why}, so nothing was sent; and nothing under the point takes a press or text through accessibility ({there}). {instead} To press a control there anyway, call get_window_state and use act_on_element press on the control's own element, or repeat the click with real_input: true, which asks the user for their pointer."
-            )));
+            return Err(blocked(
+                target,
+                format!(
+                    "{why}, so nothing was sent; and nothing under the point takes a press or text through accessibility ({there})"
+                ),
+            ));
         }
     };
     PICKED.with(|p| {
@@ -532,11 +555,27 @@ async fn press_at(
             }));
         }
         Use::Menu(refusal) => {
-            return Err(ControlError::failed(format!(
-                "{why}, so no click was posted. {refusal}."
-            )));
+            return Err(blocked(
+                target,
+                format!("{why}, so no click was posted. {refusal}"),
+            ));
         }
         Use::Press => {}
+    }
+    let listed = {
+        let e = ax::Sendable(element.get().clone());
+        off(cx, move || {
+            ax::actions(e.get()).iter().any(|a| a == "AXPress")
+        })
+        .await
+    };
+    if !press_goes_in(listed) {
+        return Err(blocked(
+            target,
+            format!(
+                "{why}, so nothing was sent; and \"{label}\" under the point lists no accessibility press, as the elements of a page in Dia don't, so a press there would do nothing"
+            ),
+        ));
     }
     let started = Instant::now();
     let watcher = match press_check() {
@@ -548,16 +587,14 @@ async fn press_at(
         None => None,
     };
     let read = started.elapsed();
-    let (pressed, listed) = off(cx, move || {
-        let e = element.get();
-        let listed = ax::actions(e).iter().any(|a| a == "AXPress");
-        (ax::action_result(e, "AXPress"), listed)
-    })
-    .await;
+    let pressed = off(cx, move || ax::action_result(element.get(), "AXPress")).await;
     if pressed == ax::Action::NotTaken {
-        return Err(ControlError::failed(format!(
-            "{why}, so nothing was posted, and \"{label}\" under the point refused an accessibility press. To click it anyway, repeat the click with real_input: true, which asks the user for their pointer."
-        )));
+        return Err(blocked(
+            target,
+            format!(
+                "{why}, so nothing was posted, and \"{label}\" under the point refused an accessibility press"
+            ),
+        ));
     }
     let seen = match (&watcher, before) {
         (Some(w), Some(before)) => w.after(before, cx).await,
@@ -570,17 +607,6 @@ async fn press_at(
     );
     if let Some(b) = check {
         check_focus(b, &format!("The press on \"{label}\""), cx).await?;
-    }
-    if unlisted_press_unclear(listed, seen) {
-        return Ok(json!({
-            "windowId": target.window_id,
-            "route": "accessibility",
-            "note": format!(
-                "{why}, so the click went to \"{label}\" as an accessibility press, not a posted click. \"{label}\" lists no accessibility press action, as the elements of a page in Dia don't, and there was no visible change within {wait} ms: the press may not have acted, or the page may still be loading. Take a screenshot before retrying.",
-                wait = EFFECT_WAIT.as_millis(),
-            ),
-            "changed": null,
-        }));
     }
     let what = format!(
         "{why}, so the click went to \"{label}\" as an accessibility press, not a posted click"
@@ -777,15 +803,21 @@ pub async fn type_text(
         0 => String::new(),
         n => format!("{n} characters went in as keys, then "),
     };
+    // Nothing sent yet: the text waits in the queue for the app to leave
+    // the front. Some of it sent: it stops with what went in.
+    let refuse = |message: String| match posted {
+        0 => blocked(b.target, message),
+        _ => ControlError::failed(message),
+    };
     if text_route(Front::OtherFocused, text) == TextRoute::RefuseKeysInText {
-        return Err(ControlError::failed(format!(
+        return Err(refuse(format!(
             "{before}{app} is the user's front app with their window {user} focused, and Return and Tab in text are keys, which would reach {user}; nothing more was sent. Type the text without them, then press key Return or Tab on its own. {ROUTES}",
             app = n.app,
             user = n.user,
         )));
     }
     let fail = |why: String| {
-        ControlError::failed(format!(
+        refuse(format!(
             "{before}{app} is the user's front app with their window {user} focused, so keys would reach {user}, and the text couldn't go in through accessibility instead: {why}. Nothing reached the user's window. Click the text field in your window first, which picks it, then type again.",
             app = n.app,
             user = n.user,
@@ -833,11 +865,14 @@ pub async fn key(
     }
     let n = names(b);
     let fail = |why: String| {
-        ControlError::failed(format!(
-            "{app} is the user's front app with their window {user} focused, so the key {name} was not posted, and it couldn't go in through accessibility: {why}. Nothing reached either window. {ROUTES}",
-            app = n.app,
-            user = n.user,
-        ))
+        blocked(
+            b.target,
+            format!(
+                "{app} is the user's front app with their window {user} focused, so the key {name} was not posted, and it couldn't go in through accessibility: {why}. Nothing reached either window. {ROUTES}",
+                app = n.app,
+                user = n.user,
+            ),
+        )
     };
     if let KeyRoute::FocusNext | KeyRoute::FocusPrevious = route {
         return tab(id, b, route == KeyRoute::FocusNext, name, cx)
@@ -961,7 +996,14 @@ async fn tab(
 mod tests {
     #[test]
     fn an_unverified_focus_is_refused_without_blaming_the_user() {
-        let unknown = super::unknown_focus("Dia").message;
+        let unknown = super::unknown_focus(
+            crate::model::WindowTarget {
+                pid: 0,
+                window_id: 0,
+            },
+            "Dia",
+        )
+        .message;
         assert!(unknown.contains("Accessibility could not verify"));
         assert!(unknown.contains("User idleness does not make this routing safe"));
         assert!(!unknown.contains("user is working"));

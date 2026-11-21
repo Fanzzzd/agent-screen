@@ -278,6 +278,14 @@ pub fn is_minimized_or_fullscreen(target: WindowTarget) -> bool {
         || string_attribute(&w, "AXSubrole").as_deref() == Some("AXFullScreenWindow")
 }
 
+/// Whether a window says it is its app's main window, None when the app
+/// doesn't answer within 0.15 s.
+pub fn is_main(target: WindowTarget) -> Option<bool> {
+    let window = host_window_element(target)?;
+    unsafe { window.set_messaging_timeout(0.15) };
+    attribute(&window, "AXMain").and_then(|v| v.downcast_ref::<CFBoolean>().map(|b| b.as_bool()))
+}
+
 pub fn make_main(target: WindowTarget) -> bool {
     host_window_element(target).is_some_and(|w| set_attribute(&w, "AXMain", CFBoolean::new(true)))
 }
