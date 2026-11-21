@@ -226,7 +226,7 @@ impl Render for Setup {
                         if ready {
                             t("Done", "完成")
                         } else {
-                            t("Not Now", "暂不")
+                            t("Later", "稍后")
                         }
                         .into(),
                         // Connect is the next step until an agent loads the tools.
@@ -472,8 +472,8 @@ impl Setup {
             )
             .to_string(),
             None => t(
-                "Keeps many displays from making your Mac stutter. Asks for your administrator password once",
-                "多块显示器时保持系统流畅。需输入一次管理员密码",
+                "Prevents stutter. Needs admin password once",
+                "防止卡顿。需输入一次管理员密码",
             )
             .to_string(),
         };
@@ -503,12 +503,12 @@ impl Setup {
         let detail = if self.wallpaper.is_some() {
             t(
                 "Your picture. Not in agents' screenshots",
-                "你选的图片，不含在 agent 截图里",
+                "你选的图片，agent 截图中不含",
             )
         } else {
             t(
                 "Names each display. Not in screenshots",
-                "标出每块显示器，不含在截图里",
+                "标出每块显示器，截图中不含",
             )
         };
         let choose = button(
@@ -662,7 +662,7 @@ impl Setup {
         let detail = if on {
             t(
                 "Agents' reports wait on a card for your review",
-                "Agent 的报告先在卡片上由你审阅",
+                "Agent 的报告先显示在卡片上供你审阅",
             )
         } else {
             t(

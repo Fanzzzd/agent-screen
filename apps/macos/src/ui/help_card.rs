@@ -603,7 +603,7 @@ fn answer_row(
         .child(
             card_button(
                 "help-give",
-                t("Give a Window", "交出窗口"),
+                t("Give a Window", "交给它一个窗口"),
                 Tone::Plain,
                 theme,
             )

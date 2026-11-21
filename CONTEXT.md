@@ -95,7 +95,7 @@ _Avoid_: pull, move, send back
 **Handover** (交给):
 The user giving one of their own windows to an Agent Display so the Agent Session can work in it, through the interface or a conversation instruction. A Window Authorization can allow the Agent Session to do the Placement without asking again. A handed-over window keeps its return location and always returns to the user: when the Agent Session stops using its display, or when the display is dismissed. A Handover the user makes with Give, from the Viewer or the Help Card, to a display with an open Help Request answers it.
 The user gets a window back with Take Back (取回); no other action is called Take Back or 取回.
-_Avoid_: share, assign. Its buttons are Give (交给) in the Viewer, Give a Window (交出窗口) on the Help Card and Hand Over (交给它) on a Window Request card; the concept is still Handover.
+_Avoid_: share, assign. Its buttons are Give (交给) in the Viewer, Give a Window (交给它一个窗口) on the Help Card and Hand Over (交给它) on a Window Request card; the concept is still Handover.
 
 **Window Request**:
 The Agent Session asking the user for one of their windows, by app or window. The user answers Hand Over, which makes it a Handover, or Keep, and the window stays theirs. A window another Agent Session holds, on its display or a Review Display, takes the same request, and the card names the holder. Hand Over then moves it as a Placement, and the holding session is told on its next call; a Handover the holder had from the user stays one and still returns to the user (ADR 0017).
@@ -117,5 +117,5 @@ _Avoid_: cleanup flag, keep/delete mark
 
 - One name per concept, in both languages, as the entries above give it.
 - In Chinese copy, "agent" follows the English casing: lowercase inside a sentence, "Agent" at its start and in the term Agent 显示器. Apps are "app".
-- Not Now (暂不) declines a request. Later (稍后) only puts a card off.
+- Not Now (暂不) declines: the Input Request or bug report doesn't come back. Later (稍后) only puts something off: the Help Card, or Settings before setup is done.
 - Chinese quotes are “” only.

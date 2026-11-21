@@ -4187,7 +4187,7 @@ impl Shell {
         panel.setAllowsMultipleSelection(false);
         panel.setMessage(Some(&objc2_foundation::NSString::from_str(t(
             "Choose a picture for agents' displays. You see it in the Viewer and in recordings; agents' screenshots leave it out.",
-            "为 agent 的显示器选择壁纸。它显示在 Viewer 和录制中，不含在 agent 截图里。",
+            "为 agent 的显示器选择壁纸。它显示在 Viewer 和录制中，agent 截图中不含。",
         ))));
         let types: Vec<objc2::rc::Retained<objc2_foundation::NSString>> =
             ["png", "jpg", "jpeg", "heic", "tiff", "gif", "webp"]
