@@ -192,6 +192,8 @@ pub(super) async fn handle(
         "debugUpdateState" => Ok(json!({
             "available": crate::mac::update::available(),
             "pending": crate::mac::update::pending(),
+            // What Install and Relaunch in Sparkle's window reads.
+            "openDisplays": crate::mac::update::open_displays(),
         })),
         // Test hook: the user's left click at a global point, as the global
         // monitor reports it, such as on an app's Dock icon.

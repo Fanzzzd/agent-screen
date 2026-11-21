@@ -361,6 +361,7 @@ pub const SCRIPTS: &[Script] = &[
     script("timing", &[Performance, Displays], Full, Agent, 11).hands_off().manual(MEASURES),
     script("typedrops", &[AgentInput, Browser], Full, Agent, 1).hands_off(),
     script("unmirror", &[Displays], Full, Agent, 4),
+    script("updatewait", &[Displays], Full, Agent, 1),
     script("viewerdrag", &[ViewerInput], Full, Hook, 2),
     script("viewerheader", &[Viewer, Takeover], Full, Hook, 1).hands_off(),
     script("viewerime", &[InputMethod, ViewerInput], Core, Hook, 2),

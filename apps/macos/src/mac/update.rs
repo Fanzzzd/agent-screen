@@ -20,7 +20,8 @@ use objc2_foundation::{NSBundle, NSString};
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Agent Displays open now, kept by the Shell, for Sparkle's callbacks.
+/// Agent Displays open now, kept current by the Shell on every change of
+/// the model, for Sparkle's callbacks.
 static OPEN_DISPLAYS: AtomicUsize = AtomicUsize::new(0);
 
 /// A downloaded update: its version, and what installs it and restarts
@@ -187,5 +188,12 @@ pub fn install() {
 }
 
 pub fn set_open_displays(count: usize) {
-    OPEN_DISPLAYS.store(count, Ordering::Relaxed);
+    if OPEN_DISPLAYS.swap(count, Ordering::Relaxed) != count {
+        log::debug!("update: {count} Agent Displays open");
+    }
+}
+
+/// The count Install and Relaunch reads, for scripts.
+pub fn open_displays() -> usize {
+    OPEN_DISPLAYS.load(Ordering::Relaxed)
 }

@@ -71,6 +71,13 @@ if ! printf '%s' "$SPARKLE_ED_PRIVATE_KEY" | base64 --decode >/dev/null 2>&1; th
   echo "::error::SPARKLE_ED_PRIVATE_KEY is not base64"
   exit 1
 fi
+printf '%s\n' "$SPARKLE_ED_PRIVATE_KEY" >"$work/sparkle_key"
+chmod 600 "$work/sparkle_key"
+if ! sparkle="$("$(dirname "$0")/check-sparkle-key.sh" "$work/sparkle_key" 2>&1)"; then
+  echo "::error::${sparkle#error: }"
+  exit 1
+fi
+echo "$sparkle"
 
 # The deploy keys still reach their repositories. Reading is all a check
 # can do without pushing.
