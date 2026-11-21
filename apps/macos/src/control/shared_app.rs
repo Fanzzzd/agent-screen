@@ -99,25 +99,16 @@ fn title_of(id: u32) -> String {
     title(windows::find(id), id)
 }
 
-thread_local! {
-    /// The app whose front state blocked the last action, and its name,
-    /// for the queue (`blocked`).
-    static BLOCKED: RefCell<Option<(i32, String)>> = const { RefCell::new(None) };
-}
-
 /// An action refused only because the user's window of `target`'s app
 /// has focus, before anything was sent: the caller queues it to run once
 /// that app is no longer in front (`super::front_queue`). `why` says what
-/// blocked it.
+/// blocked it; the error carries the app for the queue.
 fn blocked(target: WindowTarget, why: String) -> ControlError {
     let app = windows::find(target.window_id).map_or_else(|| "the app".into(), |w| w.app);
-    BLOCKED.with(|b| *b.borrow_mut() = Some((target.pid, app)));
-    ControlError::front_blocked(why)
-}
-
-/// The app that blocked the last action (`blocked`), once.
-pub fn take_blocked() -> Option<(i32, String)> {
-    BLOCKED.with(|b| b.borrow_mut().take())
+    ControlError {
+        blocked: Some((target.pid, app)),
+        ..ControlError::front_blocked(why)
+    }
 }
 
 const ROUTES: &str = "Beside the user's window, type puts text into the field your last click picked, through accessibility; Return confirms or presses what your last click picked, Escape cancels it, BackSpace and cmd+a edit the picked field, and Tab and shift+Tab move focus to the next or previous element of your page and pick it. Other keys have no route there that can't reach the user's window: use act_on_element, or wait until the user switches to another app. Agent Screen won't switch it for them.";

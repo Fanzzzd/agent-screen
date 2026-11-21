@@ -69,7 +69,7 @@ pub async fn queue_if_blocked(
         }
     };
     let refused = || ControlError::failed(why.clone());
-    let Some((pid, app)) = super::shared_app::take_blocked() else {
+    let Some((pid, app)) = first.as_ref().err().and_then(|e| e.blocked.clone()) else {
         return Err(refused());
     };
     let id = display(core, p, true, cx).map_err(|_| refused())?;
@@ -262,7 +262,11 @@ async fn drive(
                 let kept = core.update(cx, |c, _| c.input_queue.take_outcome(request));
                 forget(core, request, cx);
                 if let Some(outcome) = kept {
-                    return outcome.map_err(|(code, message)| ControlError { code, message });
+                    return outcome.map_err(|(code, message)| ControlError {
+                        code,
+                        message,
+                        blocked: None,
+                    });
                 }
                 let how = match ended {
                     Status::Stopped(why) => stopped(why),
@@ -310,7 +314,6 @@ async fn drive(
                 match result {
                     // The app came back to the front first: wait on.
                     Err(e) if e.code == "front_blocked" => {
-                        super::shared_app::take_blocked();
                         core.update(cx, |c, _| c.input_queue.requeue_front(request));
                     }
                     Err(e) => return settle(core, request, background, Err(e), cx),
@@ -355,6 +358,7 @@ async fn drive(
             }
             let why = why.trim_end_matches('.');
             return Err(ControlError {
+                blocked: None,
                 code: "input_pending",
                 message: format!(
                     "{why}. It waits as input request {request} and runs by itself, through the background route, once the user's window of {app} no longer has focus, for up to {minutes} minutes from now; repeat the same call, or call input_queue wait with request_id {request}, to wait for it and read its result. Meanwhile reads still work. Any other action of yours on this display replaces it, and input_queue withdraw cancels it. Agent Screen won't switch apps for the user.",
@@ -364,10 +368,17 @@ async fn drive(
             });
         }
         if background && Duration::from_millis(age) >= MAX_AGE {
+            let minutes = MAX_AGE.as_secs() / 60;
+            let why = if paused {
+                format!("the user still had display {id} in a Takeover after {minutes} minutes")
+            } else {
+                format!(
+                    "the user's window of {} kept focus for {minutes} minutes",
+                    front.app
+                )
+            };
             let lapsed = ControlError::failed(format!(
-                "the queued {action} (input request {request}) was not sent: the user's window of {} kept focus for {} minutes. Take a screenshot before you act again.",
-                front.app,
-                MAX_AGE.as_secs() / 60
+                "the queued {action} (input request {request}) was not sent: {why}. Take a screenshot before you act again."
             ));
             return settle(core, request, true, Err(lapsed), cx);
         }

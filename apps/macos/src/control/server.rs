@@ -32,6 +32,9 @@ use tokio::net::UnixListener;
 pub struct ControlError {
     pub code: &'static str,
     pub message: String,
+    /// For `front_blocked`: the app whose front state refused the action,
+    /// its pid and name, for the queue (`super::front_queue`).
+    pub blocked: Option<(i32, String)>,
 }
 
 impl ControlError {
@@ -39,18 +42,21 @@ impl ControlError {
         Self {
             code: "invalid",
             message: m.into(),
+            blocked: None,
         }
     }
     pub fn not_found(m: impl Into<String>) -> Self {
         Self {
             code: "not_found",
             message: m.into(),
+            blocked: None,
         }
     }
     pub fn ended(m: impl Into<String>) -> Self {
         Self {
             code: "ended",
             message: m.into(),
+            blocked: None,
         }
     }
     /// Refused only because the user's window of the target app has
@@ -60,18 +66,21 @@ impl ControlError {
         Self {
             code: "front_blocked",
             message: m.into(),
+            blocked: None,
         }
     }
     pub fn takeover(m: impl Into<String>) -> Self {
         Self {
             code: "takeover",
             message: m.into(),
+            blocked: None,
         }
     }
     pub fn failed(m: impl Into<String>) -> Self {
         Self {
             code: "failed",
             message: m.into(),
+            blocked: None,
         }
     }
 }

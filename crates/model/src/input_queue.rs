@@ -525,12 +525,19 @@ impl Queue {
         true
     }
 
-    /// The front request `id` ran (`sent`) or could not.
+    /// The front request `id` ran (`sent`) or could not. One still queued
+    /// can only fail: its run ended before sending, as when it lapsed or
+    /// the window under its click changed.
     pub fn finish_front(&mut self, id: RequestId, sent: bool, now: u64) -> bool {
         let Some(r) = self.requests.get_mut(&id) else {
             return false;
         };
-        if !r.front || r.status != Status::Running {
+        let ends = match r.status {
+            Status::Running => true,
+            Status::Queued => !sent,
+            _ => false,
+        };
+        if !r.front || !ends {
             return false;
         }
         r.status = if sent {
@@ -891,6 +898,22 @@ mod tests {
         assert!(q.start_front(id, 7));
         assert!(q.finish_front(id, false, 8));
         assert_eq!(q.request(id).unwrap().status, Status::Stopped(Stop::Failed));
+    }
+
+    #[test]
+    fn a_front_request_that_ends_before_it_starts_stops_and_leaves_the_line() {
+        let mut q = queue();
+        let id = q
+            .enqueue_front(owner("a", 1), "key".into(), "Return in Dia".into(), 0)
+            .unwrap();
+        q.detach(id, 1);
+        // It lapsed, or its click's window changed, while still queued.
+        assert!(!q.finish_front(id, true, 2));
+        assert!(q.finish_front(id, false, 2));
+        assert_eq!(q.request(id).unwrap().status, Status::Stopped(Stop::Failed));
+        assert!(q.fronts().next().is_none());
+        // Nothing sends it later.
+        assert!(!q.start_front(id, 3));
     }
 
     #[test]

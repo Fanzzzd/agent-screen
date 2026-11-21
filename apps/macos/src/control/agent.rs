@@ -261,6 +261,7 @@ async fn handle_one(
             .await
         {
             return Err(ControlError {
+                blocked: None,
                 code: "locked",
                 message: "The Mac's screen is locked, so macOS blocks input and screenshots on \
                           every display. Wait and retry after the user unlocks it, or call \
@@ -307,6 +308,13 @@ async fn handle_one(
         ) {
             super::front_queue::replaced_by(&core, connection, id, cx);
         }
+    }
+    // A queued key or type checks no target: a window launched or placed
+    // since could take it, so these replace the queued request too.
+    if matches!(method, "launchApp" | "placeWindow")
+        && let Some(id) = p.int("displayId")
+    {
+        super::front_queue::replaced_by(&core, connection, id as DisplayId, cx);
     }
     let refresh_acted = || {
         if let Some(id) = acting {
@@ -2167,12 +2175,14 @@ async fn permitted(cx: &mut AsyncApp) -> Result<(), ControlError> {
     }
     if missing.is_empty() {
         return Err(ControlError {
+            blocked: None,
             code: "permission",
             message: "The user turned on Screen Recording, and macOS applies it only once Agent Screen reopens. Agent Screen has put its Settings window on the user's screen: tell the user to press Reopen Agent Screen there, then retry.".into(),
         });
     }
     let names: Vec<&str> = missing.iter().map(|p| p.english()).collect();
     Err(ControlError {
+        blocked: None,
         code: "permission",
         message: format!(
             "Agent Screen is missing the macOS {} permission, and only the user can grant it. \
@@ -7693,6 +7703,7 @@ async fn queued_drag(
             )))
         }
         _ => Err(ControlError {
+            blocked: None,
             code: "input_pending",
             message: format!(
                 "{why} No drag or press was sent. Input queue status: {state}. {}",
@@ -7844,6 +7855,7 @@ async fn queued_click(
                 "The click runs with the user's pointer once they allow it and while your call waits: make the same click with real_input again to wait again, or use input_queue to inspect or withdraw it."
             };
             return Err(ControlError {
+                blocked: None,
                 code: "input_pending",
                 message: format!(
                     "The {} at ({x}, {y}) waits for the user to allow their pointer. No click was sent, not on the background route either. Input queue status: {state}. {next}",
@@ -7968,6 +7980,7 @@ async fn queued_menu_press(
                 "The click runs with the user's pointer once they allow it and while your call waits: press the same item again to wait again, or use input_queue to inspect or withdraw it. To send it as the shortcut instead, withdraw the request and press the item with real_input: false."
             };
             return Err(ControlError {
+                blocked: None,
                 code: "input_pending",
                 message: format!(
                     "{label} needs a real click, as Electron takes an item pressed through accessibility for its shortcut. No click was sent, and the item was not pressed through accessibility either. Input queue status: {state}. {next}"
