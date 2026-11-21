@@ -376,7 +376,14 @@ async fn handle_one(
                 .read_with(cx, |c, _| c.displays.get(id).map(|d| (d.width, d.height)))
                 .unwrap_or(DEFAULT_SIZE);
             settle_display(&core, id, size, cx).await;
-            Ok(json!({}))
+            // computer's screenshot: false still hears of windows that
+            // strayed or were given away, as a screenshot would. Only when
+            // asked: the news is told once, and other callers read it later.
+            let mut result = json!({});
+            if p.flag("news") {
+                add_strayed(&core, id, &mut result, cx);
+            }
+            Ok(result)
         }
         "screenshot" => {
             let id = display(&core, &p, false, cx)?;

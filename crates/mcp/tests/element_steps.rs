@@ -484,3 +484,101 @@ async fn waits_take_fractional_timeouts() {
     .unwrap();
     assert_eq!(server.await.unwrap(), [json!(1.5)]);
 }
+
+/// computer with screenshot: false and get_window_state with image: false
+/// leave the picture out and say so, and the action still settles first.
+#[tokio::test]
+async fn images_can_be_left_out() {
+    let fixture = Fixture::new();
+    let listener = fixture.listener();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read, mut write) = stream.into_split();
+        let mut lines = BufReader::new(read).lines();
+        let mut calls = Vec::new();
+        while let Some(line) = lines.next_line().await.unwrap() {
+            let request: Value = serde_json::from_str(&line).unwrap();
+            let method = request["method"].as_str().unwrap().to_string();
+            let p = &request["params"];
+            let result = match method.as_str() {
+                "agentReady" => json!({}),
+                "key" => json!({}),
+                "settle" => {
+                    json!({"strayed": [{"app": "Notes", "windowId": 41, "placeable": true}]})
+                }
+                "screenshot" => {
+                    json!({"width": 1280, "height": 800, "data": "AAAA", "mimeType": "image/jpeg"})
+                }
+                "windowState" => {
+                    let mut state =
+                        json!({"tree": "[9] button \"OK\"", "elements": 1, "window": "\"Notes\""});
+                    if p["image"] != false {
+                        state["data"] = json!("AAAA");
+                        state["mimeType"] = json!("image/jpeg");
+                    }
+                    state
+                }
+                other => panic!("unexpected control method {other}"),
+            };
+            if method != "agentReady" {
+                calls.push(format!(
+                    "{method}:{}",
+                    p.get("image").or(p.get("news")).unwrap_or(&Value::Null)
+                ));
+            }
+            let reply = json!({"id": request["id"], "result": result});
+            write
+                .write_all(format!("{reply}\n").as_bytes())
+                .await
+                .unwrap();
+        }
+        calls
+    });
+    let mut client = fixture.child();
+    tokio::task::spawn_blocking(move || {
+        let mut input = client.0.stdin.take().unwrap();
+        let mut output = std::io::BufReader::new(client.0.stdout.take().unwrap());
+        let mut exchange = |request: Value| -> Value {
+            writeln!(input, "{request}").unwrap();
+            if request.get("id").is_none() {
+                return Value::Null;
+            }
+            let mut line = String::new();
+            output.read_line(&mut line).unwrap();
+            serde_json::from_str(&line).unwrap()
+        };
+        let call = |id: u32, name: &str, arguments: Value| json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":name,"arguments":arguments}});
+        let kinds = |reply: &Value| -> Vec<String> {
+            reply["result"]["content"].as_array().unwrap().iter().map(|c| c["type"].as_str().unwrap().to_string()).collect()
+        };
+        exchange(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"steps-test","version":"1"}}}));
+        exchange(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+        let quiet = exchange(call(2, "computer", json!({"display_id":7,"action":"key","text":"Down","screenshot":false})));
+        assert_eq!(kinds(&quiet), ["text"], "{quiet}");
+        let said = quiet["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(said.contains("without a screenshot") && said.contains("41"), "{said}");
+        let shot = exchange(call(3, "computer", json!({"display_id":7,"action":"key","text":"Down"})));
+        assert_eq!(kinds(&shot), ["text", "image"], "{shot}");
+        let tree = exchange(call(4, "get_window_state", json!({"display_id":7,"window_id":8,"image":false})));
+        assert_eq!(kinds(&tree), ["text"], "{tree}");
+        let said = tree["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(said.contains("[9] button") && !said.contains("image shows"), "{said}");
+        let pictured = exchange(call(5, "get_window_state", json!({"display_id":7,"window_id":8})));
+        assert_eq!(kinds(&pictured), ["text", "image"], "{pictured}");
+        drop(input);
+        assert!(client.0.wait().unwrap().success());
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        server.await.unwrap(),
+        [
+            "key:null",
+            "settle:true",
+            "key:null",
+            "screenshot:true",
+            "windowState:false",
+            "windowState:null"
+        ]
+    );
+}
