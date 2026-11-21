@@ -175,9 +175,58 @@ impl Publication {
     }
 }
 
+/// The claim files in AeroSpace's claims folder that no running Agent
+/// Screen owns: `claims/<pid>.json` of a process that died without
+/// removing it, as after a kill or a crash (#288). AeroSpace would keep
+/// leaving those displays and windows alone. `executable` says what runs
+/// as a pid now, None for nothing; another app with a reused pid owns none.
+pub fn stale_claim_files(
+    names: &[String],
+    own: u32,
+    executable: impl Fn(u32) -> Option<String>,
+) -> Vec<String> {
+    names
+        .iter()
+        .filter(|name| {
+            let Some(pid) = name
+                .strip_suffix(".json")
+                .and_then(|p| p.parse::<u32>().ok())
+            else {
+                return false;
+            };
+            pid != own && !executable(pid).is_some_and(|exe| exe.ends_with("/AgentScreen"))
+        })
+        .cloned()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_claim_files_of_processes_that_are_no_agent_screen_go() {
+        let names: Vec<String> = [
+            "10.json",
+            "20.json",
+            "30.json",
+            "40.json",
+            "notes.txt",
+            "x.json",
+        ]
+        .map(String::from)
+        .to_vec();
+        let running = |pid| match pid {
+            20 => Some("/Applications/Agent Screen.app/Contents/MacOS/AgentScreen".into()),
+            30 => Some("/Applications/TextEdit.app/Contents/MacOS/TextEdit".into()),
+            _ => None,
+        };
+        // 40 is this app; 10 died; 30 is another app with a reused pid.
+        assert_eq!(
+            stale_claim_files(&names, 40, running),
+            vec!["10.json".to_string(), "30.json".to_string()]
+        );
+    }
 
     #[test]
     fn failed_display_registration_recovers_on_a_later_claim() {

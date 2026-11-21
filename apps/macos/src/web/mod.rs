@@ -28,6 +28,8 @@ const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(5);
 const STREAM_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const FRAME_LEASE_GRACE: Duration = Duration::from_secs(5);
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(100);
+/// Connections served at once; a further one is closed at once.
+const MAX_CONNECTIONS: usize = 32;
 const MAX_REQUEST_BYTES: usize = 8192;
 
 static ENCODED_FRAMES: AtomicU64 = AtomicU64::new(0);
@@ -179,6 +181,16 @@ fn write_state_file(port: u16) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Write the state file again, after a panic the app lived through
+/// removed it.
+pub fn restore_state() {
+    if let Some(state) = SERVER.get()
+        && let Err(error) = write_state_file(state.port)
+    {
+        log::warn!("web preview: couldn't write its state file again: {error}");
+    }
+}
+
 /// Remove this process's web preview state file on shutdown or panic.
 pub fn delete_state() {
     let path = agent_screen_mcp::endpoint::web_state_path();
@@ -232,12 +244,24 @@ pub fn start() -> anyhow::Result<mpsc::UnboundedReceiver<Event>> {
                         return;
                     }
                 };
+                // Any local process may connect, another user's too, and
+                // each connection holds a descriptor the control socket and
+                // the display records also need (#288).
+                let slots = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
                 loop {
                     match listener.accept().await {
                         Ok((stream, _)) => {
+                            let Ok(slot) = slots.clone().try_acquire_owned() else {
+                                log::debug!(
+                                    "web preview: {MAX_CONNECTIONS} connections open; closing another"
+                                );
+                                drop(stream);
+                                continue;
+                            };
                             let state = state.clone();
                             tokio::spawn(async move {
                                 let _ = serve_connection(state, stream).await;
+                                drop(slot);
                             });
                         }
                         Err(error) => {

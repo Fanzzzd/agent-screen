@@ -321,15 +321,34 @@ pub fn remember(serial: u32, slot: u32, display: u32) {
     let Some(path) = identities_path() else {
         return;
     };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    // Every instance writes this file: the user's and a test one adopting
+    // displays at once would each write back what it read, and one serial's
+    // identity would be lost, so the next reclaim unregisters it (#288).
+    // The lock holds from the read to the rename; it goes with its file.
+    use std::os::fd::AsRawFd;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path.with_extension("json.lock"));
+    let locked = lock
+        .as_ref()
+        .is_ok_and(|f| unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } == 0);
+    if !locked {
+        log::warn!(
+            "colorsync: couldn't lock {}; writing anyway",
+            path.display()
+        );
+    }
     let mut all = identities();
     if all.get(&serial.to_string()) == Some(&uuid) {
         return;
     }
     all.insert(serial.to_string(), uuid);
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let temp = path.with_extension("json.new");
+    let temp = path.with_extension(format!("json.new.{}", std::process::id()));
     if std::fs::write(&temp, serde_json::to_vec_pretty(&all).unwrap_or_default()).is_ok() {
         let _ = std::fs::rename(&temp, &path);
     }

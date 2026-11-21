@@ -16,6 +16,7 @@
 
 use agent_screen_mcp::AppLink;
 use agent_screen_mcp::ledger::Ledger;
+use agent_screen_mcp::line::{Line, read_capped};
 use agent_screen_mcp::pipe::FirstLine;
 use futures::channel::{mpsc, oneshot};
 use serde_json::{Map, Value, json};
@@ -24,7 +25,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 
 /// A request the app refused or could not serve.
@@ -219,6 +220,15 @@ pub fn keep_ledger<H>(displays: &crate::model::Displays<H>) {
     }
 }
 
+/// How long a new connection may take to send its first line, and how long
+/// that line may be: a pipe's hello or a v1 request.
+const FIRST_LINE_WITHIN: std::time::Duration = std::time::Duration::from_secs(10);
+const FIRST_LINE_MAX: usize = 1 << 20;
+/// The longest v1 request line.
+const LINE_MAX: usize = 16 << 20;
+/// The wait after a failed accept.
+const ACCEPT_ERROR_BACKOFF: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// How often the app looks for orphaned MCP processes.
 const SWEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -260,8 +270,15 @@ pub fn start() -> anyhow::Result<mpsc::UnboundedReceiver<Event>> {
                     }
                 });
                 loop {
-                    let Ok((stream, _)) = listener.accept().await else {
-                        continue;
+                    let stream = match listener.accept().await {
+                        Ok((stream, _)) => stream,
+                        // Out of descriptors, accept fails at once each
+                        // time: wait rather than spin a worker (#288).
+                        Err(error) => {
+                            log::warn!("control: accept failed: {error}");
+                            tokio::time::sleep(ACCEPT_ERROR_BACKOFF).await;
+                            continue;
+                        }
                     };
                     let connection = shared.connection();
                     tokio::spawn(accept(stream, connection, shared.clone()));
@@ -365,8 +382,19 @@ async fn accept(stream: tokio::net::UnixStream, connection: u64, shared: Arc<Sha
     });
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
-    let mut first = String::new();
-    if matches!(reader.read_line(&mut first).await, Ok(n) if n > 0) {
+    // A peer that says nothing, or sends a line with no end, must not
+    // hold its task and descriptor for good (#288).
+    let mut bytes = Vec::new();
+    let read = tokio::time::timeout(
+        FIRST_LINE_WITHIN,
+        read_capped(&mut reader, &mut bytes, FIRST_LINE_MAX),
+    )
+    .await;
+    if !matches!(read, Ok(Ok(Line::Read))) {
+        log::debug!("control: connection {connection} sent no first line: {read:?}");
+    }
+    let first = String::from_utf8_lossy(&bytes).into_owned();
+    if matches!(read, Ok(Ok(Line::Read))) {
         match agent_screen_mcp::pipe::first_line(&first) {
             FirstLine::Pipe(hello) => {
                 log::info!(
@@ -483,6 +511,7 @@ async fn serve<R, W>(
 
     let mut pending = first;
     let mut line = String::new();
+    let mut bytes = Vec::new();
     loop {
         line.clear();
         if let Some(first) = pending.take() {
@@ -495,14 +524,23 @@ async fn serve<R, W>(
                 Some(closed) => tokio::select! {
                     biased;
                     _ = closed.wait_for(|c| *c) => break,
-                    read = reader.read_line(&mut line) => read,
+                    read = read_capped(&mut reader, &mut bytes, LINE_MAX) => read,
                 },
-                None => reader.read_line(&mut line).await,
+                None => read_capped(&mut reader, &mut bytes, LINE_MAX).await,
             };
             match read {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {}
+                Ok(Line::Read) => {}
+                Ok(Line::TooLong) => {
+                    log::warn!(
+                        "control: connection {connection} sent a line over {LINE_MAX} bytes; closing it"
+                    );
+                    break;
+                }
+                Ok(Line::End) | Err(_) => break,
             }
+            // A line that isn't UTF-8 is no request, as bad JSON isn't; it
+            // no longer ends the connection.
+            line = String::from_utf8_lossy(&bytes).into_owned();
         }
         let Ok(Value::Object(request)) = serde_json::from_str::<Value>(line.trim_end()) else {
             continue;
@@ -582,6 +620,7 @@ mod tests {
     use agent_screen_mcp::process::Identity;
     use futures::StreamExt;
     use std::time::{Duration, Instant};
+    use tokio::io::AsyncBufReadExt;
     use tokio::io::{AsyncWriteExt, Lines};
     use tokio::net::UnixStream;
     use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};

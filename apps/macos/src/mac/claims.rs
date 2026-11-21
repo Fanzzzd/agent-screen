@@ -173,6 +173,39 @@ pub fn delete() {
     let _ = std::fs::remove_file(path());
 }
 
+/// Remove the claim files of Agent Screens that died without removing
+/// their own, as after a kill or a crash. At start.
+pub fn sweep_dead() {
+    let own = path();
+    let Some(dir) = own.parent() else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let names: Vec<String> = entries
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect();
+    let stale = agent_screen_model::claims::stale_claim_files(&names, std::process::id(), |pid| {
+        agent_screen_mcp::process::identity(pid as i64).map(|i| i.executable)
+    });
+    for name in stale {
+        if std::fs::remove_file(dir.join(&name)).is_ok() {
+            log::info!("claims: removed {name}, left by an Agent Screen that is gone");
+        }
+    }
+}
+
+/// Write the claims again, after a panic the app lived through removed
+/// the file: AeroSpace would lay out the agents' windows as the user's.
+pub fn republish() {
+    let mut claims = CLAIMS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Err(error) = claims.publish(true, |_| false, write) {
+        log::warn!("claims: could not write {}: {error}", path().display());
+    }
+}
+
 #[cfg(test)]
 mod publication_tests {
     use super::*;
