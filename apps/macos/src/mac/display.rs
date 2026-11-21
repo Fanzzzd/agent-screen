@@ -1328,6 +1328,7 @@ pub async fn create_parked(
                 online,
                 at: wall(),
             }),
+            Err(NotMade::Unparked) if !cg::users_awake() => record(Outcome::Unverifiable),
             Err(NotMade::Unparked) => record(Outcome::Failed {
                 online,
                 secs: secs(),

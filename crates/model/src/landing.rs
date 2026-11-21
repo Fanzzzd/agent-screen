@@ -251,6 +251,10 @@ pub enum Outcome {
     /// online, at `secs`, and the display was released. A display
     /// WindowServer refused to make changed nothing and isn't one.
     Failed { online: usize, secs: u64 },
+    /// Parking failed while none of the user's displays was awake, so no
+    /// spot could be checked against them. Display sleep says nothing of
+    /// the next try, so it neither counts nor clears a failure (#286).
+    Unverifiable,
 }
 
 /// Parking failures in a row, with the same displays online, after which
@@ -297,6 +301,7 @@ impl CreationGuard {
     pub fn record(&mut self, outcome: Outcome, session: &str) {
         match outcome {
             Outcome::Parked | Outcome::Reused => self.failures_in_a_row = 0,
+            Outcome::Unverifiable => {}
             Outcome::Mirrored { unit, online, at } => self.bad.add(session, unit, online, at),
             Outcome::Failed { online, secs } => {
                 if online != self.failed_online {
@@ -1111,6 +1116,37 @@ mod tests {
         assert!(guard.refusal(&none, &now(&[0, 5, 6, 7], 3)).is_some());
         guard.record(Outcome::Reused, SESSION);
         assert_eq!(guard.refusal(&none, &now(&[0, 5, 6, 7], 4)), None);
+    }
+
+    /// Overnight, with the user's displays asleep, every spare failed to
+    /// park, and two failures refused agents' displays for 10 minutes.
+    #[test]
+    fn failures_while_the_users_displays_sleep_refuse_nothing() {
+        let units = [0, 5, 6];
+        let mut guard = CreationGuard::new();
+        let none = BadUnits::new();
+        for _ in 0..5 {
+            guard.record(Outcome::Unverifiable, SESSION);
+        }
+        assert_eq!(guard.refusal(&none, &now(&units, 10)), None);
+        // One real failure before the sleep still counts with one after.
+        guard.record(
+            Outcome::Failed {
+                online: 3,
+                secs: 20,
+            },
+            SESSION,
+        );
+        guard.record(Outcome::Unverifiable, SESSION);
+        assert_eq!(guard.refusal(&none, &now(&units, 21)), None);
+        guard.record(
+            Outcome::Failed {
+                online: 3,
+                secs: 22,
+            },
+            SESSION,
+        );
+        assert!(guard.refusal(&none, &now(&units, 23)).is_some());
     }
 
     const STORED_LOG: &str = include_str!("../testdata/issue-220-stored.log");

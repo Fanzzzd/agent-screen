@@ -32,6 +32,7 @@ pub mod real_drag;
 pub mod recording_playback;
 pub mod report;
 pub mod request;
+pub mod retry;
 pub mod returns;
 pub mod screen_edge;
 pub mod scroll;

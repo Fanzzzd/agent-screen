@@ -72,9 +72,10 @@ impl ColorState {
         online as f64 * (1.0 + records * per_record)
     }
 
-    /// Whether a display may be added to `online` displays, `spares` of
-    /// them spares that can be released.
-    pub fn allows(&self, online: usize, spares: usize) -> Budget {
+    /// Whether a display may be added to `online` displays, of which
+    /// `retiring` ended displays waiting to go and `spares` spares can be
+    /// released. Retiring ones go first: no agent waits for them.
+    pub fn allows(&self, online: usize, retiring: usize, spares: usize) -> Budget {
         // Till counted, no guess refuses a display.
         if self.records.is_none() {
             return Budget::Allow;
@@ -83,8 +84,14 @@ impl ColorState {
         if self.request_ms(with_one_more) <= BUDGET_MS {
             return Budget::Allow;
         }
-        if spares > 0 && self.request_ms(with_one_more.saturating_sub(spares)) <= BUDGET_MS {
-            return Budget::ReleaseSpares;
+        let fits = |released: usize| {
+            released > 0 && self.request_ms(with_one_more.saturating_sub(released)) <= BUDGET_MS
+        };
+        if fits(retiring) {
+            return Budget::Release { spares: false };
+        }
+        if fits(retiring + spares) {
+            return Budget::Release { spares: true };
         }
         Budget::Refuse
     }
@@ -93,8 +100,11 @@ impl ColorState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Budget {
     Allow,
-    /// Allowed once every spare is released.
-    ReleaseSpares,
+    /// Allowed once every retiring display is released, and every spare
+    /// too when `spares`.
+    Release {
+        spares: bool,
+    },
     Refuse,
 }
 
@@ -151,7 +161,7 @@ mod tests {
             records: None,
             helper_ready: false,
         };
-        assert_eq!(state.allows(100, 0), Budget::Allow);
+        assert_eq!(state.allows(100, 0, 0), Budget::Allow);
     }
 
     #[test]
@@ -162,7 +172,7 @@ mod tests {
             helper_ready: false,
         };
         assert_eq!(state.request_ms(4), 12.0);
-        assert_eq!(state.allows(3, 0), Budget::Allow);
+        assert_eq!(state.allows(3, 0, 0), Budget::Allow);
     }
 
     #[test]
@@ -172,8 +182,23 @@ mod tests {
             records: Some(100),
             helper_ready: false,
         };
-        assert_eq!(state.allows(1, 0), Budget::Refuse);
-        assert_eq!(state.allows(1, 1), Budget::ReleaseSpares);
+        assert_eq!(state.allows(1, 0, 0), Budget::Refuse);
+        assert_eq!(state.allows(1, 0, 1), Budget::Release { spares: true });
+    }
+
+    /// Displays agents already ended used to cost the budget with nothing
+    /// to release them, and create_display was refused (#286).
+    #[test]
+    fn color_budget_releases_retiring_displays_first() {
+        // 100 records, no helper: 21 ms a display, so 1 fits and 2 don't.
+        let state = ColorState {
+            records: Some(100),
+            helper_ready: false,
+        };
+        assert_eq!(state.allows(1, 1, 0), Budget::Release { spares: false });
+        assert_eq!(state.allows(1, 1, 1), Budget::Release { spares: false });
+        assert_eq!(state.allows(2, 1, 1), Budget::Release { spares: true });
+        assert_eq!(state.allows(3, 1, 1), Budget::Refuse);
     }
 
     #[test]
@@ -182,7 +207,7 @@ mod tests {
             records: Some(100),
             helper_ready: false,
         };
-        assert_eq!(state.allows(3, 1), Budget::Refuse);
+        assert_eq!(state.allows(3, 0, 1), Budget::Refuse);
     }
 
     #[test]
@@ -196,7 +221,7 @@ mod tests {
             helper_ready: true,
             ..without
         };
-        assert_eq!(without.allows(2, 0), Budget::Refuse);
-        assert_eq!(with.allows(2, 0), Budget::Allow);
+        assert_eq!(without.allows(2, 0, 0), Budget::Refuse);
+        assert_eq!(with.allows(2, 0, 0), Budget::Allow);
     }
 }

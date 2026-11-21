@@ -192,6 +192,13 @@ pub fn main_display() -> DisplayId {
     CGMainDisplayID()
 }
 
+/// Whether one of the user's own displays is awake. While all of them
+/// sleep, macOS lists them online but not active, so nothing can tell
+/// where a display of ours is out of their way (#286).
+pub fn users_awake() -> bool {
+    active_displays().into_iter().any(|id| !is_agent_screen(id))
+}
+
 pub fn active_displays() -> Vec<DisplayId> {
     let mut ids = [0u32; 32];
     let mut count = 0u32;
