@@ -350,6 +350,7 @@ pub const SCRIPTS: &[Script] = &[
     script("smoke", &[AgentInput, Screenshots], Full, Agent, 1).no_app().manual(NEEDS_APP),
     script("sound", &[Recording], Full, Agent, 1).hands_off(),
     script("spares", &[Displays], Core, Agent, 2),
+    script("sparerepark", &[Displays], Full, Agent, 1).hands_off(),
     script("sparesize", &[Displays], Full, Agent, 2),
     script("statusicon", &[Peek], Full, Agent, 1).hands_off(),
     script("stop", &[], Full, Agent, 0)
