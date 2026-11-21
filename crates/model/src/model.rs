@@ -951,25 +951,19 @@ impl<H> Displays<H> {
     /// Snapshot of active recorded window owners (`window_id -> DisplayId`) so
     /// off-thread window queries and repark shifts honor Placement and Handover
     /// records while displays reconfigure (#204). Shares the exact tie-break of
-    /// [`Displays::recorded_display_of`]: first live display, then first Review
-    /// Display.
+    /// [`Displays::recorded_display_of`]: first live display, then the first
+    /// other one.
     pub fn recorded_owners(&self) -> BTreeMap<WindowId, DisplayId> {
+        // Live displays first, then every other one: Review Displays and the
+        // ones the user made from Peek, which have no session and are
+        // neither live nor ended (#289).
         let mut out = BTreeMap::new();
-        for d in &self.list {
-            if d.is_live() {
-                for &w in d.records.keys() {
-                    if !d.returned.contains(&w) && !d.given.contains_key(&w) {
-                        out.entry(w).or_insert(d.id);
-                    }
-                }
-            }
-        }
-        for d in &self.list {
-            if d.is_ended() {
-                for &w in d.records.keys() {
-                    if !d.returned.contains(&w) && !d.given.contains_key(&w) {
-                        out.entry(w).or_insert(d.id);
-                    }
+        let live = self.list.iter().filter(|d| d.is_live());
+        let rest = self.list.iter().filter(|d| !d.is_live());
+        for d in live.chain(rest) {
+            for &w in d.records.keys() {
+                if !d.returned.contains(&w) && !d.given.contains_key(&w) {
+                    out.entry(w).or_insert(d.id);
                 }
             }
         }
@@ -2981,6 +2975,69 @@ mod tests {
         let first = d.get(7).unwrap();
         assert!(!first.started.contains(&5) && first.released.contains(&5));
         assert!(!d.is_session_stray(7, launched(2), false, DisplayRole::User, false));
+    }
+
+    /// Off-thread window queries read `recorded_owners`; main-thread code
+    /// reads `recorded_display_of`. A display made from Peek has no session,
+    /// so it is neither live nor ended, and the snapshot skipped its records
+    /// (#289).
+    #[test]
+    fn the_owner_snapshot_agrees_with_the_owner_lookup() {
+        let mut d = two_of_one_session();
+        d.add(10, "Agent Screen 4".into(), DEFAULT_SIZE, None, ());
+        // 41 only on the Peek display; 42 on a Review Display and a live one;
+        // 43 on the Peek display and a live one; 44 only on a Review Display.
+        d.get_mut(10)
+            .unwrap()
+            .claim(launched(41), Origin::Placed, None);
+        d.get_mut(9)
+            .unwrap()
+            .claim(launched(42), Origin::Placed, None);
+        d.get_mut(9)
+            .unwrap()
+            .claim(launched(44), Origin::Placed, None);
+        assert!(d.end(9, EndReason::Finished));
+        d.get_mut(8)
+            .unwrap()
+            .claim(launched(42), Origin::Placed, None);
+        d.get_mut(10)
+            .unwrap()
+            .claim(launched(43), Origin::Placed, None);
+        d.get_mut(7)
+            .unwrap()
+            .claim(launched(43), Origin::Placed, None);
+        let owners = d.recorded_owners();
+        for window in [41, 42, 43, 44] {
+            assert_eq!(
+                owners.get(&window).copied(),
+                d.recorded_display_of(window),
+                "window {window}"
+            );
+        }
+        assert_eq!(owners.get(&41), Some(&10));
+        assert_eq!(owners.get(&42), Some(&8));
+        assert_eq!(owners.get(&43), Some(&7));
+    }
+
+    /// A failed Handover puts the window's record back as it was; the
+    /// snapshot other threads read follows each step (ADR 0018).
+    #[test]
+    fn a_restored_record_reaches_the_owner_snapshot() {
+        let mut d = two_of_one_session();
+        let sink = std::sync::Arc::new(std::sync::RwLock::new(BTreeMap::new()));
+        d.bind_recorded_owners(sink.clone());
+        d.get_mut(7)
+            .unwrap()
+            .claim(launched(50), Origin::Placed, None);
+        d.publish_recorded_owners();
+        let record = d.get(7).unwrap().records.get(&50).cloned();
+        assert_eq!(sink.read().unwrap().get(&50), Some(&7));
+        d.forget_on(7, 50);
+        assert_eq!(sink.read().unwrap().get(&50), None);
+        d.restore_record_on(7, 50, record);
+        assert_eq!(sink.read().unwrap().get(&50), Some(&7));
+        d.restore_record_on(7, 50, None);
+        assert_eq!(sink.read().unwrap().get(&50), None);
     }
 
     #[test]

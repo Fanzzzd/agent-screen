@@ -1284,6 +1284,41 @@ mod tests {
         assert!(!repark.finish(gen2));
     }
 
+    /// A display that goes leaves no baseline and no failed shift behind,
+    /// so its id, reused by a later display, never shifts that one's
+    /// windows (#289).
+    #[test]
+    fn a_removed_display_leaves_no_pending_shift_or_baseline() {
+        let user_rect = Rect::new(0., 0., 4288., 1440.);
+        let old = Rect::new(4288., -800., 1280., 800.);
+        let new = Rect::new(5568., -800., 1280., 800.);
+        let window = WindowTarget {
+            pid: 1,
+            window_id: 101,
+        };
+        let frame = Rect::new(4388., -700., 500., 400.);
+        let mut repark = ReparkState::default();
+        repark.note_adopted(10, old);
+        let (generation, _) = repark.begin(&[10]).unwrap();
+        let (shifts, _) = repark.plan_shifts(
+            generation,
+            &[10],
+            &[(10, new)],
+            &[user_rect],
+            &[(window, frame, None)],
+        );
+        assert_eq!(shifts.len(), 1);
+        // The move failed: it waits to be tried again.
+        repark.finish_with_failures(generation, &[window]);
+        assert!(repark.has_pending_retries(&[10]));
+
+        repark.remove_display(10);
+        assert!(!repark.has_pending_retries(&[10]));
+        assert_eq!(repark.parked_rect(10), None);
+        let (_, snapshot) = repark.begin(&[10]).unwrap();
+        assert!(snapshot.is_empty());
+    }
+
     #[test]
     fn window_shifts_honors_recorded_owner_when_center_straddles_neighbor() {
         // M7 revert-4 guard: window 501 is recorded on display 379 (4288..5568)
