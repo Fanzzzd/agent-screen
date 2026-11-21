@@ -261,6 +261,7 @@ AGENTSCREEN_INSTANCE=e2e cargo e2e loanfocus   # an Input Loan's focus step alon
 
 # displays: an Agent Display's life, from creation and parking to spares and review
 AGENTSCREEN_INSTANCE=e2e cargo e2e restart    # after the app aborts, the agent hears it quit and can place its windows back (needs Field.app from `ime`)
+AGENTSCREEN_INSTANCE=e2e cargo e2e restarttakeback # an app the user took back stays theirs across an abort and restart: the session's next display doesn't adopt it, so its window is no stray there (#285); Field's window shows on your screen; 2 displays
 AGENTSCREEN_INSTANCE=e2e cargo e2e mcpv1      # an MCP process from before the pipe (`AgentScreen mcp --v1`, control protocol v1) lists the tools, makes a display, takes a screenshot and ends it against this app, beside a pipe's session that can't reach that display (ADR 0021); 1 display
 AGENTSCREEN_INSTANCE=e2e cargo e2e mcporphan  # a pipe ends within 5 s of its parent with stdin still open, and the app ends and logs a v1 MCP process whose client exited while one whose client runs stays (ADR 0021); no display, up to 35 s
 AGENTSCREEN_INSTANCE=e2e cargo e2e mcpclients # real MCP clients installed on this Mac (today Cursor's CLI, `cursor-agent`) list the tools through this build's pipe, from a throwaway project and home; skips a client that isn't installed; no display, no model call

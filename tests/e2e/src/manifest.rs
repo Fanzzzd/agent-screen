@@ -329,6 +329,7 @@ pub const SCRIPTS: &[Script] = &[
     script("requestcontrol", &[Takeover], Full, Hook, 1).hands_off(),
     script("requestwindow", &[WindowAccess, Windows], Full, Hook, 2).hands_off(),
     script("restart", &[Displays, Windows], Full, Hook, 2).hands_off(),
+    script("restarttakeback", &[Displays, Windows], Full, Hook, 2).hands_off(),
     script("robust", &[AgentInput, Windows, Screenshots, Takeover], Core, Hook, 2).hands_off(),
     script("run", &[ViewerInput, Peek, Settings], Full, Real, 4).hands_off().manual(
         "it quits the installed Agent Screen and moves your pointer: run it when the user is away or asks",
