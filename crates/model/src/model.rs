@@ -912,6 +912,28 @@ impl<H> Displays<H> {
             .unwrap_or_else(|| title.to_string())
     }
 
+    /// Each live display, by id, with its session and the apps it started
+    /// that are still its own: what the app's ledger keeps for the next run
+    /// (ADR 0021). A Review Display, a display the user closed, and an app
+    /// the user took back are left out, so none is handed on after a
+    /// restart (ADR 0016).
+    pub fn live_apps(&self) -> Vec<(DisplayId, String, Vec<i32>)> {
+        let mut out: Vec<_> = self
+            .list
+            .iter()
+            .filter_map(|d| {
+                let session = d.session()?;
+                Some((
+                    d.id,
+                    session.to_string(),
+                    d.started.iter().copied().collect(),
+                ))
+            })
+            .collect();
+        out.sort_by_key(|(id, _, _)| *id);
+        out
+    }
+
     /// An Agent Session's live displays, oldest first.
     pub fn of_session(&self, session_key: &str) -> Vec<DisplayId> {
         self.sessions.live(session_key).to_vec()
@@ -2981,6 +3003,33 @@ mod tests {
         let first = d.get(7).unwrap();
         assert!(!first.started.contains(&5) && first.released.contains(&5));
         assert!(!d.is_session_stray(7, launched(2), false, DisplayRole::User, false));
+    }
+
+    #[test]
+    fn the_ledger_keeps_live_displays_with_the_apps_still_theirs() {
+        let mut d = two_of_one_session();
+        d.get_mut(7).unwrap().started.extend([5, 6]);
+        d.get_mut(9).unwrap().started.insert(70);
+        // A display made from Peek has no session.
+        d.add(10, "Agent Screen 4".into(), DEFAULT_SIZE, None, ());
+        assert_eq!(
+            d.live_apps(),
+            vec![
+                (7, "s".into(), vec![5, 6]),
+                (8, "s".into(), vec![]),
+                (9, "t".into(), vec![70]),
+            ]
+        );
+        // The user takes app 5's window back, and closes session t's display.
+        d.give_back(7, launched(1)).unwrap();
+        assert!(d.end(9, EndReason::ClosedByUser));
+        assert_eq!(
+            d.live_apps(),
+            vec![(7, "s".into(), vec![6]), (8, "s".into(), vec![])]
+        );
+        // end_display hands display 7's apps to the session's other one.
+        assert!(d.end(7, EndReason::Finished));
+        assert_eq!(d.live_apps(), vec![(8, "s".into(), vec![6])]);
     }
 
     #[test]

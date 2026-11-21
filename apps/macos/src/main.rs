@@ -543,15 +543,27 @@ fn main() {
                                 let core = core.clone();
                                 cx.spawn(async move |cx: &mut AsyncApp| {
                                     let result = control::agent::handle(
-                                        core, connection, &method, params, cx,
+                                        core.clone(),
+                                        connection,
+                                        &method,
+                                        params,
+                                        cx,
                                     )
                                     .await;
+                                    // Before the reply: an abort right after
+                                    // it still leaves what it made or launched.
+                                    core.read_with(cx, |core, _| {
+                                        server::keep_ledger(&core.displays)
+                                    });
                                     let _ = reply.send(result);
                                 })
                                 .detach();
                             }
                             Event::Closed { connection } => {
-                                core.update(cx, |core, cx| core.connection_closed(connection, cx));
+                                core.update(cx, |core, cx| {
+                                    core.connection_closed(connection, cx);
+                                    server::keep_ledger(&core.displays);
+                                });
                             }
                         }
                     }

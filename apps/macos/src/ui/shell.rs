@@ -980,6 +980,9 @@ impl Shell {
         // whenever the user clicks it: keep it current, not only while an
         // update waits (ADR 0012).
         update::set_open_displays(core.displays.list.len());
+        // Take Back, closing a display and its grace running out change the
+        // model outside a control request: the ledger follows them too.
+        crate::control::server::keep_ledger(&core.displays);
         let ids: HashSet<DisplayId> = core.displays.list.iter().map(|d| d.id).collect();
         let asking_count = card::asking_count(
             &core.displays,

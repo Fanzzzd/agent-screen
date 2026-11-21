@@ -919,7 +919,8 @@ async fn create_display(
     let new = a.flag("new");
     // A display ended by the app quitting hands its apps on, so
     // their windows, now on the user's screen, are strays here.
-    // Only this session's, by the display they were on.
+    // Only this session's, by the display they were on, and taken
+    // only once a display is made.
     let orphans = control.ledger().orphans(&session.key);
     let groups = orphans.as_ref().map(|groups| {
         groups
@@ -952,6 +953,11 @@ async fn create_display(
         .await?;
     let reused = reply.get("reused").and_then(Value::as_bool) == Some(true);
     if let Some(id) = reply.get("displayId").and_then(Value::as_u64) {
+        // Only a display made takes the orphans: after a refusal, the
+        // session's next create_display still hands them on.
+        if orphans.is_some() {
+            control.ledger().adopted(&session.key);
+        }
         control.ledger().made_display(id, &session.key, reused);
     }
     if let Some(error) = needs_newer_app(new, &reply) {

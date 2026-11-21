@@ -5,7 +5,10 @@
 //! Entries belong to a run. A v1 process counts a run per control
 //! connection, since each new connection is a new app. The app counts two:
 //! the previous app run, read from its file at start, and its own, which it
-//! writes back on every change (ADR 0021).
+//! writes back on every change (ADR 0021). The app's own run follows its
+//! model (`Ledger::sync`): only displays still live, each with the apps
+//! still its own, so a display that ended or an app the user took back is
+//! never handed on after a restart (#285).
 //!
 //! Each app is kept with its process's identity, its start time and
 //! executable, and handed on only while the process with its pid still has
@@ -24,6 +27,17 @@ pub struct Ledger {
     file: Option<PathBuf>,
     /// Who has a pid now; tests give their own.
     identify: fn(i64) -> Option<Identity>,
+    /// The app keeps this run's displays with `sync`, from its model; the
+    /// MCP host's notes of what it made and launched are then left out.
+    kept_by_app: bool,
+}
+
+/// A display live in the app's model, with the apps that are still its own.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Live {
+    pub display: u64,
+    pub session: String,
+    pub apps: Vec<i64>,
 }
 
 impl Default for Ledger {
@@ -32,6 +46,7 @@ impl Default for Ledger {
             state: Mutex::default(),
             file: None,
             identify: process::identity,
+            kept_by_app: false,
         }
     }
 }
@@ -106,6 +121,7 @@ impl Ledger {
             state: Mutex::new(State { run: 1, made }),
             file: Some(file),
             identify,
+            kept_by_app: true,
         };
         ledger.save(&ledger.state.lock().unwrap());
         ledger
@@ -124,6 +140,9 @@ impl Ledger {
     /// session under an old id, starts with no apps: its old apps were
     /// another display's, maybe another session's (ADR 0016).
     pub fn made_display(&self, id: u64, session: &str, reused: bool) {
+        if self.kept_by_app {
+            return;
+        }
         let mut state = self.state.lock().unwrap();
         let run = state.run;
         let entry = state.made.entry((id, run)).or_default();
@@ -138,6 +157,9 @@ impl Ledger {
 
     /// Note an app launch_app started for a display.
     pub fn started_app(&self, display: u64, pid: i64) {
+        if self.kept_by_app {
+            return;
+        }
         let process = (self.identify)(pid);
         let mut state = self.state.lock().unwrap();
         let run = state.run;
@@ -145,6 +167,50 @@ impl Ledger {
             made.started.push(Started { pid, process });
             self.save(&state);
         }
+    }
+
+    /// The app's displays now: `live` are the ones live in its model, each
+    /// with the apps it started that are still its own. They replace this
+    /// run's, so a display that ended, as by end_display or the user
+    /// closing it, and an app the user took back, are never handed on
+    /// after a restart (ADR 0016). An app keeps the process it was noted
+    /// with; one new here is noted with the process that has its pid now.
+    pub fn sync(&self, live: &[Live]) {
+        let mut state = self.state.lock().unwrap();
+        let run = state.run;
+        let mut before: HashMap<u64, Made> = HashMap::new();
+        state.made.retain(|&(display, r), made| {
+            if r == run {
+                before.insert(display, std::mem::take(made));
+                false
+            } else {
+                true
+            }
+        });
+        for l in live {
+            let known = before.get(&l.display).filter(|m| m.session == l.session);
+            let started = l
+                .apps
+                .iter()
+                .map(|&pid| {
+                    known
+                        .and_then(|m| m.started.iter().find(|s| s.pid == pid).cloned())
+                        .unwrap_or_else(|| Started {
+                            pid,
+                            process: (self.identify)(pid),
+                        })
+                })
+                .collect();
+            state.made.insert(
+                (l.display, run),
+                Made {
+                    session: l.session.clone(),
+                    started,
+                    adopted: false,
+                },
+            );
+        }
+        self.save(&state);
     }
 
     /// Whether a display session `session` made ended when the app quit:
@@ -162,38 +228,46 @@ impl Ledger {
     }
 
     /// The apps session `session` started on displays that ended when the
-    /// app quit, by the display they were on, taken once, for its next
-    /// create_display to adopt. Never another session's: an app one agent
-    /// launched once went onto another agent's display (ADR 0016). Never a
-    /// pid another process has now.
+    /// app quit, by the display they were on, for its next create_display
+    /// to adopt. Never another session's: an app one agent launched once
+    /// went onto another agent's display (ADR 0016). Never a pid another
+    /// process has now. They stay until `adopted`, so a create_display that
+    /// fails hands them to the next one.
     pub fn orphans(&self, session: &str) -> Option<Vec<(u64, Vec<i64>)>> {
-        let mut state = self.state.lock().unwrap();
-        let run = state.run;
+        let state = self.state.lock().unwrap();
         let mut keys: Vec<(u64, u64)> = state
             .made
-            .keys()
-            .filter(|&&(_, r)| r < run)
-            .copied()
+            .iter()
+            .filter(|&(&(_, r), m)| r < state.run && m.session == session && !m.adopted)
+            .map(|(&key, _)| key)
             .collect();
         keys.sort();
-        let mut any = false;
-        let mut groups = Vec::new();
-        for key in keys {
-            let Some(m) = state.made.get_mut(&key) else {
-                continue;
-            };
-            if m.session == session && !m.adopted {
-                m.adopted = true;
-                any = true;
-                let alive = std::mem::take(&mut m.started)
-                    .into_iter()
+        let groups: Vec<(u64, Vec<i64>)> = keys
+            .into_iter()
+            .map(|key| {
+                let alive = state.made[&key]
+                    .started
+                    .iter()
                     .filter(|s| s.process.is_some() && (self.identify)(s.pid) == s.process)
                     .map(|s| s.pid)
                     .collect();
-                groups.push((key.0, alive));
+                (key.0, alive)
+            })
+            .collect();
+        (!groups.is_empty()).then_some(groups)
+    }
+
+    /// A display of session `session` was made with its `orphans`: none is
+    /// handed on again.
+    pub fn adopted(&self, session: &str) {
+        let mut state = self.state.lock().unwrap();
+        let run = state.run;
+        for (&(_, r), m) in state.made.iter_mut() {
+            if r < run && m.session == session {
+                m.adopted = true;
+                m.started.clear();
             }
         }
-        any.then_some(groups)
     }
 
     /// Write this run's displays, for the next app run. Earlier runs' are
@@ -252,6 +326,89 @@ mod tests {
         }
     }
 
+    fn live(display: u64, session: &str, apps: &[i64]) -> Live {
+        Live {
+            display,
+            session: session.into(),
+            apps: apps.to_vec(),
+        }
+    }
+
+    fn file(name: &str) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("as-ledger-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        (dir.join("displays-test.json"), dir)
+    }
+
+    #[test]
+    fn after_a_restart_no_display_adopts_an_app_the_user_took_back() {
+        let (file, dir) = file("taken-back");
+        let first = Ledger::persistent_with(file.clone(), identify, None);
+        first.sync(&[live(7, "s", &[100, 101])]);
+        // The user took TextEdit (100) back: the model's display 7 no
+        // longer counts it as its own.
+        first.sync(&[live(7, "s", &[101])]);
+        drop(first);
+
+        let second = Ledger::persistent_with(file, identify, None);
+        assert!(second.ended_with_app(7, "s"));
+        assert_eq!(second.orphans("s"), Some(vec![(7, vec![101])]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_display_that_ended_before_the_restart_is_not_said_to_end_with_the_app() {
+        let (file, dir) = file("ended");
+        let first = Ledger::persistent_with(file.clone(), identify, None);
+        first.sync(&[live(7, "s", &[100]), live(8, "s", &[200])]);
+        // The user closed display 8; its app stays theirs (ADR 0016).
+        first.sync(&[live(7, "s", &[100])]);
+        drop(first);
+
+        let second = Ledger::persistent_with(file, identify, None);
+        assert!(second.ended_with_app(7, "s"));
+        assert!(!second.ended_with_app(8, "s"));
+        assert_eq!(second.orphans("s"), Some(vec![(7, vec![100])]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn orphans_wait_for_a_create_display_that_succeeds() {
+        let (file, dir) = file("failed-create");
+        let first = Ledger::persistent_with(file.clone(), identify, None);
+        first.sync(&[live(7, "s", &[100])]);
+        drop(first);
+
+        let second = Ledger::persistent_with(file, identify, None);
+        // The first create_display after the restart was refused.
+        assert_eq!(second.orphans("s"), Some(vec![(7, vec![100])]));
+        // The retry still hands them on, and only once it made a display.
+        assert_eq!(second.orphans("s"), Some(vec![(7, vec![100])]));
+        second.adopted("s");
+        assert_eq!(second.orphans("s"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_app_keeps_its_own_run_and_the_host_notes_are_left_out() {
+        let (file, dir) = file("kept");
+        let first = Ledger::persistent_with(file.clone(), identify, None);
+        first.sync(&[live(7, "s", &[100])]);
+        // The host's notes come after the model's and would undo them.
+        first.made_display(7, "s", false);
+        first.started_app(9, 300);
+        // An app keeps the process it was noted with.
+        first.sync(&[live(7, "s", &[100, 666])]);
+        first.sync(&[live(7, "s", &[100, 666])]);
+        drop(first);
+
+        let second = Ledger::persistent_with(file, identify, None);
+        assert_eq!(second.orphans("s"), Some(vec![(7, vec![100])]));
+        assert!(!second.ended_with_app(9, "s"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_display_ends_with_the_connection_it_was_made_on() {
         let ledger = ledger();
@@ -281,6 +438,7 @@ mod tests {
         assert_eq!(ledger.orphans("a"), None);
         ledger.connected();
         assert_eq!(ledger.orphans("a"), Some(vec![(7, vec![100, 101])]));
+        ledger.adopted("a");
         assert_eq!(ledger.orphans("a"), None);
         // A display with no apps still says the app quit.
         ledger.made_display(8, "a", false);
@@ -344,8 +502,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("displays-test.json");
         let first = Ledger::persistent_with(file.clone(), identify, None);
-        first.made_display(3, "s", false);
-        first.started_app(3, 501);
+        first.sync(&[live(3, "s", &[501])]);
         drop(first);
 
         let booted_after = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
@@ -363,8 +520,7 @@ mod tests {
         let _ = std::fs::remove_file(&file);
 
         let first = Ledger::persistent_with(file.clone(), identify, None);
-        first.made_display(3, "claude-code:s", false);
-        first.started_app(3, 501);
+        first.sync(&[live(3, "claude-code:s", &[501])]);
         // The app aborts here: nothing else is written.
         drop(first);
 
@@ -374,7 +530,7 @@ mod tests {
         assert!(second.ended_with_app(3, "claude-code:s"));
         assert!(!second.ended_with_app(3, "codex:t"));
         assert_eq!(second.orphans("claude-code:s"), Some(vec![(3, vec![501])]));
-        second.made_display(4, "codex:t", false);
+        second.sync(&[live(4, "codex:t", &[])]);
         drop(second);
 
         // The run before last is gone; only the last run's displays stay.
