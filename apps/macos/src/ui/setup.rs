@@ -463,10 +463,17 @@ fn link(
         .child(label)
 }
 
-/// The command an MCP client runs for Agent Screen's server.
-pub fn mcp_command() -> String {
+/// Agent Screen's server as an MCP client's JSON config takes it, with the
+/// command and its arguments apart.
+pub fn mcp_config() -> String {
     let exe = std::env::current_exe().unwrap_or_default();
-    format!("\"{}\" mcp", exe.display())
+    mcp_config_for(&exe.display().to_string())
+}
+
+fn mcp_config_for(exe: &str) -> String {
+    let server = serde_json::json!({ "command": exe, "args": ["mcp"] });
+    let body = serde_json::to_string_pretty(&server).unwrap_or_default();
+    format!("\"agent-screen\": {body}")
 }
 
 /// docs/clients.md: each client's config.
@@ -740,11 +747,11 @@ impl Setup {
                 if copied {
                     t("Copied", "已复制")
                 } else {
-                    t("Copy MCP Command", "复制 MCP 命令")
+                    t("Copy MCP Config", "复制 MCP 配置")
                 },
                 theme,
                 move |cx| {
-                    native::copy(&mcp_command());
+                    native::copy(&mcp_config());
                     let _ = this.update(cx, |setup, cx| {
                         setup.copied = true;
                         cx.notify();
@@ -759,7 +766,7 @@ impl Setup {
             ));
         item_with(
             badge("icons/plus.svg", color, loaded),
-            t("Agents", "Agent").into(),
+            t("MCP Clients", "MCP 客户端").into(),
             detail.into(),
             None,
             Some(others.into_any_element()),
@@ -988,3 +995,21 @@ trait Keyboard: StatefulInteractiveElement + Styled + Sized {
 }
 
 impl Keyboard for gpui::Stateful<gpui::Div> {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_mcp_config_keeps_command_and_args_apart() {
+        let config = mcp_config_for("/Applications/Agent Screen.app/Contents/MacOS/AgentScreen");
+        let value: serde_json::Value =
+            serde_json::from_str(&format!("{{{config}}}")).expect("valid JSON in braces");
+        let server = &value["agent-screen"];
+        assert_eq!(
+            server["command"],
+            "/Applications/Agent Screen.app/Contents/MacOS/AgentScreen"
+        );
+        assert_eq!(server["args"], serde_json::json!(["mcp"]));
+    }
+}

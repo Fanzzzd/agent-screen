@@ -797,9 +797,11 @@ async fn handle_one(
         }
         // The MCP server of an agent session listed the tools.
         "agentReady" => {
+            // Stored and logged in English; `shell::shown_client` says it
+            // in the UI's language.
             let client = p
                 .string("client")
-                .unwrap_or_else(|| crate::i18n::t("An agent", "agent").into());
+                .unwrap_or_else(|| crate::ui::shell::UNNAMED_CLIENT.into());
             if let Some(shell) = crate::ui::shell::current() {
                 let _ = shell.update(cx, |shell, cx| shell.agent_ready(client, cx));
             }

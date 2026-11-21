@@ -239,10 +239,11 @@ pub fn show_step(p: super::permissions::Permission, step: Step) {
         let assist = a.get_or_insert_with(|| build(mtm));
         let (title, detail) = if step == Step::StillOff {
             (
-                t("Already on? Add Agent Screen again", "已开启仍无效？请重新添加").to_string(),
+                // Both steps: the user may not have turned it on yet.
+                t("Turn on Agent Screen in the list", "打开列表中 Agent Screen 的开关").to_string(),
                 t(
-                    "Select it in the list and press −.\nThen drag the icon at left into the list.",
-                    "在列表中选中它，点 − 移除。\n再把左边的图标拖进列表。",
+                    "Already on and still Off? Select it, press −,\nthen drag the icon at left into the list.",
+                    "已开启仍无效？选中它并点 − 移除，\n再把左边的图标拖进列表。",
                 )
                 .to_string(),
             )

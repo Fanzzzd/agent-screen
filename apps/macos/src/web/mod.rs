@@ -805,16 +805,12 @@ Connection: close\r\n\
 
 /// The one 404 for every unknown, malformed or expired token and every
 /// unknown path (ADR 0019): a page that says why a link may have stopped,
-/// without telling which.
-fn not_found_response() -> &'static [u8] {
-    static RESPONSE: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
-    RESPONSE.get_or_init(|| {
+/// without telling which. Built per request, in the UI's language now.
+fn not_found_response() -> Vec<u8> {
+    {
         let body = agent_screen_model::web_preview::render_not_found(
             crate::i18n::t("en", "zh-Hans"),
-            crate::i18n::t(
-                "This preview isn't available",
-                "此预览不可用",
-            ),
+            crate::i18n::t("This preview isn't available", "此预览不可用"),
             crate::i18n::t(
                 "The display may have ended, or Agent Screen restarted. Ask the agent for a new link.",
                 "显示器可能已结束，或 Agent Screen 已重启。请向 agent 索取新链接。",
@@ -834,7 +830,7 @@ Connection: close\r\n\
         .into_bytes();
         response.extend_from_slice(body.as_bytes());
         response
-    })
+    }
 }
 
 /// Send the ended picture as the stream's last part, giving up after a
@@ -1013,7 +1009,7 @@ async fn serve_connection(state: Arc<ServerState>, mut stream: TcpStream) -> std
     };
 
     let Some(resolved) = resolve_target(&state, target) else {
-        return write_response(&mut stream, not_found_response(), &[]).await;
+        return write_response(&mut stream, &not_found_response(), &[]).await;
     };
 
     match resolved {
@@ -1034,7 +1030,7 @@ async fn serve_connection(state: Arc<ServerState>, mut stream: TcpStream) -> std
         Resolved::FrameWait(lease) => {
             let mut rx = lease.feed.frames_rx.clone();
             let Some(first) = wait_first_frame(&lease.feed, &mut rx).await else {
-                return write_response(&mut stream, not_found_response(), &[]).await;
+                return write_response(&mut stream, &not_found_response(), &[]).await;
             };
             lease.finish_with_grace();
             let head = jpeg_response_head(first.data.len());
@@ -1043,7 +1039,7 @@ async fn serve_connection(state: Arc<ServerState>, mut stream: TcpStream) -> std
         Resolved::Stream(lease) => {
             let mut rx = lease.feed.frames_rx.clone();
             let Some(first) = wait_first_frame(&lease.feed, &mut rx).await else {
-                return write_response(&mut stream, not_found_response(), &[]).await;
+                return write_response(&mut stream, &not_found_response(), &[]).await;
             };
             let mut last_seq = first.seq;
             let (mut reader, mut writer) = stream.into_split();

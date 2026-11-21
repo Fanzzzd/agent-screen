@@ -68,6 +68,19 @@ thread_local! {
 }
 
 /// The running shell, for debug control methods.
+/// The name kept for a client that didn't say its name. It is stored and
+/// logged as is; the UI shows it through `shown_client`.
+pub const UNNAMED_CLIENT: &str = "An agent";
+
+/// A client's name as the UI shows it, in the UI's language.
+pub fn shown_client(name: &str) -> String {
+    if name == UNNAMED_CLIENT {
+        t("An agent", "Agent").to_string()
+    } else {
+        name.to_string()
+    }
+}
+
 pub fn current() -> Option<WeakEntity<Shell>> {
     CURRENT.with(|c| c.borrow().as_ref().map(Entity::downgrade))
 }
@@ -2706,6 +2719,13 @@ impl Shell {
             }
             "setup" | "settings" => self.open_setup(cx),
             "setup-close" => self.close_setup(cx),
+            // Tab in Settings, as the user's key moves the keyboard to the
+            // next button and shows its ring.
+            "setup-tab" => {
+                if let Some(handle) = self.setup {
+                    let _ = handle.update(cx, |_, window, cx| window.focus_next(cx));
+                }
+            }
             // The open setup window as with both permissions missing, the
             // first row explaining what to do in System Settings: the
             // tallest it gets.
@@ -2970,6 +2990,7 @@ impl Shell {
             )),
             None => match &self.tools_last {
                 Some((client, at)) => {
+                    let client = shown_client(client);
                     let day = crate::i18n::day(*at);
                     menu.disabled(&tf!(
                         "{client} last loaded the tools on {day}",
@@ -4343,7 +4364,7 @@ impl Shell {
         self.still_off = false;
     }
 
-    /// Ten seconds after the pane opened, with Agent Screen in its list and
+    /// Thirty seconds after the pane opened, with Agent Screen in its list and
     /// the permission still off, the switch may be on for an entry macOS
     /// no longer matches to this copy of the app (#280). The helper and the
     /// row then ask to remove the entry and add it again.
@@ -4354,9 +4375,9 @@ impl Shell {
         }
         let long = self
             .waiting_since
-            .is_some_and(|since| since.elapsed() >= std::time::Duration::from_secs(10));
+            .is_some_and(|since| since.elapsed() >= std::time::Duration::from_secs(30));
         if long && permissions::listed(p) == Some(true) {
-            log::info!("{p:?} still off 10 s after its pane opened");
+            log::info!("{p:?} still off 30 s after its pane opened");
             self.still_off = true;
             assist::show_step(p, assist::Step::StillOff);
         }
@@ -4468,8 +4489,8 @@ impl Shell {
             // Without Claude Code or Codex the user sets up another client
             // by hand: give them the command to paste.
             if none {
-                if native::confirm(title, &text, t("Copy Command", "复制命令")) {
-                    native::copy(&super::setup::mcp_command());
+                if native::confirm(title, &text, t("Copy Config", "复制配置")) {
+                    native::copy(&super::setup::mcp_config());
                 }
             } else {
                 native::alert(title, &text);
@@ -4484,7 +4505,8 @@ impl Shell {
 
     /// The agents that loaded the tools since Agent Screen started, by name.
     fn agents_ready(&self) -> Option<String> {
-        match self.agent_ready.as_slice() {
+        let names: Vec<String> = self.agent_ready.iter().map(|c| shown_client(c)).collect();
+        match names.as_slice() {
             [] => None,
             [one] => Some(one.clone()),
             [rest @ .., last] => Some(format!("{} {} {last}", rest.join(", "), t("and", "和"))),
@@ -4521,7 +4543,7 @@ impl Shell {
         let earlier = self
             .tools_last
             .as_ref()
-            .map(|(client, at)| (client.clone(), crate::i18n::day(*at)));
+            .map(|(client, at)| (shown_client(client), crate::i18n::day(*at)));
         let connecting = self.connecting;
         let Some(handle) = self.setup else { return };
         let registered = self.registered.clone();
