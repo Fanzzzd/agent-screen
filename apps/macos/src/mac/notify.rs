@@ -327,7 +327,7 @@ pub fn update(display: u32, agent: &str, task: &str, note: Option<Note>) {
             ),
         ),
         Note::Help { reason, .. } => (
-            tf!("{agent} needs your help", "{agent} 需要你帮忙"),
+            tf!("{agent} needs your help", "{agent} 需要你的协助"),
             reason.clone(),
         ),
         Note::Window { app, holder: None } => (
@@ -337,7 +337,7 @@ pub fn update(display: u32, agent: &str, task: &str, note: Option<Note>) {
             ),
             t(
                 "Choose Hand Over or Keep on the card under the menu bar icon.",
-                "在菜单栏图标下的卡片中选择交给它或保留。",
+                "请在菜单栏图标下的卡片中选择交给它或保留。",
             )
             .to_string(),
         ),
@@ -346,9 +346,11 @@ pub fn update(display: u32, agent: &str, task: &str, note: Option<Note>) {
             holder: Some((holder, place)),
         } => {
             use agent_screen_model::held::Place;
+            // The card's second button names the holder here, so say only
+            // where to answer.
             let choose = t(
-                "Choose Hand Over or Keep on the card under the menu bar icon.",
-                "在菜单栏图标下的卡片中选择交给它或保留。",
+                "Answer on the card under the menu bar icon.",
+                "请在菜单栏图标下的卡片中回答。",
             );
             let where_it_is = match place {
                 Place::Review => tf!(
@@ -399,11 +401,14 @@ pub fn update(display: u32, agent: &str, task: &str, note: Option<Note>) {
             ),
         ),
         Note::Review { windows } => (
-            tf!("{agent} is done with its display", "{agent} 用完了显示器"),
+            tf!(
+                "{agent} is done with its display",
+                "{agent} 已结束使用显示器"
+            ),
             windows_waiting(*windows),
         ),
         Note::Disconnected { windows } => (
-            tf!("{agent} disconnected", "{agent} 的连接断了"),
+            tf!("{agent} disconnected", "{agent} 已断开连接"),
             if *windows == 1 {
                 t(
                     "1 window is still on its display",

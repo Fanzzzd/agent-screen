@@ -69,7 +69,7 @@ impl Render for InputBar {
                     help_card::clock(agent_screen_model::input_queue::IDLE_MS / 1000)
                 )),
             ),
-            _ => (Some(t("Move the mouse to stop", "动鼠标即可收回")), None),
+            _ => (Some(t("Move the mouse to stop", "动鼠标即可停止")), None),
         };
         let (shell, stop) = (self.shell.clone(), self.shell.clone());
         // The root fills the window; the bar keeps its own size, which
