@@ -146,18 +146,37 @@ struct Head {
     id: Option<Value>,
     #[serde(default)]
     method: Option<String>,
+    #[serde(default)]
+    params: Option<HeadParams>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct HeadParams {
+    /// The tool a tools/call names.
+    #[serde(default)]
+    name: Option<String>,
 }
 
 fn head(line: &[u8]) -> Head {
     serde_json::from_slice(line).unwrap_or(Head {
         id: None,
         method: None,
+        params: None,
     })
 }
 
-/// The client's requests the app hasn't answered, by id, with their
-/// method; `None` once the app's connection closed.
-type Inflight = Arc<Mutex<Option<HashMap<String, (Value, String)>>>>;
+/// A request the app hasn't answered: its id, its method and, for a tool
+/// call, the tool.
+#[derive(Clone)]
+struct Pending {
+    id: Value,
+    method: String,
+    tool: Option<String>,
+}
+
+/// The client's requests the app hasn't answered, by id; `None` once the
+/// app's connection closed.
+type Inflight = Arc<Mutex<Option<HashMap<String, Pending>>>>;
 
 /// An answer to a request the app can't serve: an error result the model
 /// can read for a tool call, a JSON-RPC error for anything else.
@@ -175,6 +194,18 @@ fn failure(id: &Value, method: &str, message: &str) -> Vec<u8> {
 }
 
 const CLOSED: &str = "The Agent Screen app closed the connection. Call the tool again.";
+/// For a call the app may have run before its connection closed: repeating
+/// one that types, launches or asks the user could do it twice.
+const MAY_HAVE_RUN: &str = "The Agent Screen app closed the connection while this call ran, so it may or may not have taken effect. Before you repeat it, check with a screenshot, get_window_state or list_windows.";
+
+/// What to tell the client about a request the app's closed connection
+/// left unanswered: a read-only tool is safe to call again.
+fn unanswered(pending: &Pending) -> &'static str {
+    match pending.tool.as_deref() {
+        Some(tool) if !crate::tools::read_only(tool) => MAY_HAVE_RUN,
+        _ => CLOSED,
+    }
+}
 const NO_ANSWER: &str = "The Agent Screen app did not answer in time. Call the tool again; if it keeps failing, ask the user to quit and reopen Agent Screen.";
 const TOO_OLD: &str = "The running Agent Screen app is older than this MCP server and can't serve it. Ask the user to quit and reopen Agent Screen.";
 
@@ -228,8 +259,9 @@ where
         if line.last() != Some(&b'\n') {
             line.push(b'\n');
         }
-        let Head { id, method } = head(&line);
+        let Head { id, method, params } = head(&line);
         let request = id.clone().zip(method.clone());
+        let tool = params.and_then(|p| p.name);
         match method.as_deref() {
             Some("initialize") => {
                 initialize = serde_json::from_slice(&line).ok();
@@ -273,7 +305,15 @@ where
                 let mut inflight = current.inflight.lock().unwrap();
                 if let Some(map) = inflight.as_mut() {
                     if let Some((id, method)) = &request {
-                        map.insert(id.to_string(), (id.clone(), method.clone()));
+                        let tool = (method == "tools/call").then(|| tool.clone()).flatten();
+                        map.insert(
+                            id.to_string(),
+                            Pending {
+                                id: id.clone(),
+                                method: method.clone(),
+                                tool,
+                            },
+                        );
                     }
                     registered = true;
                 }
@@ -378,7 +418,7 @@ async fn forward(
             Ok(0) | Err(_) => break,
             Ok(_) => {}
         }
-        let Head { id, method } = head(&line);
+        let Head { id, method, .. } = head(&line);
         if method.is_none()
             && let Some(id) = id
         {
@@ -398,9 +438,9 @@ async fn forward(
     }
     let left = inflight.lock().unwrap().take().unwrap_or_default();
     let mut left: Vec<_> = left.into_values().collect();
-    left.sort_by_key(|(id, _)| id.to_string());
-    for (id, method) in left {
-        let _ = to_client.send(failure(&id, &method, CLOSED));
+    left.sort_by_key(|p| p.id.to_string());
+    for pending in left {
+        let _ = to_client.send(failure(&pending.id, &pending.method, unanswered(&pending)));
     }
 }
 
@@ -666,19 +706,31 @@ mod tests {
             .send(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))
             .await;
         client.send(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "computer" } })).await;
+        client.send(json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": { "name": "list_windows" } })).await;
         app.next().await;
         app.next().await;
-        // The app quits with the call out.
+        app.next().await;
+        // The app quits with both calls out.
         drop(app);
+        let text = |reply: &Value| {
+            reply["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
         let failed = client.next().await;
         assert_eq!(failed["id"], 2);
         assert_eq!(failed["result"]["isError"], true);
-        assert!(
-            failed["result"]["content"][0]["text"]
-                .as_str()
-                .unwrap()
-                .contains("closed the connection")
-        );
+        // computer may have typed or clicked: repeating it blindly could
+        // do it twice.
+        let said = text(&failed);
+        assert!(said.contains("closed the connection"), "{said}");
+        assert!(said.contains("may or may not have taken effect"), "{said}");
+        assert!(!said.contains("Call the tool again"), "{said}");
+        // list_windows only reads: calling it again is safe.
+        let read = client.next().await;
+        assert_eq!(read["id"], 4);
+        assert!(text(&read).contains("Call the tool again"), "{read}");
 
         // The next call reaches the new app after the replayed handshake.
         client

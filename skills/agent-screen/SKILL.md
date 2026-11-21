@@ -20,13 +20,13 @@ The step is done when `list_windows` shows each window you will touch.
 
 ## Operating the windows
 
-Use either toolset on windows that are on your display:
+Prefer the Agent Screen tools on windows that are on your display:
 
 - **Agent Screen**: `computer` for the whole display, or `get_window_state` and `act_on_element` for one window. Coordinates are screenshot pixels. `create_display` returns width and height in points and `scale` (screenshot pixels per point). The default 1280×800 display has scale 1.
 - Screenshots and trees cost tokens. Pass `screenshot: false` to `computer` for steps you don't need to see, such as a run of key presses, and `image: false` to `get_window_state` when the tree is enough. A large window's tree costs thousands of tokens: pass `max_depth` to `get_window_state` to see the top levels first, and `result: "changes"` to `act_on_element` to get back only the elements that changed.
 - When the app on your display is also the user's front app, with another of its windows focused on their screen, nothing is posted to it: a left click presses the control or picks the field under it through accessibility, `type` fills the picked field, and Return, Escape, BackSpace and cmd+a act on it. Other input waits for that window to lose focus and may return `input_pending` with a `request_id`: repeat the action or call `input_queue` with `wait`. The text before the screenshot says when this happened.
 - After an action whose result lands later, such as a sent message or a page load, call `wait_for_change` instead of sleeping and taking another screenshot. It returns when the window changes, or when an element you name by `role` or `text` `appears` or `disappears`, with only the changed elements.
-- **Built-in computer use** (Codex `get_app_state`, `click`, `type_text`, ...): works on the app's window wherever it is, so place the window first.
+- **Built-in computer use** (Codex `get_app_state`, `click`, `type_text`, ...) also reaches a window on your display, since it works on the app's window wherever it is: place the window first. Use it only for a step the Agent Screen tools can't do.
 
 ## While you work
 

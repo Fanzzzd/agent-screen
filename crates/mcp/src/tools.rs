@@ -80,18 +80,33 @@ struct Hints {
     read_only: bool,
     destructive: bool,
     idempotent: bool,
+    /// Reaches beyond the Mac: a URL in a browser, or GitHub.
+    open_world: bool,
 }
 
 const PLAIN: Hints = Hints {
     read_only: false,
     destructive: false,
     idempotent: false,
+    open_world: false,
 };
 const READ_ONLY: Hints = Hints {
     read_only: true,
-    destructive: false,
-    idempotent: false,
+    ..PLAIN
 };
+const OPEN_WORLD: Hints = Hints {
+    open_world: true,
+    ..PLAIN
+};
+
+/// Whether tool `name` only reads, so a call cut off midway is safe to
+/// repeat.
+pub fn read_only(name: &str) -> bool {
+    definitions()
+        .iter()
+        .find(|t| t["name"] == name)
+        .is_some_and(|t| t["annotations"]["readOnlyHint"] == true)
+}
 
 fn tool(name: &str, title: &str, description: &[&str], input: Value, hints: Hints) -> Value {
     json!({
@@ -104,7 +119,7 @@ fn tool(name: &str, title: &str, description: &[&str], input: Value, hints: Hint
             "readOnlyHint": hints.read_only,
             "destructiveHint": hints.destructive,
             "idempotentHint": hints.idempotent,
-            "openWorldHint": false
+            "openWorldHint": hints.open_world
         }
     })
 }
@@ -172,7 +187,7 @@ pub fn definitions() -> Vec<Value> {
                 }),
                 &["title", "expected", "actual"],
             ),
-            PLAIN,
+            OPEN_WORLD,
         ),
         always_load(tool(
             "create_display",
@@ -484,7 +499,7 @@ pub fn definitions() -> Vec<Value> {
                 }),
                 &["display_id", "app"],
             ),
-            PLAIN,
+            OPEN_WORLD,
         ),
         tool(
             "set_disposition",
@@ -786,13 +801,20 @@ pub async fn run(
             Ok(Output::Object(Value::Object(reply)))
         }
         "end_display" => {
+            let display = a.require_int("display_id")?;
+            // What is on the display as it ends: Handovers go back, the
+            // rest waits for the user's review.
+            let windows = control
+                .call("listWindows", json!({ "displayId": display }))
+                .await
+                .ok();
             control
-                .call(
-                    "endDisplay",
-                    json!({ "displayId": a.require_int("display_id")? }),
-                )
+                .call("endDisplay", json!({ "displayId": display }))
                 .await?;
-            Ok(Output::Object(json!({ "ended": true })))
+            Ok(Output::Object(match windows {
+                Some(list) => end_output(&list),
+                None => json!({ "ended": true }),
+            }))
         }
         "wait_for_control" => {
             let reply = control
@@ -1989,6 +2011,23 @@ async fn window_state(
     })
 }
 
+/// computer's duration for `action`: 1 s by default, refused past `max`
+/// instead of cut short without a word.
+fn duration(a: &Args<'_>, action: &str, max: f64) -> Result<f64, ControlError> {
+    let seconds = a.number("duration")?.unwrap_or(1.0);
+    if !(0.0..=max).contains(&seconds) {
+        let more = if action == "wait" {
+            "; call wait again to wait longer"
+        } else {
+            ""
+        };
+        return Err(ControlError::invalid(format!(
+            "duration for {action} is 0 to {max} seconds{more}"
+        )));
+    }
+    Ok(seconds)
+}
+
 async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, ControlError> {
     let display = a.require_int("display_id")?;
     let action = a
@@ -2112,7 +2151,7 @@ async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, Control
                     json!({
                         "displayId": display,
                         "keys": require_text(text_arg, "hold_key")?,
-                        "seconds": a.number("duration")?.unwrap_or(1.0)
+                        "seconds": duration(a, "hold_key", 10.0)?
                     }),
                 )
                 .await?;
@@ -2198,7 +2237,7 @@ async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, Control
         }
         _ => {
             // wait
-            let seconds = a.number("duration")?.unwrap_or(1.0).clamp(0.0, 30.0);
+            let seconds = duration(a, "wait", 30.0)?;
             tokio::time::sleep(Duration::from_secs_f64(seconds)).await;
             return Ok(vec![text(format!("Waited {seconds} s."))]);
         }
@@ -2242,6 +2281,51 @@ async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, Control
         return Ok(vec![text(header)]);
     }
     Ok(vec![text(header), image(&get("data"), &get("mimeType"))])
+}
+
+/// What end_display tells the agent, from the display's windows as it
+/// ended: which went back to the user and which wait for their review.
+fn end_output(list: &Object) -> Value {
+    let windows = list
+        .get("windows")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let (returned, review): (Vec<Value>, Vec<Value>) = windows
+        .into_iter()
+        .filter(|w| w.get("offDisplay") != Some(&Value::Bool(true)))
+        .partition(|w| w["origin"] == "handedOver");
+    let returned: Vec<Value> = returned.iter().map(|w| w["windowId"].clone()).collect();
+    let review: Vec<Value> = review
+        .iter()
+        .map(|w| {
+            json!({
+                "window_id": w["windowId"],
+                "app": w.get("app").cloned().unwrap_or(Value::Null),
+                "disposition": w["disposition"],
+            })
+        })
+        .collect();
+    let mut note = if review.is_empty() {
+        "The display closed: none of your windows was left on it.".to_string()
+    } else {
+        let unset = review.iter().filter(|w| w["disposition"].is_null()).count();
+        let mut note = format!(
+            "The display waits for the user to review its {} window{}.",
+            review.len(),
+            if review.len() == 1 { "" } else { "s" }
+        );
+        if unset > 0 {
+            note.push_str(&format!(
+                " {unset} had no disposition, so the user decides them unprompted."
+            ));
+        }
+        note
+    };
+    if !returned.is_empty() {
+        note.push_str(" The windows the user handed over go back to them.");
+    }
+    json!({ "ended": true, "review": review, "returned": returned, "note": note })
 }
 
 /// What launch_app returns: the window, or why there is none and what to
@@ -2312,6 +2396,75 @@ fn launch_reason(reply: &Value) -> Value {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn end_output_says_what_waits_for_review_and_what_went_back() {
+        let list = |windows: Value| -> Object {
+            json!({ "windows": windows, "scale": 1.0 })
+                .as_object()
+                .unwrap()
+                .clone()
+        };
+        let out = end_output(&list(json!([
+            { "windowId": 1, "app": "Safari", "origin": "launched", "disposition": "keep" },
+            { "windowId": 2, "app": "TextEdit", "origin": "placed", "disposition": null },
+            { "windowId": 3, "app": "Notes", "origin": "handedOver", "disposition": null },
+            { "windowId": 4, "app": "Safari", "origin": "launched", "offDisplay": true }
+        ])));
+        assert_eq!(out["returned"], json!([3]));
+        assert_eq!(out["review"].as_array().unwrap().len(), 2, "{out}");
+        assert_eq!(out["review"][0]["window_id"], 1);
+        let note = out["note"].as_str().unwrap();
+        assert!(note.contains("review its 2 windows"), "{note}");
+        assert!(note.contains("1 had no disposition"), "{note}");
+        assert!(note.contains("go back to them"), "{note}");
+        let empty = end_output(&list(json!([])));
+        assert_eq!(empty["review"], json!([]));
+        assert!(
+            empty["note"].as_str().unwrap().contains("closed"),
+            "{empty}"
+        );
+    }
+
+    #[test]
+    fn durations_past_their_limit_fail_with_it() {
+        let args = |d: Value| json!({ "duration": d }).as_object().unwrap().clone();
+        let long = args(json!(45));
+        let error = duration(&Args(&long), "wait", 30.0).unwrap_err();
+        assert!(
+            error.message.contains("0 to 30 seconds"),
+            "{}",
+            error.message
+        );
+        assert!(
+            error.message.contains("call wait again"),
+            "{}",
+            error.message
+        );
+        let held = args(json!(12));
+        assert!(duration(&Args(&held), "hold_key", 10.0).is_err());
+        let fine = args(json!(2.5));
+        assert_eq!(duration(&Args(&fine), "wait", 30.0).unwrap(), 2.5);
+        let none = Object::new();
+        assert_eq!(duration(&Args(&none), "wait", 30.0).unwrap(), 1.0);
+    }
+
+    #[test]
+    fn hints_say_which_tools_reach_beyond_the_mac_and_which_only_read() {
+        let tools = definitions();
+        for tool in &tools {
+            let name = tool["name"].as_str().unwrap();
+            let open = tool["annotations"]["openWorldHint"] == true;
+            assert_eq!(
+                open,
+                matches!(name, "launch_app" | "report_issue"),
+                "{name}"
+            );
+        }
+        assert!(read_only("list_windows") && read_only("get_window_state"));
+        assert!(!read_only("computer") && !read_only("launch_app"));
+        assert!(!read_only("no_such_tool"));
+    }
+
     use super::*;
 
     fn state(before: Option<&str>, tree: &str) -> WindowState {
