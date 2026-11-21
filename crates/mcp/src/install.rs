@@ -374,6 +374,9 @@ fn with_codex_entry(text: &str, exe: &str) -> Result<(String, bool), String> {
         }
         servers.insert(name, Item::Table(table));
     }
+    // A comment line inside an inline table is valid only from TOML 1.1,
+    // and Codex may read TOML 1.0: comments go in a standard table only.
+    let commented = servers.get(name).is_some_and(Item::is_table);
     let entry = servers
         .get_mut(name)
         .and_then(Item::as_table_like_mut)
@@ -387,14 +390,14 @@ fn with_codex_entry(text: &str, exe: &str) -> Result<(String, bool), String> {
     }
     if !entry.contains_key("tool_timeout_sec") {
         entry.insert("tool_timeout_sec", value(TOOL_TIMEOUT));
-        if let Some(mut key) = entry.key_mut("tool_timeout_sec") {
+        if let Some(mut key) = entry.key_mut("tool_timeout_sec").filter(|_| commented) {
             key.leaf_decor_mut()
                 .set_prefix("# wait_for_control can wait up to 10 minutes for the user.\n");
         }
     }
     if !entry.contains_key("startup_timeout_sec") {
         entry.insert("startup_timeout_sec", value(STARTUP_TIMEOUT));
-        if let Some(mut key) = entry.key_mut("startup_timeout_sec") {
+        if let Some(mut key) = entry.key_mut("startup_timeout_sec").filter(|_| commented) {
             key.leaf_decor_mut()
                 .set_prefix("# A cold start of the app can take 15 s.\n");
         }
@@ -552,6 +555,22 @@ mod tests {
             assert!(codex_runs(&text, EXE), "{text}");
             assert!(text.parse::<toml_edit::DocumentMut>().is_ok());
         }
+    }
+
+    #[test]
+    fn an_inline_entry_gets_no_comment_lines() {
+        let before = "[mcp_servers]\nagent-screen = { command = \"/old\", args = [\"mcp\"] }\n";
+        let (text, _) = with_codex_entry(before, EXE).unwrap();
+        assert!(!text.contains('#'), "{text}");
+        assert_eq!(
+            text.lines().count(),
+            2,
+            "the entry stays on one line: {text}"
+        );
+        assert!(
+            text.contains("tool_timeout_sec = 700") && text.contains("startup_timeout_sec = 30")
+        );
+        assert!(codex_runs(&text, EXE), "{text}");
     }
 
     #[test]
