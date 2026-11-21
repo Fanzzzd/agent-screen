@@ -531,7 +531,7 @@ static COUNTDOWN: std::sync::Once = std::sync::Once::new();
 /// Count down from 3 on the sign, once per run, and return once the count
 /// is over. A script calls it after its setup, right before its first step
 /// that needs hands off. A script that doesn't call it counts down at its
-/// first real input, create_display or launch_app. Later calls return at
+/// first real input, create_display, launch_app or debugShow. Later calls return at
 /// once; other threads wait for the count to end. Outside `run`, nothing.
 pub fn countdown() {
     if !RUNNING.load(Ordering::SeqCst) {
@@ -542,7 +542,14 @@ pub fn countdown() {
 
 /// Count down first when a tool or control method is one that acts.
 pub(crate) fn countdown_before(method: &str) {
-    const ACTS: &[&str] = &["create_display", "createDisplay", "launch_app", "launchApp"];
+    // debugShow puts a surface on the user's screen.
+    const ACTS: &[&str] = &[
+        "create_display",
+        "createDisplay",
+        "launch_app",
+        "launchApp",
+        "debugShow",
+    ];
     if ACTS.contains(&method) {
         countdown();
     }

@@ -31,6 +31,7 @@ fn test() -> Result<()> {
     // The window is 520 pt wide.
     let window = || -> Option<Frame> { windows_of(pid).into_iter().find(|w| w.width == 520.0) };
 
+    agent_screen_tests::countdown();
     control.call("debugShow", json!({ "surface": "settings" }))?;
     sleep_ms(1200);
     let shown = window();

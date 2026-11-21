@@ -27,14 +27,15 @@ import AppKit
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 
-/// Not one of Agent Screen's displays ("Agent Screen N") or AeroSpace's
-/// closet (vendor 0x4145, model 1).
+/// Not one of Agent Screen's displays (vendor 0x5353, as
+/// `mac::cg::is_agent_screen`) or AeroSpace's closet (vendor 0x4145,
+/// model 1).
 func real(_ screen: NSScreen) -> Bool {
-  if screen.localizedName.hasPrefix("Agent Screen") { return false }
   let key = NSDeviceDescriptionKey("NSScreenNumber")
   guard let number = screen.deviceDescription[key] as? NSNumber else { return true }
   let id = CGDirectDisplayID(number.uint32Value)
-  return !(CGDisplayVendorNumber(id) == 0x4145 && CGDisplayModelNumber(id) == 1)
+  let vendor = CGDisplayVendorNumber(id)
+  return vendor != 0x5353 && !(vendor == 0x4145 && CGDisplayModelNumber(id) == 1)
 }
 
 /// One screen's copy of the sign.

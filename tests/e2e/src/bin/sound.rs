@@ -23,10 +23,12 @@ fn main() -> ExitCode {
         skip("no Electron.app; copy one to target/e2e or set E2E_ELECTRON");
     }
     let muted = osascript("output muted of (get volume settings)") == "true";
-    osascript("set volume output muted true");
     let result = run(|| {
         start_test_app(&[])?;
         let control = Control::connect()?;
+        // Muting changes the user's Mac: hands off from here.
+        agent_screen_tests::countdown();
+        osascript("set volume output muted true");
         let result = test(&control, &electron);
         stop_test_app();
         result
