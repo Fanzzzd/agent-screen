@@ -246,7 +246,8 @@ pub fn definitions() -> Vec<Value> {
                 "go in through accessibility. Other input waits up to 30 s for that window to lose focus, then returns",
                 "input_pending with a request_id: repeat the action or call input_queue wait. It still runs by itself once the",
                 "user leaves, unless another action of yours replaces it. The text says how input went in.",
-                "For a drag left_click_drag can't express, use left_mouse_down, mouse_move steps, then left_mouse_up.",
+                "For a drag left_click_drag can't express, use left_mouse_down, mouse_move steps, then left_mouse_up;",
+                "without a coordinate they act at the pointer.",
                 "A drag that needs the user's pointer, such as one between windows, returns input_pending: nothing was sent; see input_queue.",
                 "Click with the normal background route first. If the screenshot shows a click had no effect, retry the same left,",
                 "double or triple click with real_input true, which asks the user to allow their real pointer. Never on the first try.",
@@ -341,7 +342,8 @@ pub fn definitions() -> Vec<Value> {
                 "handedOver (one of their windows, named in window), or instructions (user_reply holds their words: follow",
                 "them for this step). Take a screenshot before you go on. On a timeout the request stays open; call",
                 "wait_for_control to keep waiting. If you got past it yourself, call it with withdraw: true. When the user",
-                "answers in this chat instead (\"done, go on\"), pass their words as user_instruction to close the request.",
+                "answers in this chat instead (\"done, go on\"), pass their words as user_instruction to close the request;",
+                "use it only for an explicit answer the user gave in this chat.",
             ],
             object(
                 json!({
@@ -2966,6 +2968,12 @@ mod tests {
             "{description}"
         );
         assert_eq!(control["inputSchema"]["required"], json!(["display_id"]));
+        let help = find("request_help");
+        let description = help["description"].as_str().unwrap();
+        assert!(
+            description.contains("only for an explicit answer the user gave in this chat"),
+            "{description}"
+        );
         let place = find("place_window");
         assert_eq!(
             place["inputSchema"]["properties"]["user_instruction"]["type"],
