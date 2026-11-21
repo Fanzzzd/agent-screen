@@ -1,7 +1,8 @@
 //! get_window_state with max_depth and act_on_element with result: changes
 //! or none send a fraction of the full tree (#30). On an Electron mail app
 //! each call sent about 200 elements, over 6,000 tokens, and every press
-//! sent them again. Here Calculator stands in.
+//! sent them again. get_window_state with image: false and computer with
+//! screenshot: false leave the picture out (#282). Here Calculator stands in.
 //!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e compactstate
 //!
@@ -84,6 +85,36 @@ fn test() -> Result<()> {
         "max_depth leaves out deeper elements and says how many",
         shallow_len * 2 < full_len && shallow.first_text().contains("more inside"),
         format!("{shallow_len} of {full_len} bytes"),
+    );
+
+    // The tree without the window image, and a key without a screenshot
+    // (#282): text only, and the defaults keep the picture.
+    let treeonly = client.tool("get_window_state", at(json!({ "image": false })))?;
+    check(
+        "get_window_state with image false returns the tree only",
+        !has_image(&treeonly) && has_image(&full) && treeonly.first_text().contains("elements"),
+        treeonly.first_text().lines().next().unwrap_or_default(),
+    );
+    let key = |extra: serde_json::Value| {
+        let mut args = json!({ "display_id": id, "action": "key", "text": "Escape" });
+        args.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        client.tool("computer", args)
+    };
+    let quiet_key = key(json!({ "screenshot": false }))?;
+    check(
+        "a key with screenshot false returns its text only",
+        !quiet_key.is_error
+            && !has_image(&quiet_key)
+            && quiet_key.first_text().contains("without a screenshot"),
+        quiet_key.first_text(),
+    );
+    let shot_key = key(json!({}))?;
+    check(
+        "a key without it still returns the screenshot",
+        has_image(&shot_key),
+        shot_key.first_text(),
     );
 
     // The full tree again, so changes compare with it.
