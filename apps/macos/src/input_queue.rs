@@ -3,6 +3,7 @@
 //! executor, and reports back how it ended.
 
 use crate::model::{DisplayId, Displays, Owner as DisplayOwner, Rect, WindowTarget};
+use agent_screen_model::front_hold;
 use agent_screen_model::input_queue::{EnqueueError, GrantEnd, Owner, Queue, RequestId, Status};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -72,6 +73,11 @@ pub struct InputQueue {
     /// reads it.
     driven: BTreeSet<RequestId>,
     outcomes: BTreeMap<RequestId, Outcome>,
+    /// The front hold going on, if any (`agent_screen_model::front_hold`).
+    hold: Option<front_hold::Hold>,
+    /// How long a front request waits before its display's card says so:
+    /// `WAITING_LINE_MS`, shorter in scripts (`debugFrontWait`).
+    line_ms: u64,
 }
 
 /// What a front request's background run came to: the reply's result, or
@@ -213,6 +219,8 @@ impl Default for InputQueue {
             previews: BTreeSet::new(),
             driven: BTreeSet::new(),
             outcomes: BTreeMap::new(),
+            hold: None,
+            line_ms: WAITING_LINE_MS,
         }
     }
 }
@@ -307,6 +315,75 @@ impl InputQueue {
         Ok(id)
     }
 
+    /// The app display `display`'s front requests wait on: the app a front
+    /// hold takes the front from. None when none waits there.
+    pub fn waits_on(&self, display: DisplayId) -> Option<i32> {
+        front_hold::waits_on(
+            display,
+            self.queue
+                .fronts()
+                .filter_map(|r| Some((r.owner.display, self.fronts.get(&r.id)?.pid))),
+        )
+    }
+
+    /// Display `display`'s front requests on app `app` still waiting or
+    /// running.
+    pub fn pending_on(&self, display: DisplayId, app: i32) -> usize {
+        self.held_requests(display, app, |s| {
+            matches!(s, Status::Queued | Status::Running)
+        })
+    }
+
+    /// Display `display`'s front requests on app `app` running now.
+    pub fn running_on(&self, display: DisplayId, app: i32) -> usize {
+        self.held_requests(display, app, |s| s == Status::Running)
+    }
+
+    fn held_requests(
+        &self,
+        display: DisplayId,
+        app: i32,
+        status: impl Fn(Status) -> bool,
+    ) -> usize {
+        self.queue
+            .requests()
+            .filter(|r| r.front && r.owner.display == display && status(r.status))
+            .filter(|r| self.fronts.get(&r.id).is_some_and(|f| f.pid == app))
+            .count()
+    }
+
+    /// A front hold of display `display`'s actions on app `app` starts;
+    /// false while another goes on.
+    pub fn start_hold(&mut self, display: DisplayId, app: i32) -> bool {
+        let now = self.now();
+        if !front_hold::can_start(self.hold.as_ref(), now) {
+            return false;
+        }
+        self.hold = Some(front_hold::Hold::new(display, app, now));
+        true
+    }
+
+    /// The hold ends: its actions not yet started wait again.
+    pub fn end_hold(&mut self) {
+        if let Some(hold) = &mut self.hold {
+            hold.ending = true;
+        }
+    }
+
+    pub fn clear_hold(&mut self) {
+        self.hold = None;
+    }
+
+    pub fn hold(&self) -> Option<front_hold::Hold> {
+        self.hold
+    }
+
+    /// Whether a front request of display `display` on app `app` may start
+    /// now (`front_hold::may_start`).
+    pub fn may_start(&self, display: DisplayId, app: i32) -> bool {
+        front_hold::may_start(self.hold.as_ref(), display, app)
+    }
+
     /// What front request `id` does.
     pub fn front(&self, id: RequestId) -> Option<&Front> {
         self.fronts.get(&id)
@@ -366,6 +443,12 @@ impl InputQueue {
         self.tick();
     }
 
+    /// Test hook (`debugFrontWait`): show the waiting line after `ms`, 0
+    /// for `WAITING_LINE_MS`.
+    pub fn set_line_ms_for_tests(&mut self, ms: u64) {
+        self.line_ms = if ms == 0 { WAITING_LINE_MS } else { ms };
+    }
+
     /// The app a front request of `display` has waited on for at least
     /// `WAITING_LINE_MS`, for the display's card: a quiet line, with no
     /// notification. The agent's next action replaces the request, and the
@@ -377,7 +460,7 @@ impl InputQueue {
             .filter(|r| {
                 r.owner.display == display
                     && (self.previews.contains(&r.id)
-                        || now.saturating_sub(r.times.asked) >= WAITING_LINE_MS)
+                        || now.saturating_sub(r.times.asked) >= self.line_ms)
             })
             .find_map(|r| Some(self.fronts.get(&r.id)?.app.clone()))
     }
@@ -389,7 +472,7 @@ impl InputQueue {
         let now = self.now();
         let id = self
             .queue
-            .enqueue_front(
+            .enqueue_front_beside(
                 owner,
                 "preview-waiting".into(),
                 "Preview the waiting line".into(),

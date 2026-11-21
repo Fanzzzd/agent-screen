@@ -598,6 +598,42 @@ static OWN_INPUT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::n
 /// When the user first used the Mac during the run, in seconds into it.
 static YOU_ACTED: std::sync::Mutex<Option<u64>> = std::sync::Mutex::new(None);
 
+/// With E2E_ABORT_ON_INPUT=1, a run the user touched stops acting: from
+/// then on every action, new display and real input of the script fails,
+/// so it ends through its usual cleanup. Reads, ends and closes still go.
+pub fn stop_if_you_acted(what: &str) -> Result<()> {
+    const ACTS: &[&str] = &[
+        "click",
+        "mouseDown",
+        "mouseUp",
+        "move",
+        "drag",
+        "scroll",
+        "type",
+        "key",
+        "holdKey",
+        "elementAction",
+        "launchApp",
+        "placeWindow",
+        "createDisplay",
+        "computer",
+        "act_on_element",
+        "launch_app",
+        "place_window",
+        "create_display",
+        "hid",
+    ];
+    if !env_is("E2E_ABORT_ON_INPUT", "1") || !ACTS.contains(&what) {
+        return Ok(());
+    }
+    match *YOU_ACTED.lock().unwrap_or_else(|e| e.into_inner()) {
+        Some(at) => {
+            anyhow::bail!("stopped: you used the Mac {at} s into the run, so {what} wasn't sent")
+        }
+        None => Ok(()),
+    }
+}
+
 /// Watch for the user's mouse and keyboard while the script runs. A run
 /// they touched may fail for that alone: the sign and the result say so.
 fn watch_for_you() {
@@ -692,6 +728,7 @@ impl Drop for SignHidden {
 /// Real pointer and key input; `hover` with a region captures it, without
 /// the sign.
 pub fn hid(args: &[&str]) -> Result<String> {
+    stop_if_you_acted("hid")?;
     let _hidden = (args.first() == Some(&"hover") && args.len() > 3).then(hide_sign);
     OWN_INPUT.store(now_ms() as u64, Ordering::SeqCst);
     let result = sh(tool("hid")?, args);

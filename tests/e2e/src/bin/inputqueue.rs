@@ -9,7 +9,9 @@
 //! the grant. A menu item an Electron app needs a real click for asks on
 //! the same card, which names it, and so does a double click. Three
 //! preview drags ask on one card, and allowed, with the second shown
-//! running, the card shows Stop. Captures the cards and the bar under
+//! running, the card shows Stop. With an action waiting for you to leave
+//! an app as well, the asking card adds a row with Let the agent continue.
+//! Captures the cards and the bar under
 //! target/e2e. The card shows on your screen for about half a minute.
 //!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e inputqueue
@@ -226,6 +228,48 @@ fn test(control: &Control, key: &str, id: &Value, pid: u32) -> Result<()> {
         let file = capture("inputqueue-ask", [c.x, c.y, c.width, c.height])?;
         println!("     card: {}", file.display());
     }
+
+    // An action waiting for you to leave an app, as well: the card gets a
+    // row for it with Let the agent continue. Withdrawn after, so the rest
+    // sees only the preview request.
+    show("waiting-line")?;
+    sleep_ms(800);
+    let with_line = card();
+    let (ok, why) = with_line.as_ref().map_or((false, "no card".into()), |c| {
+        fits(c, &["input-let-continue", "input-decline", "input-allow"])
+    });
+    check(
+        "with an action waiting for you to leave an app, the card adds a row with Let the agent continue",
+        ok,
+        why,
+    );
+    if let Some(c) = &with_line {
+        let file = capture("inputqueue-waiting", [c.x, c.y, c.width, c.height])?;
+        println!("     card with a waiting line: {}", file.display());
+    }
+    let all = control.call(
+        "inputQueue",
+        json!({ "sessionKey": key, "displayId": id, "action": "status" }),
+    )?;
+    let waiting = all["requests"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|r| r["state"] == "waiting_for_app")
+        .and_then(|r| r["requestId"].as_u64());
+    if let Some(n) = waiting {
+        control.call(
+            "inputQueue",
+            json!({ "sessionKey": key, "displayId": id, "action": "withdraw", "requestId": n }),
+        )?;
+        sleep_ms(300);
+    }
+    check(
+        "the waiting action is withdrawn, and its row goes",
+        waiting.is_some()
+            && control.call("debugCard", json!({}))?["buttons"]["input-let-continue"].is_null(),
+        all.to_string(),
+    );
 
     // The same preview token: approves the request already waiting.
     show("input-queue-approved")?;

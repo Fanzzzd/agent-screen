@@ -57,6 +57,25 @@ pub fn tell(
     });
 }
 
+/// The user pressed "Let the agent continue" for display `display` in
+/// `window`: it becomes key, as Agent Screen takes the front with it, and
+/// the actions waiting there for the user to leave an app run now.
+pub fn let_continue(
+    shell: &WeakEntity<Shell>,
+    display: DisplayId,
+    window: &gpui::Window,
+    cx: &mut App,
+) {
+    let Some(ns) = crate::mac::native::ns_window(window) else {
+        return;
+    };
+    crate::mac::native::make_key(&ns);
+    let number = ns.windowNumber() as u32;
+    tell(shell, cx, move |shell, cx| {
+        crate::control::front_hold::press(shell.core.clone(), display, number, cx);
+    });
+}
+
 thread_local! {
     /// Windows already went back before quitting.
     static TIDIED: Cell<bool> = const { Cell::new(false) };

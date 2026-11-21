@@ -171,6 +171,19 @@ bool SSMakeSelfFront(CGWindowID windowID) {
     return setFront(&own, windowID, 0x200) == 0;
 }
 
+// Make `pid` WindowServer's front process, with `windowID` its key
+// window: the front hold gives the user's app the front back with their
+// window key, as their click on it would.
+bool SSSetFrontProcess(pid_t pid, CGWindowID windowID) {
+    SSResolve();
+    typedef int32_t (*SetFrontFn)(SSProcessSerialNumber *, CGWindowID, uint32_t);
+    SetFrontFn setFront = (SetFrontFn)dlsym(RTLD_DEFAULT, "_SLPSSetFrontProcessWithOptions");
+    SSProcessSerialNumber psn = {0, 0};
+    if (setFront == NULL || SS.getProcessForPID == NULL || SS.getProcessForPID(pid, &psn) != 0) return false;
+    // 0x200: user generated.
+    return setFront(&psn, windowID, 0x200) == 0;
+}
+
 // How many Spaces hold `windowID`, -1 if SkyLight can't say. A window the
 // app ordered out, as a closed main window it keeps, is on none; a window
 // on another Space is on one the user isn't looking at.

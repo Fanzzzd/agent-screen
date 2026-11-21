@@ -30,6 +30,7 @@ unsafe extern "C" {
     fn SSFocusWithoutRaise(pid: i32, window: u32) -> bool;
     fn SSFrontPid() -> i32;
     fn SSMakeSelfFront(window: u32) -> bool;
+    fn SSSetFrontProcess(pid: i32, window: u32) -> bool;
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1296,7 +1297,7 @@ impl Forwarder {
 
 /// Whether window `id` is on one of Agent Screen's displays: an agent's,
 /// never the user's to hand focus back to.
-fn on_agent_display(id: u32) -> bool {
+pub fn on_agent_display(id: u32) -> bool {
     super::windows::find(id).is_some_and(|w| on_agent_display_at(w.bounds))
 }
 
@@ -2975,6 +2976,25 @@ pub fn note_viewer_press(viewer: u32) {
     if server != own && !unsafe { SSMakeSelfFront(viewer) } {
         log::warn!("input: WindowServer's front process stays {server}");
     }
+}
+
+/// WindowServer's front process, -1 if it can't say.
+pub fn server_front() -> i32 {
+    unsafe { SSFrontPid() }
+}
+
+/// Ask WindowServer to make Agent Screen its front process with its window
+/// number `window`, key already, as the key window: the front hold's start.
+/// Nothing counts Agent Screen as the front app yet: the hold does once
+/// `server_front` confirms it.
+pub fn take_front(window: u32) -> bool {
+    unsafe { SSMakeSelfFront(window) }
+}
+
+/// Make `pid` WindowServer's front process with its window `window` key,
+/// as the user's click on that window would: the front hold's hand-back.
+pub fn give_front(pid: i32, window: u32) -> bool {
+    unsafe { SSSetFrontProcess(pid, window) }
 }
 
 pub fn is_front(pid: i32) -> bool {

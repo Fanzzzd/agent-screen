@@ -344,7 +344,7 @@ pub const SCRIPTS: &[Script] = &[
     script("sessiondisplays", &[Displays, Windows, WindowAccess], Full, Agent, 2),
     script("settings", &[Settings], Core, Hook, 0).hands_off().env(&[("E2E_NOW", "1")]),
     script("shared", &[AgentInput], Full, Hook, 1).hands_off(),
-    script("sharedbrowser", &[AgentInput, Browser, Elements], Full, Hook, 1).hands_off(),
+    script("sharedbrowser", &[AgentInput, Browser, Elements, InputQueue], Full, Real, 1).hands_off(),
     script("signupcontrols", &[Elements, Browser], Full, Agent, 1),
     script("slowwindow", &[Windows, Browser], Full, Agent, 1),
     script("smoke", &[AgentInput, Screenshots], Full, Agent, 1).no_app().manual(NEEDS_APP),

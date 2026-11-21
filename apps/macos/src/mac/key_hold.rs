@@ -45,6 +45,11 @@ enum State {
         user: WindowTarget,
         /// A press or a full hold has asked for the end already.
         ending: bool,
+        /// Its owner ends it (`start_with`): a press or a full hold only
+        /// asks, in `asked`, and the owner calls `finish` once the user's
+        /// app is in front again.
+        owned: bool,
+        asked: Option<End>,
     },
     /// Sending on keys that reach the tap after the hold, until `until`.
     Draining {
@@ -80,6 +85,16 @@ unsafe impl Send for Tap {}
 unsafe impl Sync for Tap {}
 static TAP: OnceLock<Option<Tap>> = OnceLock::new();
 
+/// What a hold holds (`Hold::status`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Status {
+    /// Still holding: `typed`, a key the user typed; `asked`, why the
+    /// user's input asks it to end, for an owned hold.
+    Holding { typed: bool, asked: Option<End> },
+    /// It ended, at its own limit or by `finish`.
+    Ended,
+}
+
 /// A hold in progress. Dropping it ends the hold and sends its keys on.
 pub struct Hold {
     id: u64,
@@ -93,6 +108,19 @@ impl Hold {
             &*STATE.lock().unwrap_or_else(|e| e.into_inner()),
             State::Holding { id, .. } if *id == self.id
         )
+    }
+
+    /// What it holds, for an owner that ends it itself.
+    pub fn status(&self) -> Status {
+        match &*STATE.lock().unwrap_or_else(|e| e.into_inner()) {
+            State::Holding {
+                id, hold, asked, ..
+            } if *id == self.id => Status::Holding {
+                typed: hold.typed(),
+                asked: *asked,
+            },
+            _ => Status::Ended,
+        }
     }
 
     /// Its id, for a caller that ends it with `finish` itself.
@@ -120,6 +148,15 @@ impl Drop for Hold {
 /// Input still draining from an ended hold is held by the new one, behind
 /// what went out before it.
 pub fn start(user: WindowTarget) -> Option<Hold> {
+    start_with(user, None)
+}
+
+/// As `start`, holding the input bound for `also` too: Agent Screen, while
+/// it stands in front of the user's app during a front hold. With `also`,
+/// the caller ends the hold: a press or a full hold only asks, as the
+/// keys before them can reach the user's window only once their app is in
+/// front again. The time limit still ends it.
+pub fn start_with(user: WindowTarget, also: Option<i32>) -> Option<Hold> {
     let app = user.pid;
     let tap = TAP.get_or_init(install).as_ref()?;
     let id = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -130,10 +167,15 @@ pub fn start(user: WindowTarget) -> Option<Hold> {
         }
         *state = State::Holding {
             id,
-            hold: KeyHold::new(app),
+            hold: match also {
+                Some(other) => KeyHold::new(app).also(other),
+                None => KeyHold::new(app),
+            },
             started: Instant::now(),
             user,
             ending: false,
+            owned: also.is_some(),
+            asked: None,
         };
     }
     CGEvent::tap_enable(&tap.0, true);
@@ -373,7 +415,12 @@ unsafe extern "C-unwind" fn seen(
             std::ptr::null_mut()
         }
         State::Holding {
-            id, hold, ending, ..
+            id,
+            hold,
+            ending,
+            owned,
+            asked,
+            ..
         } => {
             let Some(copy) = CGEvent::new_copy(Some(cg)) else {
                 return event.as_ptr();
@@ -417,7 +464,9 @@ unsafe extern "C-unwind" fn seen(
                 (Verdict::Hold, _) => End::Pressed,
                 (Verdict::HoldAndEnd, _) => End::Full,
             };
-            if !*ending {
+            if *owned {
+                asked.get_or_insert(why);
+            } else if !*ending {
                 *ending = true;
                 let id = *id;
                 let _ = std::thread::Builder::new()

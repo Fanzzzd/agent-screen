@@ -311,7 +311,7 @@ impl Queue {
         reason: String,
         now: u64,
     ) -> Result<RequestId, EnqueueError> {
-        self.insert(owner, operation, reason, now, false)
+        self.insert(owner, operation, reason, now, false, true)
     }
 
     /// Queue an action that only the user's front app blocks: their window
@@ -326,7 +326,20 @@ impl Queue {
         reason: String,
         now: u64,
     ) -> Result<RequestId, EnqueueError> {
-        self.insert(owner, operation, reason, now, true)
+        self.insert(owner, operation, reason, now, true, true)
+    }
+
+    /// As `enqueue_front`, beside the owner's other requests rather than
+    /// in their place: a preview of the waiting line next to a preview
+    /// approval request, as another session's would be (`debugShow`).
+    pub fn enqueue_front_beside(
+        &mut self,
+        owner: Owner,
+        operation: String,
+        reason: String,
+        now: u64,
+    ) -> Result<RequestId, EnqueueError> {
+        self.insert(owner, operation, reason, now, true, false)
     }
 
     fn insert(
@@ -336,6 +349,7 @@ impl Queue {
         reason: String,
         now: u64,
         front: bool,
+        replaces: bool,
     ) -> Result<RequestId, EnqueueError> {
         if self.owners.get(&owner.display) != Some(&owner) {
             return Err(EnqueueError::Closed);
@@ -388,7 +402,7 @@ impl Queue {
             let Some(r) = requests.get_mut(queued) else {
                 return false;
             };
-            if r.owner == owner {
+            if r.owner == owner && replaces {
                 r.status = Status::Stopped(Stop::Replaced);
                 r.times.ended = Some(now);
                 false
@@ -396,7 +410,9 @@ impl Queue {
                 true
             }
         });
-        self.drop_fronts(&owner);
+        if replaces {
+            self.drop_fronts(&owner);
+        }
         if front {
             self.requests.insert(
                 id,
@@ -853,6 +869,25 @@ mod tests {
     fn restored(q: &mut Queue) {
         let end = q.pending_end().unwrap();
         assert!(q.acknowledge_end(end.id));
+    }
+
+    #[test]
+    fn a_previewed_front_request_waits_beside_the_owners_approval_request() {
+        let mut q = queue();
+        let a = owner("a", 1);
+        let asking = q
+            .enqueue(a.clone(), "drag".into(), "Drag".into(), 0)
+            .unwrap();
+        let front = q
+            .enqueue_front_beside(a.clone(), "click".into(), "Click in Dia".into(), 1)
+            .unwrap();
+        assert_eq!(q.waiting().map(|r| r.id).collect::<Vec<_>>(), vec![asking]);
+        assert_eq!(q.fronts().map(|r| r.id).collect::<Vec<_>>(), vec![front]);
+        // A real front request still replaces both.
+        q.enqueue_front(a, "key".into(), "Keys in Dia".into(), 2)
+            .unwrap();
+        assert_eq!(q.waiting().count(), 0);
+        assert_eq!(q.fronts().count(), 1);
     }
 
     #[test]

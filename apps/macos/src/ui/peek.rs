@@ -279,8 +279,12 @@ impl Render for Peek {
                 continue;
             };
             let count = self.counts.get(id).copied().unwrap_or(0);
-            let status = Status::of(display, count, &theme)
-                .waiting_for(display.agent_name(), core.input_queue.waiting_line(*id));
+            let line = core.input_queue.waiting_line(*id);
+            let status = Status::of(display, count, &theme);
+            // The agent waits for the user to leave an app: they may let it
+            // continue now instead.
+            let waiting = line.is_some() && status.kind == super::status::Kind::Agent;
+            let status = status.waiting_for(display.agent_name(), line);
             let pointer = (!display.takeover && !display.is_ended())
                 .then_some(display.pointer)
                 .flatten();
@@ -300,6 +304,7 @@ impl Render for Peek {
                 crate::mac::recording::is_recording(*id),
                 AccessLine::of(display, core.displays.access(*id)),
                 status,
+                waiting,
                 frame,
                 pointer,
                 (display.width, display.height),
@@ -329,6 +334,7 @@ impl Render for Peek {
                     false,
                     None,
                     look.status,
+                    false,
                     look.frame,
                     None,
                     look.size,
@@ -507,6 +513,7 @@ fn tile(
     recording: bool,
     access: Option<AccessLine>,
     status: Status,
+    lets_continue: bool,
     frame: Option<core_video::pixel_buffer::CVPixelBuffer>,
     pointer: Option<crate::model::AgentPointer>,
     size: (f64, f64),
@@ -596,10 +603,15 @@ fn tile(
                         .when_some(remind, |d, remind| {
                             d.child(reminder(remind, size, fit, theme, shell))
                         })
-                        // Keep the reminder's Take Back button visible.
-                        .when_some(access.filter(|_| remind.is_none()), |d, access| {
-                            d.child(access_pill(id, access, theme, revoke))
+                        .when(lets_continue && remind.is_none(), |d| {
+                            d.child(continue_pill(id, theme, shell))
                         })
+                        // Keep the reminder's Take Back button, and the one
+                        // that lets the agent continue, visible.
+                        .when_some(
+                            access.filter(|_| remind.is_none() && !lets_continue),
+                            |d, access| d.child(access_pill(id, access, theme, revoke)),
+                        )
                         // Hover and "currently open" both show as a ring.
                         .child(
                             div()
@@ -696,6 +708,52 @@ fn tile(
                         .justify_center()
                         .child(status_line),
                 ),
+        )
+}
+
+/// "Let the agent continue" on a tile whose agent waits for the user to
+/// leave an app: a pill at the bottom of the picture. Its press runs the
+/// waiting actions now, with Agent Screen in front for a moment
+/// (`control::front_hold`).
+fn continue_pill(id: DisplayId, theme: &Theme, shell: &WeakEntity<Shell>) -> impl IntoElement {
+    let shell = shell.clone();
+    let title = t("Let the agent continue", "让 Agent 继续");
+    div()
+        .id(gpui::ElementId::Name(format!("let-continue-{id}").into()))
+        .role(Role::Button)
+        .aria_label(title)
+        .absolute()
+        .bottom(px(6.))
+        .left_0()
+        .right_0()
+        .flex()
+        .justify_center()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(move |_, window, cx| {
+            cx.stop_propagation();
+            super::shell::let_continue(&shell, id, window, cx);
+        })
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(4.))
+                .px(px(10.))
+                .py(px(3.))
+                .rounded_full()
+                .bg(theme.accent.opacity(0.88))
+                .hover(|s| s.bg(theme.accent))
+                .text_size(px(11.))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(gpui::white())
+                .child(
+                    svg()
+                        .path("icons/play.svg")
+                        .flex_none()
+                        .size(px(10.))
+                        .text_color(gpui::white()),
+                )
+                .child(title),
         )
 }
 

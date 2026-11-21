@@ -74,6 +74,7 @@ impl Control {
         if method == "createDisplay" {
             crate::spend_display()?;
         }
+        crate::stop_if_you_acted(method)?;
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (to, from) = channel();
         self.pending.lock().unwrap().insert(id, to);

@@ -285,7 +285,9 @@ async fn drive(
                     "the user took over display {id}, so your queued {action} (input request {request}) waits. Call wait_for_control, then take a screenshot before you act again."
                 )));
             }
-        } else if crate::mac::input::front() != Some(front.pid) {
+        } else if crate::mac::input::front() != Some(front.pid)
+            && core.read_with(cx, |c, _| c.input_queue.may_start(id, front.pid))
+        {
             if let Some(look) = &front.look
                 && !look_kept(look, cx).await
             {
@@ -296,10 +298,14 @@ async fn drive(
                 ));
                 return settle(core, request, background, Err(refused), cx);
             }
-            let started_front = core.update(cx, |c, cx| {
+            let (started_front, held) = core.update(cx, |c, cx| {
                 let started = c.input_queue.start_front(request);
                 cx.notify();
-                started
+                let held = c
+                    .input_queue
+                    .hold()
+                    .is_some_and(|h| h.app == front.pid && h.display == id);
+                (started, held)
             });
             if started_front {
                 let params = front.params.as_object().cloned().unwrap_or_default();
@@ -324,10 +330,17 @@ async fn drive(
                         } else {
                             ""
                         };
-                        let note = format!(
-                            "It waited {waited:.1} s in the Input Queue (input request {request}){after} until the user's window of {} no longer had focus, then went in through the background route.",
-                            front.app
-                        );
+                        let note = if held {
+                            format!(
+                                "It waited {waited:.1} s in the Input Queue (input request {request}){after} until the user pressed Let the agent continue: Agent Screen held the front for a moment, it went in through the background route, and {} got the front back with the user's window key.",
+                                front.app
+                            )
+                        } else {
+                            format!(
+                                "It waited {waited:.1} s in the Input Queue (input request {request}){after} until the user's window of {} no longer had focus, then went in through the background route.",
+                                front.app
+                            )
+                        };
                         let said = answer
                             .get("note")
                             .and_then(Value::as_str)
@@ -361,7 +374,7 @@ async fn drive(
                 blocked: None,
                 code: "input_pending",
                 message: format!(
-                    "{why}. It waits as input request {request} and runs by itself, through the background route, once the user's window of {app} no longer has focus, for up to {minutes} minutes from now; repeat the same call, or call input_queue wait with request_id {request}, to wait for it and read its result. Meanwhile reads still work. Any other action of yours on this display replaces it, and input_queue withdraw cancels it. Agent Screen won't switch apps for the user.",
+                    "{why}. It waits as input request {request} and runs by itself, through the background route, once the user's window of {app} no longer has focus, for up to {minutes} minutes from now; repeat the same call, or call input_queue wait with request_id {request}, to wait for it and read its result. Meanwhile reads still work. It also runs at once if the user presses Let the agent continue in Agent Screen. Any other action of yours on this display replaces it, and input_queue withdraw cancels it. Agent Screen won't switch apps for the user.",
                     app = front.app,
                     minutes = MAX_AGE.as_secs() / 60,
                 ),

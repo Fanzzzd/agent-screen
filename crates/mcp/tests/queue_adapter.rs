@@ -746,3 +746,62 @@ fn a_background_run_keeps_its_outcome_for_the_next_call() {
     assert!(input.front(id).is_none());
     assert_eq!(input.take_outcome(id), None);
 }
+
+#[test]
+fn a_front_hold_counts_the_actions_on_its_app_and_stops_new_ones_as_it_ends() {
+    let mut input = InputQueue::default();
+    input.register(1, &owner(1));
+    input.register(2, &owner(2));
+    let front = |pid: i32| Front {
+        method: "key".into(),
+        params: serde_json::json!({ "keys": "x" }),
+        pid,
+        app: "Dia".into(),
+        look: None,
+    };
+    let a = input.owner(1, 1).unwrap();
+    let b = input.owner(2, 2).unwrap();
+    let on_dia = input
+        .submit_front(a, "key x".into(), "Keys in Dia".into(), front(42))
+        .unwrap();
+    input
+        .submit_front(b, "key y".into(), "Keys in Notes".into(), front(43))
+        .unwrap();
+    // Scripts see the waiting line at once.
+    assert_eq!(input.waiting_line(1), None);
+    input.set_line_ms_for_tests(1);
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    assert_eq!(input.waiting_line(1).as_deref(), Some("Dia"));
+    input.set_line_ms_for_tests(0);
+    assert_eq!(input.waiting_line(1), None);
+    // The display's own app, never another display's.
+    assert_eq!(input.waits_on(1), Some(42));
+    assert_eq!(input.waits_on(2), Some(43));
+    assert_eq!(input.waits_on(3), None);
+    assert_eq!(input.pending_on(1, 42), 1);
+    assert_eq!(input.pending_on(2, 42), 0);
+
+    assert!(input.start_hold(1, 42));
+    assert!(!input.start_hold(2, 43));
+    assert!(
+        input
+            .hold()
+            .is_some_and(|h| h.app == 42 && h.display == 1 && !h.ending)
+    );
+    assert!(input.may_start(1, 42));
+    // Another display's action on the held app waits for its own press.
+    assert!(!input.may_start(2, 42));
+    assert!(input.start_front(on_dia));
+    assert_eq!(input.running_on(1, 42), 1);
+    assert_eq!(input.pending_on(1, 42), 1);
+    // Ending: nothing more starts on its app, others go on.
+    input.end_hold();
+    assert!(!input.may_start(1, 42));
+    assert!(input.may_start(2, 43));
+    input.finish_front(on_dia, None);
+    assert_eq!(input.running_on(1, 42), 0);
+    assert_eq!(input.pending_on(1, 42), 0);
+    input.clear_hold();
+    assert!(input.hold().is_none());
+    assert!(input.may_start(2, 42));
+}
