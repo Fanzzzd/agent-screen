@@ -426,16 +426,16 @@ impl StatusIcon {
             (
                 ICON_ASKING,
                 tf!(
-                    "Agent Screen: {asking_count} waiting for your approval",
-                    "Agent Screen：{asking_count} 项待你批准"
+                    "Agent Screen: {asking_count} requests wait for you",
+                    "Agent Screen：{asking_count} 项请求待处理"
                 ),
             )
         } else if asking_count == 1 {
             (
                 ICON_ASKING,
                 t(
-                    "Agent Screen: waiting for your approval",
-                    "Agent Screen：待你批准",
+                    "Agent Screen: a request waits for you",
+                    "Agent Screen：1 项请求待处理",
                 )
                 .to_string(),
             )
@@ -444,7 +444,7 @@ impl StatusIcon {
                 ICON_WORKING,
                 t(
                     "Agent Screen: displays in use",
-                    "Agent Screen：有显示器在用",
+                    "Agent Screen：显示器使用中",
                 )
                 .to_string(),
             )

@@ -455,7 +455,7 @@ impl Setup {
                 if self.colorsync == Some(Helper::Outdated) {
                     t("Update…", "更新…")
                 } else {
-                    t("Set Up…", "设置…")
+                    t("Install…", "安装…")
                 }
                 .into(),
                 None,
@@ -564,7 +564,7 @@ impl Setup {
                 theme.accent,
                 button(
                     "setup-aerospace",
-                    t("Set Up…", "设置…").into(),
+                    t("Set Up…", "配置…").into(),
                     None,
                     theme,
                     |_| native::send(Native::Menu(MenuAction::IgnoreInAeroSpace)),
@@ -751,8 +751,8 @@ impl Setup {
         let note = if restart_here {
             Some((
                 t(
-                    "macOS applies this after Agent Screen reopens",
-                    "macOS 要重新打开 Agent Screen 才能录屏",
+                    "Takes effect once Agent Screen reopens",
+                    "重新打开 Agent Screen 后生效",
                 )
                 .to_string(),
                 theme.orange,

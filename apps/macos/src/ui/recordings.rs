@@ -416,11 +416,14 @@ impl Recordings {
             .child(div().text_size(px(11.)).text_color(theme.secondary).child(
                 if self.library_error {
                     t(
-                        "Could not read the recordings folder.",
-                        "无法读取录制文件夹。",
+                        "Could not read ~/Movies/Agent Screen.",
+                        "无法读取 ~/Movies/Agent Screen。",
                     )
                 } else if self.files.is_empty() && !self.loading_library {
-                    t("No recordings yet", "还没有录制")
+                    t(
+                        "No recordings yet. Ask an agent to record its display. Videos go to ~/Movies/Agent Screen.",
+                        "暂无录制。可让 agent 录制它的显示器，视频保存在 ~/Movies/Agent Screen。",
+                    )
                 } else if self.files.len() == 2000 {
                     t(
                         "The list is limited to 2,000 videos.",

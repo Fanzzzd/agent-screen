@@ -122,7 +122,7 @@ pub(super) async fn handle(
             shared_app::set_press_check(on);
             Ok(json!({ "on": on }))
         }
-        // Test hook: the user hands a window over from the Windows menu.
+        // Test hook: the user hands a window over from the Give menu.
         "debugHandOver" => debug_hand_over(core, p, cx),
         // Test hook: the user answers the display's Window Request, as the
         // card's buttons do, once one is open.
@@ -133,7 +133,7 @@ pub(super) async fn handle(
         // notification takes the notification's path, for the request
         // `requestId` when given, as a notification posted for it carries.
         "debugAnswerHelp" => debug_answer_help(core, p, cx),
-        // Test hook: the user takes a window back from the Windows menu.
+        // Test hook: the user takes a window back from the Take Back menu.
         "debugTakeBack" => debug_take_back(core, p, cx).await,
         // Test hook: the session that holds the user stand-in stage gives
         // up a window it launched there, so the window counts as the user's

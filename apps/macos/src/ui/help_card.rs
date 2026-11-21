@@ -358,13 +358,13 @@ impl Render for HelpCard {
                         "{agent} 想要你的 {app} 窗口"
                     ),
                     tf!(
-                        "“{window}” goes to its display. You can take it back from the Windows menu.",
-                        "“{window}”会挪到它的显示器上，之后可以从“窗口”菜单收回。"
+                        "“{window}” goes to its display. Take Back in the Viewer returns it.",
+                        "“{window}”会移到它的显示器上。之后可在 Viewer 中点“取回”。"
                     ),
                     t("Keep", "保留").to_string(),
                 ),
             };
-            return card(title, body, &theme)
+            return card(title, body, Badge::Approval, &theme)
                 .child(
                     div()
                         .h(px(LABEL))
@@ -413,6 +413,7 @@ impl Render for HelpCard {
             return card(
                 tf!("{agent} asks to continue", "{agent} 想继续操作"),
                 reason,
+                Badge::Waiting,
                 &theme,
             )
             .child(
@@ -489,6 +490,7 @@ impl Render for HelpCard {
         card(
             tf!("{agent} needs your help", "{agent} 需要你帮忙"),
             reason,
+            Badge::Waiting,
             &theme,
         )
         .child(
@@ -688,12 +690,12 @@ pub(super) fn zh() -> bool {
 }
 
 /// The family's title row: an icon, one line of semibold text, and an optional
-/// pending-approval badge (#206).
+/// badge that says the card waits for the user (#206).
 pub(super) fn title_row(
     icon: &'static str,
     color: gpui::Hsla,
     title: String,
-    asking: bool,
+    badge: Option<Badge>,
 ) -> gpui::Div {
     div()
         .flex_none()
@@ -711,7 +713,7 @@ pub(super) fn title_row(
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .child(title),
         )
-        .when(asking, |d| {
+        .when_some(badge, |d, badge| {
             d.child(
                 div()
                     .flex_none()
@@ -723,7 +725,10 @@ pub(super) fn title_row(
                     .text_size(px(10.5))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .whitespace_nowrap()
-                    .child(t("Approval needed", "待你批准")),
+                    .child(match badge {
+                        Badge::Approval => t("Approval needed", "待批准"),
+                        Badge::Waiting => t("Waiting for you", "待处理"),
+                    }),
             )
         })
 }
@@ -772,8 +777,16 @@ pub(super) fn label_row(label: String, right: Option<String>, theme: &Theme) -> 
         })
 }
 
+/// What a waiting card's badge says: a request for the user's approval
+/// (a window, the mouse), or any other request that waits for them.
+#[derive(Clone, Copy)]
+pub enum Badge {
+    Approval,
+    Waiting,
+}
+
 /// The card with its title and two lines of text; the rest follows.
-fn card(title: String, reason: String, theme: &Theme) -> gpui::Stateful<gpui::Div> {
+fn card(title: String, reason: String, badge: Badge, theme: &Theme) -> gpui::Stateful<gpui::Div> {
     div()
         .id("help-card")
         .role(Role::Dialog)
@@ -788,7 +801,12 @@ fn card(title: String, reason: String, theme: &Theme) -> gpui::Stateful<gpui::Di
         .border_color(theme.asking_border)
         .rounded(px(RADIUS))
         .text_color(theme.label)
-        .child(title_row("icons/hand.svg", theme.orange, title, true))
+        .child(title_row(
+            "icons/hand.svg",
+            theme.orange,
+            title,
+            Some(badge),
+        ))
         .child(reason_text(reason, false).h(px(REASON)))
 }
 

@@ -3,7 +3,7 @@
 //! status with Stop (ADR 0013).
 
 use super::help_card::{
-    BUTTONS, GAP, HelpCard, PADDING, RADIUS, Tone, card_button, label_row, painted, picture,
+    BUTTONS, Badge, GAP, HelpCard, PADDING, RADIUS, Tone, card_button, label_row, painted, picture,
     reason_text, title_row, zh,
 };
 use super::shell::tell;
@@ -145,65 +145,64 @@ impl HelpCard {
                 )
             };
             return queue_window(
-                root.child(title_row("icons/hand.svg", theme.orange, title, true))
-                    // With one request, the reason is the request.
-                    .child(
-                        reason_text(reason, zh)
-                            .when(count == 1, |d| d.child(painted("input-request"))),
-                    )
-                    .children(picture)
-                    .when(count <= 1, |d| {
-                        d.child(label_row(label.clone(), None, theme))
-                    })
-                    .when(count > 1, |d| {
-                        d.child(
-                            div()
-                                .id("input-requests")
-                                .flex_none()
-                                .flex()
-                                .flex_col()
-                                .when(count > LIST_ROWS, |d| {
-                                    d.h(px(LIST_ROWS as f32 * list_row_height(zh)))
-                                        .overflow_y_scroll()
-                                })
-                                .children(rows),
-                        )
-                    })
-                    .child(scope)
-                    .child(
+                root.child(title_row(
+                    "icons/hand.svg",
+                    theme.orange,
+                    title,
+                    Some(Badge::Approval),
+                ))
+                // With one request, the reason is the request.
+                .child(
+                    reason_text(reason, zh).when(count == 1, |d| d.child(painted("input-request"))),
+                )
+                .children(picture)
+                .when(count <= 1, |d| {
+                    d.child(label_row(label.clone(), None, theme))
+                })
+                .when(count > 1, |d| {
+                    d.child(
                         div()
+                            .id("input-requests")
                             .flex_none()
-                            .h(px(BUTTONS))
-                            .mt(px(if zh { 3. } else { 2. }))
                             .flex()
-                            .gap(px(8.))
-                            .child(
-                                card_button("input-allow", t("Allow", "允许"), Tone::Orange, theme)
-                                    .flex_1()
-                                    .when(!can_approve, |d| d.opacity(0.5))
-                                    .on_click(move |_, _, cx| {
-                                        if can_approve {
-                                            tell(&allow, cx, move |shell, cx| {
-                                                shell.answer_input(approval, true, cx)
-                                            });
-                                        }
-                                    }),
-                            )
-                            .child(
-                                card_button(
-                                    "input-decline",
-                                    t("Not Now", "暂不"),
-                                    Tone::Plain,
-                                    theme,
-                                )
+                            .flex_col()
+                            .when(count > LIST_ROWS, |d| {
+                                d.h(px(LIST_ROWS as f32 * list_row_height(zh)))
+                                    .overflow_y_scroll()
+                            })
+                            .children(rows),
+                    )
+                })
+                .child(scope)
+                .child(
+                    div()
+                        .flex_none()
+                        .h(px(BUTTONS))
+                        .mt(px(if zh { 3. } else { 2. }))
+                        .flex()
+                        .gap(px(8.))
+                        .child(
+                            card_button("input-allow", t("Allow", "允许"), Tone::Orange, theme)
+                                .flex_1()
+                                .when(!can_approve, |d| d.opacity(0.5))
+                                .on_click(move |_, _, cx| {
+                                    if can_approve {
+                                        tell(&allow, cx, move |shell, cx| {
+                                            shell.answer_input(approval, true, cx)
+                                        });
+                                    }
+                                }),
+                        )
+                        .child(
+                            card_button("input-decline", t("Not Now", "暂不"), Tone::Plain, theme)
                                 .px(px(16.))
                                 .on_click(move |_, _, cx| {
                                     tell(&decline, cx, move |shell, cx| {
                                         shell.answer_input(approval, false, cx)
                                     })
                                 }),
-                            ),
-                    ),
+                        ),
+                ),
             );
         }
 
@@ -237,7 +236,7 @@ impl HelpCard {
         };
         let revoke = self.shell.clone();
         queue_window(
-            root.child(title_row("icons/pointer.svg", theme.red, title, false))
+            root.child(title_row("icons/pointer.svg", theme.red, title, None))
                 .child(reason_text(reason, zh))
                 .children(picture)
                 .child(label_row(label, right, theme))

@@ -130,7 +130,7 @@ impl Render for ReportCard {
             .border_color(theme.card_border)
             .rounded(px(RADIUS))
             .text_color(theme.label)
-            .child(title_row("icons/alert.svg", theme.accent, title, false))
+            .child(title_row("icons/alert.svg", theme.accent, title, None))
             .child(reason_text(reason, zh).h(px(REASON)))
             .child(
                 div()

@@ -178,25 +178,25 @@ impl AccessLine {
         }
         let agent = display.agent_name();
         let apps = match access.app_names() {
-            None => t("all apps", "所有应用").to_string(),
+            None => t("all apps", "所有 app").to_string(),
             Some(names) => names.join(t(", ", "、")),
         };
         let paused = display.access_paused();
         let long = if paused {
             tf!(
-                "{agent} may take your windows of {apps}. Paused while you’re in control.",
-                "{agent} 可以拿你的窗口：{apps}。你操作期间暂停"
+                "{agent} may take windows from {apps}. Paused while you’re in control.",
+                "{agent} 可取用 {apps} 的窗口。你操作期间暂停"
             )
         } else {
             tf!(
-                "{agent} may take your windows of {apps} without asking.",
-                "{agent} 可以直接拿你的窗口：{apps}"
+                "{agent} may take windows from {apps} without asking.",
+                "{agent} 可直接取用 {apps} 的窗口"
             )
         };
         let short = if paused {
             t("Window access paused", "窗口授权已暂停")
         } else {
-            t("Takes your windows", "可拿你的窗口")
+            t("Takes your windows", "可取用你的窗口")
         }
         .to_string();
         Some(AccessLine {
@@ -286,7 +286,7 @@ mod tests {
             },
         ]);
         let line = AccessLine::of(d.get(7).unwrap(), d.access(7)).unwrap();
-        assert_eq!(line.long, "Codex 可以直接拿你的窗口：Safari、UTM");
+        assert_eq!(line.long, "Codex 可直接取用 Safari、UTM 的窗口");
         assert!(!line.paused);
         d.begin_takeover(7);
         let line = AccessLine::of(d.get(7).unwrap(), d.access(7)).unwrap();
@@ -297,7 +297,7 @@ mod tests {
         d.access_mut(7).unwrap().grant_all();
         assert_eq!(
             AccessLine::of(d.get(7).unwrap(), d.access(7)).unwrap().long,
-            "Codex may take your windows of all apps without asking."
+            "Codex may take windows from all apps without asking."
         );
         d.end(7, EndReason::Finished);
         assert_eq!(
