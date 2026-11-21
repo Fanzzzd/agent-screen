@@ -340,6 +340,7 @@ impl McpClient {
         if name == "create_display" {
             crate::spend_display()?;
         }
+        crate::stop_if_you_acted(name)?;
         Ok(Call {
             client: self,
             name: name.into(),
