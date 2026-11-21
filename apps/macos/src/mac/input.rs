@@ -2983,15 +2983,12 @@ pub fn server_front() -> i32 {
     unsafe { SSFrontPid() }
 }
 
-/// Make Agent Screen WindowServer's front process with its window number
-/// `window`, key already, as the key window: the front hold's start.
+/// Ask WindowServer to make Agent Screen its front process with its window
+/// number `window`, key already, as the key window: the front hold's start.
+/// Nothing counts Agent Screen as the front app yet: the hold does once
+/// `server_front` confirms it.
 pub fn take_front(window: u32) -> bool {
-    let own = std::process::id() as i32;
-    let taken = unsafe { SSMakeSelfFront(window) };
-    if taken {
-        note_activation(Some(own));
-    }
-    taken
+    unsafe { SSMakeSelfFront(window) }
 }
 
 /// Make `pid` WindowServer's front process with its window `window` key,

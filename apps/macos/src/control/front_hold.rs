@@ -13,15 +13,14 @@ use super::off;
 use crate::core::Core;
 use crate::mac::key_hold;
 use crate::model::{DisplayId, WindowTarget};
-use agent_screen_model::front_hold::{self, End, Next, Phase, Start, UserInput};
+use agent_screen_model::front_hold::{
+    self, End, GIVE_BACK_MS, Keys, Next, Phase, SETTLE_MS, Start,
+};
 use gpui::{App, AsyncApp, Entity};
 use std::time::{Duration, Instant};
 
 /// How often the hold looks at the front and the waiting actions.
 const TICK: Duration = Duration::from_millis(20);
-
-/// After the hold ends, how long actions already sending may take.
-const SETTLE: Duration = Duration::from_millis(1000);
 
 /// The user pressed the button for display `display` in Agent Screen's
 /// window number `window`, which is key.
@@ -48,9 +47,6 @@ pub async fn hold(
         log::info!("front hold: pid {app} isn't in front; its actions run by themselves");
         return None;
     }
-    if !core.update(cx, |c, _| c.input_queue.start_hold(app)) {
-        return None;
-    }
     // The user's window, to give the front back with: the app's focused
     // window, unless it is the agent's.
     let user = off(cx, move || {
@@ -64,32 +60,58 @@ pub async fn hold(
         })
     })
     .await;
-    let keys = user.and_then(|user| key_hold::start_with(user, Some(own)));
+    // Without the user's keys held, they would go to Agent Screen's key
+    // window while it stands in front, which may be the Viewer, which
+    // sends keys to the agent's display: no hold then.
+    let Some(user) = user else {
+        log::info!("front hold: pid {app} has no window of the user's focused; nothing runs");
+        return None;
+    };
+    let Some(keys) = key_hold::start_with(user, Some(own)) else {
+        log::info!("front hold: another key hold goes on; nothing runs");
+        return None;
+    };
+    if !core.update(cx, |c, _| c.input_queue.start_hold(display, app)) {
+        drop(keys);
+        return None;
+    }
+    // However the hold ends, even by a panic, its record goes.
+    let _clear = Clear(core.clone(), cx.clone());
     let started = Instant::now();
     let mut phase = Phase::Taking;
-    let mut since = Instant::now();
     if start == Start::Take {
         let taken = crate::mac::input::take_front(window);
-        log::info!("front hold: Agent Screen takes the front from pid {app}: {taken}");
+        log::info!("front hold: Agent Screen asks for the front from pid {app}: {taken}");
     }
     let end = loop {
-        let input = match &keys {
-            Some(keys) if !keys.holding() => UserInput::Pressed,
-            Some(keys) if keys.typed() => UserInput::Typed,
-            _ => UserInput::None,
+        let input = match keys.status() {
+            key_hold::Status::Ended => Keys::Ended,
+            key_hold::Status::Holding {
+                asked: Some(agent_screen_model::key_hold::End::Pressed),
+                ..
+            } => Keys::Pressed,
+            // Full: the user typed that much.
+            key_hold::Status::Holding { asked: Some(_), .. }
+            | key_hold::Status::Holding { typed: true, .. } => Keys::Typed,
+            key_hold::Status::Holding { .. } => Keys::Quiet,
         };
         let own_front = crate::mac::input::server_front() == own;
-        // Not those on a display in Takeover: they wait for its end.
+        // Not while the display is in a Takeover: they wait for its end.
         let pending = core.read_with(cx, |c, _| {
-            c.input_queue
-                .pending_on(app, |id| c.displays.get(id).is_some_and(|d| !d.takeover))
+            let live = c.displays.get(display).is_some_and(|d| !d.takeover);
+            if live {
+                c.input_queue.pending_on(display, app)
+            } else {
+                0
+            }
         });
-        let elapsed = since.elapsed().as_millis() as u64;
+        let elapsed = started.elapsed().as_millis() as u64;
         match front_hold::next(phase, elapsed, own_front, pending, input) {
             Next::Wait => {}
             Next::Run => {
                 phase = Phase::Running;
-                since = Instant::now();
+                // Only now, with WindowServer's word: the waiting actions
+                // start once Agent Screen counts as the front app.
                 if crate::mac::input::front() != Some(own) {
                     crate::mac::input::note_activation(Some(own));
                 }
@@ -101,57 +123,69 @@ pub async fn hold(
     // Nothing more starts; what is sending finishes first.
     core.update(cx, |c, _| c.input_queue.end_hold());
     let ending = Instant::now();
-    while core.read_with(cx, |c, _| c.input_queue.running_on(app)) > 0 && ending.elapsed() < SETTLE
+    while core.read_with(cx, |c, _| c.input_queue.running_on(display, app)) > 0
+        && ending.elapsed() < Duration::from_millis(SETTLE_MS)
     {
         cx.background_executor().timer(TICK).await;
     }
     let held_ms = started.elapsed().as_millis();
-    if front_hold::gives_back(end) {
-        let back = off(cx, move || give_back(app, user)).await;
-        log::info!(
-            "front hold: {end:?} after {held_ms} ms; pid {app} back in front with the user's window key: {back}"
-        );
-        if let Some(keys) = keys {
-            let id = keys.detach();
-            std::thread::spawn(move || {
-                key_hold::finish(id, agent_screen_model::key_hold::End::HandedBack)
-            });
-        }
+    let back = if front_hold::gives_back(end) {
+        Some(off(cx, move || give_back(app, user)).await)
     } else {
-        log::info!("front hold: {end:?} after {held_ms} ms; the user went elsewhere");
-        drop(keys);
+        None
+    };
+    log::info!(
+        "front hold: {end:?} after {held_ms} ms; pid {app} back in front with the user's window key: {back:?}"
+    );
+    // The keys typed meanwhile go to the user's window now, and a press
+    // after them.
+    let id = keys.detach();
+    if let Some(why) = front_hold::keys_end(end) {
+        std::thread::spawn(move || key_hold::finish(id, why));
     }
-    core.update(cx, |c, cx| {
-        c.input_queue.clear_hold();
-        cx.notify();
-    });
     Some(end)
 }
 
+/// Clears the hold's record when the hold ends. After a panic the record
+/// stays, and the next press replaces it once it is stale
+/// (`front_hold::STALE_MS`): touching the app mid-panic could panic again.
+struct Clear(Entity<Core>, AsyncApp);
+
+impl Drop for Clear {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            return;
+        }
+        self.0.update(&mut self.1, |c, cx| {
+            c.input_queue.clear_hold();
+            cx.notify();
+        });
+    }
+}
+
 /// Give app `app` the front back, with the user's window `user` key, and
-/// say whether both hold. Blocks up to about 1.2 s.
-fn give_back(app: i32, user: Option<WindowTarget>) -> bool {
-    let key = || match user {
-        Some(user) => crate::mac::ax::focused_window_id(app) == Some(user.window_id),
-        None => true,
-    };
+/// say whether both hold. Blocks up to `GIVE_BACK_MS`.
+fn give_back(app: i32, user: WindowTarget) -> bool {
+    let key = || crate::mac::ax::focused_window_id(app) == Some(user.window_id);
     // Each action's hand-back made the user's window the app's key window;
     // make sure, as one may have been cut short.
-    if let Some(user) = user
-        && !key()
-    {
+    if !key() {
         crate::mac::ax::make_main(user);
     }
     let asked = Instant::now();
-    let sent = crate::mac::input::give_front(app, user.map_or(0, |u| u.window_id));
-    while crate::mac::input::server_front() != app && asked.elapsed() < Duration::from_millis(200) {
+    let limit = Duration::from_millis(GIVE_BACK_MS);
+    let sent = crate::mac::input::give_front(app, user.window_id);
+    let mut activated = false;
+    while crate::mac::input::server_front() != app && asked.elapsed() < limit {
+        // Some apps, Electron ones and Dia, stay behind: activate them.
+        if !activated && asked.elapsed() >= Duration::from_millis(200) {
+            activated = true;
+            log::warn!(
+                "front hold: pid {app} didn't take the front back (asked: {sent}); activating it"
+            );
+            crate::mac::app::activate(app);
+        }
         std::thread::sleep(Duration::from_millis(10));
-    }
-    if crate::mac::input::server_front() != app {
-        log::warn!(
-            "front hold: pid {app} didn't take the front back (asked: {sent}); activating it"
-        );
-        crate::mac::ime::return_front(app);
     }
     let front = crate::mac::input::server_front() == app;
     if front {

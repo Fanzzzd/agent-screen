@@ -286,7 +286,7 @@ async fn drive(
                 )));
             }
         } else if crate::mac::input::front() != Some(front.pid)
-            && core.read_with(cx, |c, _| c.input_queue.may_start(front.pid))
+            && core.read_with(cx, |c, _| c.input_queue.may_start(id, front.pid))
         {
             if let Some(look) = &front.look
                 && !look_kept(look, cx).await
@@ -301,7 +301,10 @@ async fn drive(
             let (started_front, held) = core.update(cx, |c, cx| {
                 let started = c.input_queue.start_front(request);
                 cx.notify();
-                let held = c.input_queue.hold().is_some_and(|h| h.app == front.pid);
+                let held = c
+                    .input_queue
+                    .hold()
+                    .is_some_and(|h| h.app == front.pid && h.display == id);
                 (started, held)
             });
             if started_front {

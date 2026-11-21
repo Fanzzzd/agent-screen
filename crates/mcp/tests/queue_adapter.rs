@@ -774,28 +774,34 @@ fn a_front_hold_counts_the_actions_on_its_app_and_stops_new_ones_as_it_ends() {
     assert_eq!(input.waiting_line(1).as_deref(), Some("Dia"));
     input.set_line_ms_for_tests(0);
     assert_eq!(input.waiting_line(1), None);
-    // The display's own app first.
+    // The display's own app, never another display's.
     assert_eq!(input.waits_on(1), Some(42));
     assert_eq!(input.waits_on(2), Some(43));
-    assert_eq!(input.waits_on(3), Some(42));
-    assert_eq!(input.pending_on(42, |_| true), 1);
-    assert_eq!(input.pending_on(42, |display| display != 1), 0);
+    assert_eq!(input.waits_on(3), None);
+    assert_eq!(input.pending_on(1, 42), 1);
+    assert_eq!(input.pending_on(2, 42), 0);
 
-    assert!(input.start_hold(42));
-    assert!(!input.start_hold(43));
-    assert!(input.hold().is_some_and(|h| h.app == 42 && !h.ending));
-    assert!(input.may_start(42));
+    assert!(input.start_hold(1, 42));
+    assert!(!input.start_hold(2, 43));
+    assert!(
+        input
+            .hold()
+            .is_some_and(|h| h.app == 42 && h.display == 1 && !h.ending)
+    );
+    assert!(input.may_start(1, 42));
+    // Another display's action on the held app waits for its own press.
+    assert!(!input.may_start(2, 42));
     assert!(input.start_front(on_dia));
-    assert_eq!(input.running_on(42), 1);
-    assert_eq!(input.pending_on(42, |_| true), 1);
+    assert_eq!(input.running_on(1, 42), 1);
+    assert_eq!(input.pending_on(1, 42), 1);
     // Ending: nothing more starts on its app, others go on.
     input.end_hold();
-    assert!(!input.may_start(42));
-    assert!(input.may_start(43));
+    assert!(!input.may_start(1, 42));
+    assert!(input.may_start(2, 43));
     input.finish_front(on_dia, None);
-    assert_eq!(input.running_on(42), 0);
-    assert_eq!(input.pending_on(42, |_| true), 0);
+    assert_eq!(input.running_on(1, 42), 0);
+    assert_eq!(input.pending_on(1, 42), 0);
     input.clear_hold();
     assert!(input.hold().is_none());
-    assert!(input.may_start(42));
+    assert!(input.may_start(2, 42));
 }
