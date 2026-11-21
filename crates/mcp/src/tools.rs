@@ -41,7 +41,7 @@ fn coordinate() -> Value {
 }
 
 fn timeout() -> Value {
-    json!({ "type": "integer", "description": "Seconds to wait before giving up. Default 100, at most 600." })
+    json!({ "type": "number", "minimum": 1, "maximum": 600, "description": "Seconds to wait before giving up, 1 to 600. Default 100." })
 }
 
 fn window_id() -> Value {
@@ -518,7 +518,7 @@ pub fn definitions() -> Vec<Value> {
                     "y": { "type": "number", "description": "Top edge in screenshot pixels from the display's top edge." },
                     "width": { "type": "number", "description": "Width in screenshot pixels." },
                     "height": { "type": "number", "description": "Height in screenshot pixels." },
-                    "timeout_seconds": { "type": "number", "description": "How long to wait for the user to answer a request for one of their windows. Default 120, up to 600." },
+                    "timeout_seconds": { "type": "number", "minimum": 1, "maximum": 600, "description": "How long to wait for the user to answer a request for one of their windows, 1 to 600. Default 120." },
                     "user_instruction": user_instruction("take this window")
                 }),
                 &["display_id"],
@@ -681,7 +681,8 @@ pub fn definitions() -> Vec<Value> {
                     "timeout_seconds": {
                         "type": "number",
                         "minimum": 0,
-                        "description": "Seconds to wait. Default 30, at most 120; 0 checks once."
+                        "maximum": 120,
+                        "description": "Seconds to wait, at most 120. Default 30; 0 checks once."
                     }
                 }),
                 &["display_id", "window_id"],
@@ -879,7 +880,7 @@ pub async fn run(
             let reply = control
                 .call(
                     "waitForControl",
-                    json!({ "displayId": a.require_int("display_id")?, "timeoutSeconds": a.int("timeout_seconds")? }),
+                    json!({ "displayId": a.require_int("display_id")?, "timeoutSeconds": a.number("timeout_seconds")? }),
                 )
                 .await?;
             Ok(Output::Object(describe_wait(&reply)))
@@ -1088,7 +1089,7 @@ async fn request_help(a: &Args<'_>, control: &Control) -> Result<Output, Control
     let reply = control
         .call(
             "waitForControl",
-            json!({ "displayId": display, "timeoutSeconds": a.int("timeout_seconds")? }),
+            json!({ "displayId": display, "timeoutSeconds": a.number("timeout_seconds")? }),
         )
         .await?;
     Ok(Output::Object(describe_wait(&reply)))
@@ -1131,7 +1132,7 @@ async fn request_control(a: &Args<'_>, control: &Control) -> Result<Output, Cont
     let reply = control
         .call(
             "waitForControl",
-            json!({ "displayId": display, "timeoutSeconds": a.int("timeout_seconds")? }),
+            json!({ "displayId": display, "timeoutSeconds": a.number("timeout_seconds")? }),
         )
         .await?;
     let mut out = describe_wait(&reply);
