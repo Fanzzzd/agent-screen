@@ -2,7 +2,8 @@
 //! or none send a fraction of the full tree (#30). On an Electron mail app
 //! each call sent about 200 elements, over 6,000 tokens, and every press
 //! sent them again. get_window_state with image: false and computer with
-//! screenshot: false leave the picture out (#282). Here Calculator stands in.
+//! screenshot: false leave the picture out (#282). end_display then names
+//! the window left for review (#283). Here Calculator stands in.
 //!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e compactstate
 //!
@@ -162,7 +163,18 @@ fn test() -> Result<()> {
         format!("{} bytes", default.first_text().len()),
     );
 
-    client.call("end_display", json!({ "display_id": id }))?;
+    // end_display names the window left for review (#283).
+    let ended = client.call("end_display", json!({ "display_id": id }))?;
+    let review = ended.get("review").as_array().cloned().unwrap_or_default();
+    check(
+        "end_display names the window that waits for review",
+        review.iter().any(|w| w["window_id"] == window)
+            && ended
+                .get("note")
+                .as_str()
+                .is_some_and(|n| n.contains("review")),
+        ended.first_text(),
+    );
     client.close();
     Ok(())
 }
