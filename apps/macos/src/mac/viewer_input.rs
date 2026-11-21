@@ -1905,8 +1905,12 @@ unsafe extern "C-unwind" fn private_press_seen(
         CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput
     ) {
         log::warn!("viewer: private press tap disabled ({kind:?}); enabling it again");
-        // Releases went by unseen meanwhile.
-        PRIVATE_HELD.store(0, Ordering::Relaxed);
+        // Releases went by unseen meanwhile. A press still open never hears
+        // its release: the main thread ends it, or the target keeps its
+        // button down and every key waits behind a list's press (#287).
+        if PRIVATE_HELD.swap(0, Ordering::Relaxed) != 0 {
+            dispatch2::DispatchQueue::main().exec_async(release_lost_press);
+        }
         if let Some(tap) = PRIVATE_TAP.get() {
             CGEvent::tap_enable(&tap.0, true);
         }
@@ -1968,6 +1972,26 @@ fn is_release(kind: NSEventType) -> bool {
         kind,
         NSEventType::LeftMouseUp | NSEventType::RightMouseUp | NSEventType::OtherMouseUp
     )
+}
+
+/// The private tap missed the release of the Viewer press still open: send
+/// the target its release where the press last was, and end a list's key
+/// hold, as the release would have.
+fn release_lost_press() {
+    let after = STATE.with(|s| {
+        let Ok(mut s) = s.try_borrow_mut() else {
+            return None;
+        };
+        let pressed = s.pressed.take()?;
+        let at = s.last_remote.take();
+        let click = s.click.take();
+        if let (Some(at), Some((display, forwarder))) = (at, &s.display) {
+            log::info!("viewer: released the press on display {display} the tap missed");
+            forwarder.mouse_up(at, pressed, 1, CGEventFlags::empty(), click);
+        }
+        s.front_after_release.take()
+    });
+    drop(after);
 }
 
 /// End a press on a list's key hold whose release went unhandled: until it

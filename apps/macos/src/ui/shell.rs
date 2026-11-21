@@ -1367,20 +1367,38 @@ impl Shell {
     }
 
     pub fn answer_input(&mut self, approval: u64, allow: bool, cx: &mut Context<Self>) {
-        // Saved once, at grant start, to put back when it ends normally.
-        let saved = crate::mac::real_input::save();
-        let granted = self.core.update(cx, |core, cx| {
-            let granted = allow && core.input_queue.approve(approval);
-            if !allow {
+        if !allow {
+            self.core.update(cx, |core, cx| {
                 core.input_queue.decline(approval);
-            }
-            cx.notify();
-            granted
-        });
-        if granted {
-            self.real_saved = Some(saved);
+                cx.notify();
+            });
+            self.drive_queue(cx);
+            return;
         }
-        self.drive_queue(cx);
+        // Saved once, at grant start, to put back when it ends normally.
+        // Off the UI thread: it asks WindowServer for the front app and
+        // Accessibility for its windows, which can take seconds while that
+        // app is busy (#287). A grant arms only after the user has been
+        // idle a second, so waiting for it changes no order.
+        cx.spawn(async move |this, cx| {
+            let saved = cx
+                .background_executor()
+                .spawn(async { crate::mac::real_input::save() })
+                .await;
+            let _ = this.update(cx, |shell, cx| {
+                let granted = shell.core.update(cx, |core, cx| {
+                    let granted = core.input_queue.approve(approval);
+                    cx.notify();
+                    granted
+                });
+                if granted {
+                    shell.real_saved = Some(saved);
+                }
+                shell.drive_queue(cx);
+                shell.sync_card(cx);
+            });
+        })
+        .detach();
     }
 
     pub fn revoke_input(&mut self, cx: &mut Context<Self>) {

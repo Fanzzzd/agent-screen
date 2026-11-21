@@ -787,18 +787,25 @@ impl Forwarder {
     // MARK: Whole gestures for Agent Sessions. Each returns once every event
     // is posted, so a tool call can take a screenshot straight after.
 
-    /// The window clicked, or None when no window is at `at`.
+    /// The window clicked, or None when no window is at `at`, and whether
+    /// a takeover stopped clicks still to go.
     pub async fn click(
         &self,
         at: (f64, f64),
         button: Button,
         count: i64,
         m: Modifiers,
-    ) -> Option<WindowTarget> {
+    ) -> (Option<WindowTarget>, bool) {
+        let stopped = self.stopped.clone();
         self.run(move |w| {
             let count = count.max(1);
             let mut hit = None;
             for index in 1..=count {
+                // A takeover since the agent asked: no press of its lands on
+                // the display the user now operates (#287).
+                if stopped.load(std::sync::atomic::Ordering::Relaxed) {
+                    return (hit, true);
+                }
                 // A double click on Close takes the window away after the
                 // first click; the first hit is the answer.
                 let Some(down) = w.mouse_down(at, button, index, flags(m)) else {
@@ -811,10 +818,10 @@ impl Forwarder {
                     thread::sleep(Duration::from_millis(80));
                 }
             }
-            hit
+            (hit, false)
         })
         .await
-        .flatten()
+        .unwrap_or((None, false))
     }
 
     /// A press-move-release that apps take as a drag: a hold before moving,
@@ -823,6 +830,11 @@ impl Forwarder {
     pub async fn drag(&self, from: (f64, f64), to: (f64, f64), m: Modifiers) -> Sent {
         let stopped = self.stopped.clone();
         self.run(move |w| {
+            // A takeover since the agent asked: nothing is pressed. The
+            // caller reads `agent_stopped`.
+            if stopped.load(std::sync::atomic::Ordering::Relaxed) {
+                return Sent::Nowhere;
+            }
             if w.mouse_down(from, Button::Left, 1, flags(m)).is_none() {
                 return Sent::Nowhere;
             }
@@ -1213,7 +1225,13 @@ impl Forwarder {
     /// The caller waits off the worker, so other input on the display isn't
     /// held up. The window it went to, or None when nothing can take keys.
     pub async fn chord(&self, chord: KeyChord, down: bool, within: Rect) -> Option<WindowTarget> {
+        let stopped = self.stopped.clone();
         self.run(move |w| {
+            // A takeover since the agent asked: no key goes down. The caller
+            // reads `agent_stopped`.
+            if down && stopped.load(std::sync::atomic::Ordering::Relaxed) {
+                return None;
+            }
             let _held = w.focus_something(within)?;
             let target = w.focused?;
             w.key(chord.code, down, flags(chord.modifiers), true);
@@ -1276,11 +1294,17 @@ impl Forwarder {
     /// came to the front meanwhile, where its focused window may be the
     /// user's (#110).
     pub async fn press(&self, chord: KeyChord, count: i64, within: Rect) -> Option<i64> {
+        let stopped = self.stopped.clone();
         self.run(move |w| {
             let _held = w.focus_something(within)?;
             let pid = w.focused?.pid;
             let front_at_start = is_front(pid);
             for pressed in 0..count.max(1) {
+                // A takeover stops the presses still to go, the first
+                // included (#287). The caller reads `agent_stopped`.
+                if stopped.load(std::sync::atomic::Ordering::Relaxed) {
+                    return Some(pressed);
+                }
                 if !front_at_start && is_front(pid) {
                     return Some(pressed);
                 }
