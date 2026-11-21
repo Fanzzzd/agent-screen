@@ -41,7 +41,7 @@ impl HelpCard {
             queue_picture(d.id, size, frame, &view, theme)
         });
         let asking = matches!(view.phase, Phase::Asking { .. });
-        let waiting = waiting_row(core, theme, &self.shell);
+        let waiting = waiting_rows(core, theme, &self.shell);
         let border_pad = if asking { 4. } else { 2. };
         let root = div()
             .id("help-card")
@@ -1067,66 +1067,72 @@ fn paint_pointer(
 }
 
 /// The actions waiting for the user to leave an app, as the tiles' waiting
-/// line says, while the card shows for something else: one row with Let
-/// the agent continue, whose press runs every action waiting on that app
-/// (`control::front_hold`). None while none waits.
-fn waiting_row(core: &Core, theme: &Theme, shell: &WeakEntity<Shell>) -> Option<gpui::Div> {
-    let waiting: Vec<(DisplayId, String, String)> = core
-        .displays
+/// lines say, while the card shows for something else: a row per display,
+/// each with Let the agent continue, whose press runs that display's
+/// actions waiting on its app (`control::front_hold`). Empty while none
+/// waits.
+fn waiting_rows(
+    core: &Core,
+    theme: &Theme,
+    shell: &WeakEntity<Shell>,
+) -> Vec<gpui::Stateful<gpui::Div>> {
+    core.displays
         .list
         .iter()
         .filter(|d| d.is_live() && !d.takeover)
         .filter_map(|d| {
             let app = core.input_queue.waiting_line(d.id)?;
-            Some((d.id, d.agent_name().to_string(), app))
+            Some(waiting_row(d.id, d.agent_name(), &app, theme, shell))
         })
-        .collect();
-    let (display, agent, app) = waiting.first()?.clone();
-    let text = match waiting.len() {
-        1 => tf!(
-            "{agent} waits for you to leave {app}",
-            "{agent} 等你离开 {app}"
-        ),
-        n => tf!(
-            "{n} agents wait for you to leave {app}",
-            "{n} 个 Agent 等你离开 {app}"
-        ),
-    };
+        .collect()
+}
+
+fn waiting_row(
+    display: DisplayId,
+    agent: &str,
+    app: &str,
+    theme: &Theme,
+    shell: &WeakEntity<Shell>,
+) -> gpui::Stateful<gpui::Div> {
+    let text = tf!(
+        "{agent} waits for you to leave {app}",
+        "{agent} 等你离开 {app}"
+    );
     let shell = shell.clone();
-    Some(
-        div()
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .pt(px(6.))
-            .border_t_1()
-            .border_color(theme.hairline)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    // Two lines, so the app's name shows beside the button.
-                    .line_clamp(2)
-                    .text_ellipsis()
-                    .text_size(px(12.))
-                    .text_color(theme.label)
-                    .child(text),
+    // Its own id, as each display's row has the same button.
+    div()
+        .id(("waiting-row", display as usize))
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .pt(px(6.))
+        .border_t_1()
+        .border_color(theme.hairline)
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                // Two lines, so the app's name shows beside the button.
+                .line_clamp(2)
+                .text_ellipsis()
+                .text_size(px(12.))
+                .text_color(theme.label)
+                .child(text),
+        )
+        .child(
+            card_button(
+                "input-let-continue",
+                t("Let the agent continue", "让 Agent 继续"),
+                Tone::Accent,
+                theme,
             )
-            .child(
-                card_button(
-                    "input-let-continue",
-                    t("Let the agent continue", "让 Agent 继续"),
-                    Tone::Accent,
-                    theme,
-                )
-                .flex_none()
-                .h(px(24.))
-                .px(px(10.))
-                .text_size(px(11.))
-                .on_click(move |_, window, cx| {
-                    super::shell::let_continue(&shell, display, window, cx);
-                }),
-            ),
-    )
+            .flex_none()
+            .h(px(24.))
+            .px(px(10.))
+            .text_size(px(11.))
+            .on_click(move |_, window, cx| {
+                super::shell::let_continue(&shell, display, window, cx);
+            }),
+        )
 }
