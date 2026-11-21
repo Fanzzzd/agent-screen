@@ -184,7 +184,17 @@ impl HelpCard {
                         .child(
                             card_button("input-allow", t("Allow", "允许"), Tone::Orange, theme)
                                 .flex_1()
-                                .when(!can_approve, |d| d.opacity(0.5))
+                                .when(!can_approve, |d| {
+                                    // Dimmed while the user holds the display: say why
+                                    // to VoiceOver and on hover.
+                                    let why = t(
+                                        "Unavailable. Hand control back first.",
+                                        "暂不可用。请先交还控制。",
+                                    );
+                                    d.opacity(0.5)
+                                        .aria_description(why)
+                                        .tooltip(move |_, cx| super::shell::hint(why, cx))
+                                })
                                 .on_click(move |_, _, cx| {
                                     if can_approve {
                                         tell(&allow, cx, move |shell, cx| {
@@ -918,7 +928,7 @@ fn queue_picture(
         })
         .collect();
     let colors: Vec<_> = marks.iter().map(color).collect();
-    let picture = match frame {
+    let picture = match frame.filter(|_| crate::mac::permissions::last().screen) {
         Some(frame) => surface(frame)
             .object_fit(ObjectFit::Contain)
             .size_full()

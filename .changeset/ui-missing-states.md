@@ -1,0 +1,5 @@
+---
+default: minor
+---
+
+Settings now works for any MCP client. Its Agents row has Copy MCP Command and Client Guide, and when neither Claude Code nor Codex is installed, the alert after Connect offers Copy Command. Settings and the menu remember which agent last loaded the tools, and on which day, across restarts. When a permission's switch looks on but macOS still says no, the helper and Settings ask you to remove Agent Screen from the list and add it again. With Screen Recording off, Peek, the Help Card and the mouse card say so instead of waiting for a picture. With Accessibility off, the Viewer says clicks and typing don't reach the apps and offers Fix Permissions…. An open Web Preview page shows "This preview has ended" when its display ends, and an old link opens a page that says why it stopped. Settings works from the keyboard: Tab, Return or Space, and Escape. VoiceOver reads each Dismiss choice with its window and whether it is set, names a display that is recording in Peek, and says why Allow is unavailable while you control the display.

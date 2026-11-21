@@ -282,8 +282,18 @@ pub struct Shell {
     recordings: Option<WindowHandle<Recordings>>,
     /// The agents whose MCP servers loaded the tools, first to last.
     agent_ready: Vec<String>,
+    /// The client that last loaded the tools, in this run or an earlier
+    /// one, and when.
+    tools_last: Option<(String, f64)>,
     /// The permission whose pane the user was sent to.
     waiting: Option<Permission>,
+    /// When the user was sent there.
+    waiting_since: Option<std::time::Instant>,
+    /// The pane has been open a while, Agent Screen is in its list, and
+    /// macOS still says no: the helper asks to add it again.
+    still_off: bool,
+    /// `debugShow setup-still-off`: the preview shows that note.
+    preview_still_off: bool,
     /// Screen Recording came on while running and capture still fails.
     restart: bool,
     /// A Connect is running.
@@ -792,12 +802,16 @@ impl Shell {
             setup: None,
             recordings: None,
             agent_ready: Vec::new(),
+            tools_last: native::tools_last_loaded(),
             report_card: None,
             report_shown: None,
             report_expanded: false,
             reports: crate::reports::load(),
             report_previews: HashSet::new(),
             waiting: None,
+            waiting_since: None,
+            still_off: false,
+            preview_still_off: false,
             restart: false,
             debug_menu_at: None,
             setup_shown_for: None,
@@ -2635,6 +2649,17 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         match surface {
+            "pretend-screen-off" | "pretend-ax-off" | "pretend-clear" => {
+                use std::sync::atomic::Ordering;
+                let bits = match surface {
+                    "pretend-screen-off" => 1,
+                    "pretend-ax-off" => 2,
+                    _ => 0,
+                };
+                permissions::PRETEND_OFF.store(bits, Ordering::Relaxed);
+                let now = permissions::status();
+                self.check_permissions(now, None, cx);
+            }
             // Held open, as a click holds it, so scripts can look at it.
             "peek" => {
                 let effect = self.peek_intent.pin();
@@ -2684,8 +2709,9 @@ impl Shell {
             // The open setup window as with both permissions missing, the
             // first row explaining what to do in System Settings: the
             // tallest it gets.
-            "setup-waiting" => {
+            "setup-waiting" | "setup-still-off" => {
                 self.setup_preview = true;
+                self.preview_still_off = surface == "setup-still-off";
                 self.push_setup(cx);
             }
             // The pane and its helper, without the system prompt.
@@ -2697,16 +2723,22 @@ impl Shell {
                 };
                 permissions::open_pane(p);
                 assist::show(p, permissions::listed(p).unwrap_or(true));
-                self.waiting = Some(p);
+                self.wait_for(p);
                 self.push_setup(cx);
             }
             // The helper alone at the top-left corner of the main screen.
-            "assist-preview" | "assist-preview-unlisted" => assist::preview(
-                Permission::Accessibility,
-                surface == "assist-preview",
-                40.0,
-                60.0,
-            ),
+            "assist-preview" | "assist-preview-unlisted" | "assist-preview-still-off" => {
+                assist::preview(
+                    Permission::Accessibility,
+                    match surface {
+                        "assist-preview" => assist::Step::Listed,
+                        "assist-preview-unlisted" => assist::Step::Unlisted,
+                        _ => assist::Step::StillOff,
+                    },
+                    40.0,
+                    60.0,
+                )
+            }
             "assist-hide" => assist::hide(),
             // The Help Card's buttons, as a click would press them.
             "card-later" => self.card_later(id, cx),
@@ -2936,10 +2968,19 @@ impl Shell {
                 "{agent} loaded Agent Screen's tools",
                 "{agent} 已加载 Agent Screen 的工具"
             )),
-            None => menu.disabled(t(
-                "No agent has loaded the tools yet",
-                "尚无 agent 加载工具",
-            )),
+            None => match &self.tools_last {
+                Some((client, at)) => {
+                    let day = crate::i18n::day(*at);
+                    menu.disabled(&tf!(
+                        "{client} last loaded the tools on {day}",
+                        "{client} 上次于 {day}加载工具"
+                    ))
+                }
+                None => menu.disabled(t(
+                    "No agent has loaded the tools yet",
+                    "尚无 agent 加载工具",
+                )),
+            },
         };
         menu.separator();
         let core = self.core.read(cx);
@@ -4036,7 +4077,7 @@ impl Shell {
             is_minimizable: false,
             ..Default::default()
         };
-        match cx.open_window(options, |_, cx| cx.new(|_| Setup::new(weak, status))) {
+        match cx.open_window(options, |_, cx| cx.new(|cx| Setup::new(weak, status, cx))) {
             Ok(handle) => {
                 self.setup = Some(handle);
                 self.push_setup(cx);
@@ -4291,8 +4332,34 @@ impl Shell {
         // Asking puts Agent Screen in the list, switched off.
         let listed = permissions::listed(p).unwrap_or(true);
         assist::show(p, listed);
-        self.waiting = Some(p);
+        self.wait_for(p);
         self.push_setup(cx);
+    }
+
+    /// The user goes to `p`'s pane now.
+    fn wait_for(&mut self, p: Permission) {
+        self.waiting = Some(p);
+        self.waiting_since = Some(std::time::Instant::now());
+        self.still_off = false;
+    }
+
+    /// Ten seconds after the pane opened, with Agent Screen in its list and
+    /// the permission still off, the switch may be on for an entry macOS
+    /// no longer matches to this copy of the app (#280). The helper and the
+    /// row then ask to remove the entry and add it again.
+    fn check_still_off(&mut self, now: permissions::Status) {
+        let Some(p) = self.waiting else { return };
+        if self.still_off || now.has(p) || !assist::is_shown() {
+            return;
+        }
+        let long = self
+            .waiting_since
+            .is_some_and(|since| since.elapsed() >= std::time::Duration::from_secs(10));
+        if long && permissions::listed(p) == Some(true) {
+            log::info!("{p:?} still off 10 s after its pane opened");
+            self.still_off = true;
+            assist::show_step(p, assist::Step::StillOff);
+        }
     }
 
     pub fn relaunch(&mut self, cx: &mut Context<Self>) {
@@ -4371,7 +4438,7 @@ impl Shell {
             let next = if none {
                 tf!(
                     "For another MCP client, add a stdio server with command\n{}\nand arguments [\"mcp\"]. If Claude Code is installed, run in Terminal:\n\"{}\" mcp install",
-                    "其他 MCP 客户端：添加一个 stdio 服务器，命令是\n{}\n参数是 [\"mcp\"]。装了 Claude Code 的话，在终端里运行：\n\"{}\" mcp install",
+                    "其他 MCP 客户端：添加一个 stdio 服务器，命令为\n{}\n参数为 [\"mcp\"]。若已安装 Claude Code，请在终端中运行：\n\"{}\" mcp install",
                     exe.display(),
                     exe.display()
                 )
@@ -4396,10 +4463,17 @@ impl Shell {
                 shell.registered = registered;
                 shell.push_setup(cx);
             });
-            native::alert(
-                t("Agent Screen and your agents", "Agent Screen 与 agent"),
-                &format!("{}\n\n{next}", lines.join("\n")),
-            );
+            let title = t("Agent Screen and your agents", "Agent Screen 与 agent");
+            let text = format!("{}\n\n{next}", lines.join("\n"));
+            // Without Claude Code or Codex the user sets up another client
+            // by hand: give them the command to paste.
+            if none {
+                if native::confirm(title, &text, t("Copy Command", "复制命令")) {
+                    native::copy(&super::setup::mcp_command());
+                }
+            } else {
+                native::alert(title, &text);
+            }
         })
         .detach();
     }
@@ -4420,6 +4494,8 @@ impl Shell {
     /// An agent's MCP server listed the tools: setup worked on its side.
     pub fn agent_ready(&mut self, client: String, cx: &mut Context<Self>) {
         log::info!("{client} loaded the tools");
+        native::remember_tools_loaded(&client);
+        self.tools_last = native::tools_last_loaded();
         if !self.agent_ready.contains(&client) {
             self.agent_ready.push(client);
         }
@@ -4436,7 +4512,16 @@ impl Shell {
         } else {
             (self.permissions, self.waiting, self.restart)
         };
+        let still_off = if self.setup_preview {
+            self.preview_still_off
+        } else {
+            self.still_off
+        };
         let agent = self.agents_ready();
+        let earlier = self
+            .tools_last
+            .as_ref()
+            .map(|(client, at)| (client.clone(), crate::i18n::day(*at)));
         let connecting = self.connecting;
         let Some(handle) = self.setup else { return };
         let registered = self.registered.clone();
@@ -4460,8 +4545,10 @@ impl Shell {
                 setup.notifications = notifications;
                 (setup.colorsync, setup.colorsync_busy, setup.colorsync_error) = colorsync;
                 setup.waiting = waiting;
+                setup.still_off = still_off;
                 setup.restart = restart;
                 setup.agent = agent;
+                setup.earlier = earlier;
                 setup.connecting = connecting;
                 setup.registered = registered;
                 cx.notify();
@@ -4493,6 +4580,7 @@ impl Shell {
             // The user may answer in System Settings.
             notify::check();
         }
+        self.check_still_off(now);
         if now == before {
             self.recheck_capture(cx);
             self.push_setup(cx);

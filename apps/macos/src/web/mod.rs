@@ -803,15 +803,58 @@ Connection: close\r\n\
     )
 }
 
+/// The one 404 for every unknown, malformed or expired token and every
+/// unknown path (ADR 0019): a page that says why a link may have stopped,
+/// without telling which.
 fn not_found_response() -> &'static [u8] {
-    b"HTTP/1.1 404 Not Found\r\n\
-Content-Type: text/plain; charset=utf-8\r\n\
-Content-Length: 10\r\n\
+    static RESPONSE: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    RESPONSE.get_or_init(|| {
+        let body = agent_screen_model::web_preview::render_not_found(
+            crate::i18n::t("en", "zh-Hans"),
+            crate::i18n::t(
+                "This preview isn't available",
+                "此预览不可用",
+            ),
+            crate::i18n::t(
+                "The display may have ended, or Agent Screen restarted. Ask the agent for a new link.",
+                "显示器可能已结束，或 Agent Screen 已重启。请向 agent 索取新链接。",
+            ),
+        );
+        let mut response = format!(
+            "HTTP/1.1 404 Not Found\r\n\
+Content-Type: text/html; charset=utf-8\r\n\
+Content-Length: {}\r\n\
+Content-Security-Policy: {PAGE_CSP}\r\n\
 Cache-Control: no-store\r\n\
 X-Content-Type-Options: nosniff\r\n\
 Connection: close\r\n\
-\r\n\
-not found\n"
+\r\n",
+            body.len()
+        )
+        .into_bytes();
+        response.extend_from_slice(body.as_bytes());
+        response
+    })
+}
+
+/// Send the ended picture as the stream's last part, giving up after a
+/// second for a reader that stopped reading.
+async fn send_ended(writer: &mut tokio::net::tcp::OwnedWriteHalf) {
+    let part = format_mjpeg_part(ended_frame());
+    let _ = tokio::time::timeout(Duration::from_secs(1), async {
+        writer.write_all(&part).await?;
+        writer.flush().await
+    })
+    .await;
+}
+
+/// The last picture a live preview's stream sends when its display's token
+/// expires, so the page doesn't stay on a frame that looks live.
+fn ended_frame() -> &'static [u8] {
+    match crate::i18n::lang() {
+        crate::i18n::Lang::En => include_bytes!("../../assets/web/web-ended-en.jpg"),
+        crate::i18n::Lang::ZhHans => include_bytes!("../../assets/web/web-ended-zh.jpg"),
+    }
 }
 
 fn method_not_allowed_response() -> &'static [u8] {
@@ -1026,11 +1069,13 @@ Connection: close\r\n\
                 tokio::pin!(stop);
                 stop.as_mut().enable();
                 if lease.feed.expired.load(Ordering::Acquire) {
+                    send_ended(&mut writer).await;
                     break;
                 }
                 tokio::select! {
                     _ = &mut stop => {
                         if lease.feed.expired.load(Ordering::Acquire) {
+                            send_ended(&mut writer).await;
                             break;
                         }
                     }

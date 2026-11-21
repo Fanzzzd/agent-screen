@@ -80,9 +80,10 @@ impl Status {
 
 /// Check both now, and remember the answer for `last`.
 pub fn status() -> Status {
+    let pretend = PRETEND_OFF.load(Ordering::Relaxed);
     let status = Status {
-        screen: screen_recording(),
-        accessibility: super::ax::is_trusted(),
+        screen: screen_recording() && pretend & 1 == 0,
+        accessibility: super::ax::is_trusted() && pretend & 2 == 0,
     };
     LAST.store(
         status.screen as u8 | (status.accessibility as u8) << 1 | 4,
@@ -92,6 +93,11 @@ pub fn status() -> Status {
 }
 
 static LAST: AtomicU8 = AtomicU8::new(0);
+
+/// `debugShow pretend-screen-off` and `pretend-ax-off`: the UI acts as if
+/// that permission were off (1 Screen Recording, 2 Accessibility), so
+/// scripts can see its states without the user turning one off.
+pub static PRETEND_OFF: AtomicU8 = AtomicU8::new(0);
 
 /// The last check's answer, for drawing: checking costs a window list.
 pub fn last() -> Status {

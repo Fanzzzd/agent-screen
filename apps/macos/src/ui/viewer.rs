@@ -870,7 +870,9 @@ impl Viewer {
         // Without Screen Recording the picture stops; the notice over it
         // takes the clicks.
         let denied = !crate::mac::permissions::last().screen;
-        let blocked = self.sheet.is_some() || denied;
+        // Posting input to an app needs Accessibility, the Viewer's too.
+        let no_input = !crate::mac::permissions::last().accessibility;
+        let blocked = self.sheet.is_some() || denied || no_input;
         let input = canvas(
             |_, _, _| {},
             move |bounds, _, window: &mut Window, cx| {
@@ -933,6 +935,9 @@ impl Viewer {
             .when(denied, |d| {
                 d.child(denied_notice(self.shell.clone(), theme))
             })
+            .when(!denied && no_input, |d| {
+                d.child(ax_notice(self.shell.clone(), theme))
+            })
     }
 
     fn sheet_view(
@@ -988,7 +993,7 @@ impl Viewer {
                         .child(t("Goes back where it was", "放回原位置"))
                         .into_any_element()
                 } else {
-                    segmented(index, item.fate, theme, cx).into_any_element()
+                    segmented(index, item.fate, item.name(), theme, cx).into_any_element()
                 };
                 div()
                     .flex()
@@ -1140,7 +1145,7 @@ fn denied_notice(shell: WeakEntity<Shell>, theme: &Theme) -> impl IntoElement {
                 .text_color(gpui::white().opacity(0.8))
                 .child(t(
                     "The picture stopped updating, and the agent can’t take screenshots.",
-                    "画面不再更新，agent 也截不到图。",
+                    "画面已停止更新，agent 也无法截图。",
                 )),
         )
         .child(div().mt(px(6.)).child(button(
@@ -1151,6 +1156,50 @@ fn denied_notice(shell: WeakEntity<Shell>, theme: &Theme) -> impl IntoElement {
             theme,
             move |cx| tell(&shell, cx, |shell, cx| shell.open_setup(cx)),
         )))
+}
+
+/// Along the picture's top while Accessibility is off: the picture still
+/// updates, but no click or key reaches the apps, the agent's or the
+/// user's through the Viewer.
+fn ax_notice(shell: WeakEntity<Shell>, theme: &Theme) -> impl IntoElement {
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .right_0()
+        .flex()
+        .items_center()
+        .gap(px(10.))
+        .px(px(12.))
+        .py(px(8.))
+        .bg(theme.scrim)
+        .child(
+            svg()
+                .path("icons/alert.svg")
+                .flex_none()
+                .size(px(15.))
+                .text_color(theme.orange),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_size(px(12.5))
+                .text_color(gpui::white())
+                .child(t(
+                    "Accessibility is off. Clicks and typing don’t reach the apps.",
+                    "辅助功能权限已关闭，点击和输入无法送达 app。",
+                )),
+        )
+        .child(button(
+            "ax-fix",
+            t("Fix Permissions…", "修复权限…").into(),
+            None,
+            Some(theme.accent),
+            theme,
+            move |cx| tell(&shell, cx, |shell, cx| shell.open_setup(cx)),
+        ))
 }
 
 fn note(text: String, color: Hsla) -> gpui::AnyElement {
@@ -1193,20 +1242,29 @@ fn sheet_button(
 }
 
 /// 取回 | 关闭窗口 for one window.
+/// A radio group for VoiceOver, named for its window, so each choice
+/// reads as "“Report.pdf”: Take Back" and says whether it is set.
 fn segmented(
     index: usize,
     fate: Fate,
+    window: String,
     theme: &Theme,
     cx: &mut Context<Viewer>,
 ) -> impl IntoElement {
-    let segment = |label: &'static str, value: Fate, cx: &mut Context<Viewer>| {
+    let name = window.clone();
+    let segment = move |label: &'static str, value: Fate, cx: &mut Context<Viewer>| {
         let selected = fate == value;
         div()
             .id(gpui::ElementId::Name(
                 format!("fate-{index}-{label}").into(),
             ))
-            .role(Role::Button)
-            .aria_label(label)
+            .role(Role::RadioButton)
+            .aria_label(tf!("“{name}”: {label}", "“{name}”：{label}"))
+            .aria_toggled(if selected {
+                gpui::Toggled::True
+            } else {
+                gpui::Toggled::False
+            })
             .px(px(9.))
             .h(px(22.))
             .flex()
@@ -1239,6 +1297,9 @@ fn segmented(
             .child(label)
     };
     div()
+        .id(gpui::ElementId::Name(format!("fate-{index}").into()))
+        .role(Role::RadioGroup)
+        .aria_label(SharedString::from(window))
         .flex()
         .p(px(2.))
         .gap(px(2.))
