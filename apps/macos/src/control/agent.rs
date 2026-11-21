@@ -630,7 +630,9 @@ async fn handle_one(
             })
             .await
             .ok_or_else(|| {
-                ControlError::not_found(format!("no window with that id on display {id}"))
+                ControlError::not_found(format!(
+                    "no window with that id on display {id}; call list_windows for its windows"
+                ))
             })?;
             let disposition = p
                 .string("disposition")
