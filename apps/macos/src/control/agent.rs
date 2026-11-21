@@ -790,7 +790,9 @@ async fn handle_one(
         }
         // The MCP server of an agent session listed the tools.
         "agentReady" => {
-            let client = p.string("client").unwrap_or_else(|| "An agent".into());
+            let client = p
+                .string("client")
+                .unwrap_or_else(|| crate::i18n::t("An agent", "agent").into());
             if let Some(shell) = crate::ui::shell::current() {
                 let _ = shell.update(cx, |shell, cx| shell.agent_ready(client, cx));
             }

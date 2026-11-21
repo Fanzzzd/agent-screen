@@ -3875,10 +3875,18 @@ impl Shell {
                     "Update to Agent Screen {version}?",
                     "更新到 Agent Screen {version}？"
                 ),
-                &tf!(
-                    "Agent Screen restarts to update, which ends the {open} Agent Displays open now and the agents' work on them. Otherwise the update installs by itself once no Agent Display is open, or when you quit.",
-                    "Agent Screen 更新时要重启，会结束现在打开的 {open} 块 Agent 显示器，agent 在上面的工作也会中断。不更新的话，等没有 Agent 显示器打开时，或者你退出时，更新会自动安装。"
-                ),
+                &if open == 1 {
+                    t(
+                        "Agent Screen restarts to update, which ends the Agent Display open now and the agent's work on it. Otherwise the update installs by itself once no Agent Display is open, or when you quit.",
+                        "更新需要重启 Agent Screen，当前打开的 Agent 显示器将结束，agent 在其上的工作也会中断。暂不更新的话，更新会在没有 Agent 显示器打开时或你退出时自动安装。",
+                    )
+                    .to_string()
+                } else {
+                    tf!(
+                        "Agent Screen restarts to update, which ends the {open} Agent Displays open now and the agents' work on them. Otherwise the update installs by itself once no Agent Display is open, or when you quit.",
+                        "更新需要重启 Agent Screen，当前打开的 {open} 块 Agent 显示器将结束，agent 在其上的工作也会中断。暂不更新的话，更新会在没有 Agent 显示器打开时或你退出时自动安装。"
+                    )
+                },
                 t("Restart and Update", "重启并更新"),
             )
         {

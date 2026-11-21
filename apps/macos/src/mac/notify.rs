@@ -320,10 +320,10 @@ pub fn update(display: u32, agent: &str, task: &str, note: Option<Note>) {
 
     let (title, body) = match &note {
         Note::Input(reason) => (
-            tf!("{agent} has an input request", "{agent} 有一个输入请求"),
+            tf!("{agent} wants to use your mouse", "{agent} 想用你的鼠标"),
             tf!(
-                "{reason} Review the shared queue under the menu bar icon. This build cannot execute real input.",
-                "{reason} 在菜单栏图标下查看共享队列。本构建无法执行真实输入。"
+                "{reason} Choose Allow or Not Now on the card under the menu bar icon.",
+                "{reason} 请在菜单栏图标下的卡片中选择允许或暂不。"
             ),
         ),
         Note::Help { reason, .. } => (
@@ -404,10 +404,18 @@ pub fn update(display: u32, agent: &str, task: &str, note: Option<Note>) {
         ),
         Note::Disconnected { windows } => (
             tf!("{agent} disconnected", "{agent} 的连接断了"),
-            tf!(
-                "{windows} windows are still on its display",
-                "{windows} 个窗口还在它的显示器上"
-            ),
+            if *windows == 1 {
+                t(
+                    "1 window is still on its display",
+                    "1 个窗口还在它的显示器上",
+                )
+                .to_string()
+            } else {
+                tf!(
+                    "{windows} windows are still on its display",
+                    "{windows} 个窗口还在它的显示器上"
+                )
+            },
         ),
     };
     let content = UNMutableNotificationContent::new();

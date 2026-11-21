@@ -596,7 +596,7 @@ The control socket accepts these methods in debug builds. `AGENTSCREEN_DEBUG=1` 
 | `debugFrontWait` | `AGENTSCREEN_INSTANCE=e2e` only. `ms` sets how long a click, key or type call that the user's front app blocks waits for that app to leave the front before it answers `input_pending`; 0 restores 30 s. |
 | `debugKeyHold` | what the last hold of the user's keys during a `launch_app` did: `events`, `keyDowns`, `ms`, why it ended (`end`), whether it went out (`sent`) and how many key downs were dropped (`discarded`), counts only; `diashared` checks it. |
 | `debugPressCheck` | `on` false stops checking a press beside the user's window for its effect, true starts again; `sharedbrowser` times a press both ways. |
-| `debugTakeBack` | Takes `windowId` back from `displayId`, as from the Windows menu. |
+| `debugTakeBack` | Takes `windowId` back from `displayId`, as from the Viewer's Take Back menu. |
 | `debugUserWindow` | Debug builds only. On this session's user stand-in stage (`userStage`), makes `windowId`, a window it launched there, the user's own: the stage forgets it, and the claim keeps AeroSpace off it. |
 | `debugAnswerWindow` | Answers the display's Window Request with `give` true or false once it opens. Returns `answered`. |
 | `debugAnswerHelp` | Answers the display's Help Request as the Help Card does: `answer` `continue`, `reply` with `text` (typed into the card's field, then Send), `later` or `takeOver`. With `via` `notification`, takes the notification's action path instead: `continue`, `reply`, `takeOver` or `open`, for the request `requestId` when given, as the notification carries it. Returns `answered`. |
