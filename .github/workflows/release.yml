@@ -211,16 +211,33 @@ jobs:
           VERSION: ${{ needs.build.outputs.version }}
         run: |
           set -euo pipefail
+          upload_appcast() {
+            for attempt in 1 2 3 4 5; do
+              gh release upload "v$VERSION" target/appcast.xml --clobber && return
+              echo "::warning::appcast.xml upload failed (attempt $attempt)"
+              sleep $((attempt * 10))
+            done
+            echo "::error::v$VERSION is released without appcast.xml, so installed apps won't update. Re-run this job: it uploads this run's appcast."
+            exit 1
+          }
           if gh release view "v$VERSION" > /dev/null 2>&1; then
             # Finishing a release: the DMG on GitHub is the one users get,
             # and a rebuild never has the same bytes, so the cask follows it.
             echo "v$VERSION is already released"
-            # This build's appcast signs a rebuilt DMG, not the one on
-            # GitHub: keep the release's own.
-            gh release view "v$VERSION" --json assets --jq '.assets[].name' | grep -qx appcast.xml ||
-              echo "::warning::v$VERSION has no appcast.xml; installed apps won't see it"
             gh release download "v$VERSION" --pattern '*.dmg' --dir "$RUNNER_TEMP/check"
             sha="$(sha256sum "$RUNNER_TEMP/check/AgentScreen-$VERSION.dmg" | cut -d' ' -f1)"
+            # Installed apps read the latest release's appcast.xml; without
+            # it they never update (#284). A rebuild's appcast signs other
+            # bytes, so only this run's own build may supply it, as when
+            # only this job is run again after its upload failed.
+            if ! gh release view "v$VERSION" --json assets --jq '.assets[].name' | grep -qx appcast.xml; then
+              built="$(sha256sum "target/AgentScreen-$VERSION.dmg" | cut -d' ' -f1)"
+              if [[ "$built" != "$sha" ]]; then
+                echo "::error::v$VERSION has no appcast.xml, and this run's DMG is not the released one, so its appcast would carry a wrong signature. Re-run only this job of the run that released it, or sign an appcast for the released DMG and upload it."
+                exit 1
+              fi
+              upload_appcast
+            fi
             sed -i "s/^  sha256 \".*\"/  sha256 \"$sha\"/" target/agent-screen.rb
           else
             knope release --verbose
@@ -230,7 +247,7 @@ jobs:
             printf '%s\n\n%s\n' "$notes" "$(cat .github/release-footer.md)" > "$RUNNER_TEMP/notes.md"
             gh release edit "v$VERSION" --title "Agent Screen $VERSION" --notes-file "$RUNNER_TEMP/notes.md"
             # The feed installed apps check, signed for this DMG.
-            gh release upload "v$VERSION" target/appcast.xml --clobber
+            upload_appcast
           fi
           # What users download must be what the cask names.
           rm -rf "$RUNNER_TEMP/check"

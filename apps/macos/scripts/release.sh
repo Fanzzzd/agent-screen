@@ -83,6 +83,8 @@ if [[ -z "$key_file" && -n "${SPARKLE_ED_KEY:-}" ]]; then
   trap 'rm -rf "$stage" "$key_file"' EXIT
 fi
 if [[ -n "$key_file" ]]; then
+  # A key from another pair signs updates every installed app rejects.
+  ../../.github/scripts/check-sparkle-key.sh "$key_file" "$plist"
   sparkle="$(scripts/sparkle.sh)"
   signature="$("$sparkle/bin/sign_update" --ed-key-file "$key_file" "$dmg")"
   minimum="$(/usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion" "$plist")"

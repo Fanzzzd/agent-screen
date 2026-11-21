@@ -976,6 +976,10 @@ impl Shell {
             self.push_setup(cx);
         }
         let core = self.core.read(cx);
+        // Sparkle's Install and Relaunch asks this count on the main thread,
+        // whenever the user clicks it: keep it current, not only while an
+        // update waits (ADR 0012).
+        update::set_open_displays(core.displays.list.len());
         let ids: HashSet<DisplayId> = core.displays.list.iter().map(|d| d.id).collect();
         let asking_count = card::asking_count(
             &core.displays,
@@ -3939,7 +3943,6 @@ impl Shell {
                 else {
                     return;
                 };
-                update::set_open_displays(open);
                 if update::pending().is_none() {
                     let _ = this.update(cx, |shell, _| shell.watching_updates = false);
                     return;
