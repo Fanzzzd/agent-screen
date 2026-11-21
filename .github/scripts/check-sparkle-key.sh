@@ -31,23 +31,28 @@ tr -d ' \n\r\t' <"$key_file" | base64 --decode >"$work/key" 2>/dev/null || {
   exit 1
 }
 
+# macOS's own openssl is LibreSSL, which can't read a raw Ed25519 seed:
+# use Homebrew's openssl@3, or $OPENSSL.
 openssl3() {
   local candidate
   for candidate in "${OPENSSL:-}" /opt/homebrew/opt/openssl@3/bin/openssl /usr/local/opt/openssl@3/bin/openssl openssl; do
     if [[ -n "$candidate" ]] && "$candidate" version 2>/dev/null | grep -q '^OpenSSL 3'; then
       echo "$candidate"
-      return
+      return 0
     fi
   done
-  echo "error: deriving a Sparkle public key needs OpenSSL 3 (brew install openssl@3)" >&2
-  exit 1
+  return 1
 }
 
 case "$(wc -c <"$work/key" | tr -d ' ')" in
   32)
     # PKCS#8 wrapping of a raw Ed25519 seed (RFC 8410).
     { printf '\x30\x2e\x02\x01\x00\x30\x05\x06\x03\x2b\x65\x70\x04\x22\x04\x20'; cat "$work/key"; } >"$work/key.der"
-    "$(openssl3)" pkey -inform DER -in "$work/key.der" -pubout -outform DER -out "$work/pub.der"
+    if ! openssl="$(openssl3)"; then
+      echo "error: deriving the Sparkle key's public key needs OpenSSL 3, and none was found at \$OPENSSL, /opt/homebrew/opt/openssl@3 or on PATH: brew install openssl@3" >&2
+      exit 1
+    fi
+    "$openssl" pkey -inform DER -in "$work/key.der" -pubout -outform DER -out "$work/pub.der"
     got="$(tail -c 32 "$work/pub.der" | base64)"
     ;;
   96)

@@ -215,7 +215,7 @@ jobs:
             for attempt in 1 2 3 4 5; do
               gh release upload "v$VERSION" target/appcast.xml --clobber && return
               echo "::warning::appcast.xml upload failed (attempt $attempt)"
-              sleep $((attempt * 10))
+              if ((attempt < 5)); then sleep $((attempt * 10)); fi
             done
             echo "::error::v$VERSION is released without appcast.xml, so installed apps won't update. Re-run this job: it uploads this run's appcast."
             exit 1
