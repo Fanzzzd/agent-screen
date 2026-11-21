@@ -676,11 +676,32 @@ fn window_belongs_on_display(
     .is_some_and(|(owner, _)| owner == display)
 }
 
-/// Menus open on a display: an app's pop-up menus, as a web page's select
-/// shows, at the pop-up menu level (kCGPopUpMenuWindowLevel).
-pub fn menus_on(display: DisplayId) -> Vec<u32> {
+/// Pop-up menus on a display, open or fading out, at the pop-up menu
+/// level (kCGPopUpMenuWindowLevel), as a web page's select shows.
+pub fn menus_on(display: DisplayId) -> Vec<agent_screen_model::open_menu::Menu> {
     let area = cg::display_bounds(display);
-    cg::on_screen_ids_where(|_, layer, bounds| layer == 101 && bounds.intersects(&area))
+    cg::on_screen_alpha_where(|layer, bounds| layer == 101 && bounds.intersects(&area))
+        .into_iter()
+        .map(|(window, alpha)| agent_screen_model::open_menu::Menu { window, alpha })
+        .collect()
+}
+
+/// The open menus on `display` after an input, the menus the agent's next
+/// input may be meant for. A menu that was open before it (`seen`) and is
+/// still opaque may be flashing the item the input chose: look again for
+/// a moment, unless `waited`, until it fades out or the moment is over
+/// (`agent_screen_model::open_menu`). Blocks for up to 300 ms.
+pub fn menus_after_input(display: DisplayId, seen: &[u32], waited: bool) -> Vec<u32> {
+    use agent_screen_model::open_menu::{CLOSING_WAIT_MS, LOOK_EVERY_MS, after_input};
+    let until = std::time::Instant::now() + std::time::Duration::from_millis(CLOSING_WAIT_MS);
+    let mut waited = waited;
+    loop {
+        if let Some(open) = after_input(seen, &menus_on(display), waited) {
+            return open;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(LOOK_EVERY_MS));
+        waited = std::time::Instant::now() >= until;
+    }
 }
 
 /// Move document windows that grew past the display's edges, such as

@@ -3,6 +3,9 @@
 //! `act_on_element click` and `press` on the Vercel dashboard, while
 //! focus and Return worked; text typed after a missed click reached the
 //! page's shortcuts, and a native select couldn't be chosen by click.
+//! The select's menu does open in the background (#276): it is a window
+//! at the pop-up menu level, which list_windows leaves out, and its items
+//! are in the window's state while it is open.
 //!
 //! A Chrome on a throwaway profile plays the user's browser. Agent Screen
 //! has no DevTools pipe to it: the script starts it with no startup
@@ -29,10 +32,14 @@
 //! The script clicks each control through the agent's `click`, presses and
 //! clicks them through `elementAction`, clicks the field and types, opens
 //! the select by click and picks an item by click, then by focus and
-//! type-ahead. It records which events each route delivered. The front
-//! app is sampled every 10 ms through the run: if the user's was away for
-//! more than 100 ms before the handover, the script quits the stand-in and
-//! stops, and the handed-over browser must never come to the front.
+//! type-ahead, then opens it and types, which only moves the menu's
+//! highlight and says so, and picks with Return. A click right after each
+//! choice must go out, as the chosen menu fades out rather than being
+//! closed by the user. It records which events each route delivered. The
+//! front app is sampled every 10 ms through the run: if the user's was
+//! away for more than 100 ms before the handover, the script quits the
+//! stand-in and stops, and the handed-over browser must never come to the
+//! front.
 //!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e handoverclicks
 //!
@@ -225,10 +232,21 @@ fn main() -> ExitCode {
 /// The element labelled `label` in a window state tree: its number and its
 /// center on the display.
 fn element(tree: &str, label: &str) -> Result<(u64, (f64, f64))> {
+    find(tree, &format!("\"{label}\""))
+}
+
+/// The item titled `title` of a native menu open over the window, in its
+/// window state tree: the select's own items under its popupbutton hold
+/// the title as a value and have no real frames.
+fn menu_item(tree: &str, title: &str) -> Result<(u64, (f64, f64))> {
+    find(tree, &format!("menuitem \"{title}\""))
+}
+
+fn find(tree: &str, needle: &str) -> Result<(u64, (f64, f64))> {
     let line = tree
         .lines()
-        .find(|l| l.contains(&format!("\"{label}\"")))
-        .with_context(|| format!("no {label} in the tree:\n{}", cut(tree, 2000)))?;
+        .find(|l| l.contains(needle))
+        .with_context(|| format!("no {needle} in the tree:\n{}", cut(tree, 2000)))?;
     let number = line
         .trim_start()
         .strip_prefix('[')
@@ -599,59 +617,64 @@ fn test(port: u16, log: &Log) -> Result<()> {
         // click; then by focus and type-ahead.
         let from = mark(log);
         let r = click(sel);
-        // The select's menu is a window of its own; the popup button's
-        // children in the page's tree have no real frames. It may take a
-        // moment to show and to list its items.
-        let menu_state = || {
-            let menu_window = control
-                .call("listWindows", json!({ "sessionKey": KEY, "displayId": id }))
-                .ok()
-                .and_then(|l| {
-                    l["windows"].as_array().and_then(|ws| {
-                        ws.iter()
-                            .filter_map(|w| w["windowId"].as_u64())
-                            .find(|&w| w != window_id)
-                    })
-                });
-            let menu = match menu_window {
-                Some(w) => control
-                    .call(
-                        "windowState",
-                        json!({ "sessionKey": KEY, "displayId": id, "windowId": w }),
-                    )
-                    .map(|s| s["tree"].as_str().unwrap_or_default().to_string())
-                    .unwrap_or_default(),
-                None => String::new(),
-            };
-            (menu_window, menu)
-        };
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
-        let (menu_window, menu) = loop {
-            let (w, menu) = menu_state();
-            if element(&menu, "Preview").is_ok() || std::time::Instant::now() >= until {
-                break (w, menu);
+        // The select's menu is a window of its own at the pop-up menu
+        // level, which list_windows leaves out; the window's state lists
+        // its items with their frames while it is open (#276). It may take
+        // a moment to show.
+        let open_menu = || {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            loop {
+                let t = tree().unwrap_or_default();
+                if menu_item(&t, "Preview").is_ok() || std::time::Instant::now() >= until {
+                    break t;
+                }
+                sleep_ms(200);
             }
-            sleep_ms(200);
         };
-        println!("menu window {menu_window:?}: {}", cut(&menu, 800));
-        let item = element(&menu, "Preview").ok();
-        let picked = match item {
-            Some((_, at)) => click(at),
-            None => Err(anyhow::anyhow!(
-                "no Preview item in the tree after the click"
-            )),
-        };
-        let ev = wait_for(log, from, |ev| has(ev, "value Find me|Preview"));
-        report("select by clicks", &picked, &ev);
+        let menu = open_menu();
+        let menus = probe(&["windows", &pid.to_string()])
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| l.contains("\"layer\":101"))
+            .count();
+        println!("menus {menus}, tree after the click: {}", cut(&menu, 1500));
         check(
-            "a click opens the native select and a click on an item picks it",
-            has(&ev, "value Find me|Preview"),
-            format!("open {} | pick {} | {ev:?}", said(&r), said(&picked)),
+            "a click opens the native select's menu on the display, its items in the window state",
+            menus > 0 && menu_item(&menu, "Preview").is_ok(),
+            format!("open {} | {menus} menu windows", said(&r)),
+        );
+        let picked = match menu_item(&menu, "Preview") {
+            Ok((_, at)) => click(at),
+            Err(e) => Err(e),
+        };
+        // The next click goes out at once: the chosen menu, flashing its
+        // item and fading out, is closing, not closed by the user.
+        let next = click(plain);
+        let ev = wait_for(log, from, |ev| {
+            has(ev, "value Find me|Preview") && has(ev, "plain acted")
+        });
+        report("select by clicks, then a click", &picked, &ev);
+        check(
+            "a click on an item of the open menu picks it",
+            has(&ev, "value Find me|Preview") && has(&ev, "change sel trusted=true"),
+            format!("pick {} | {ev:?}", said(&picked)),
+        );
+        check(
+            "a click right after the choice goes out, not refused as if the user closed the menu",
+            next.is_ok() && has(&ev, "plain acted"),
+            format!("{} | {ev:?}", said(&next)),
         );
         let from = mark(log);
         let set = act(sel_n, "set_value", Some("Development"));
         let ev = since(log, from);
         report("select set_value", &set, &ev);
+        check(
+            "set_value, with no pipe to this Chrome, fails and says to open the menu with a click",
+            set.as_ref()
+                .err()
+                .is_some_and(|e| e.to_string().contains("click the select")),
+            said(&set),
+        );
         let from = mark(log);
         let focused = act(sel_n, "focus", None);
         let typed = control.call(
@@ -666,6 +689,46 @@ fn test(port: u16, log: &Log) -> Result<()> {
             "focus and type-ahead choose a select item",
             ev.iter().any(|e| e.ends_with("|Development")),
             format!("focus {} | type {} | {ev:?}", said(&focused), said(&typed)),
+        );
+        // With its menu open, typed text moves the menu's highlight and
+        // chooses nothing; the reply says so, and Return chooses (#276).
+        let r = click(sel);
+        let menu = open_menu();
+        let from = mark(log);
+        let typed = control.call(
+            "type",
+            json!({ "sessionKey": KEY, "displayId": id, "text": "Pro" }),
+        );
+        let noted = typed
+            .as_ref()
+            .ok()
+            .and_then(|v| v["note"].as_str())
+            .is_some_and(|n| n.contains("Return"));
+        let ev = since(log, from);
+        check(
+            "with the menu open, typing chooses nothing and the reply says to press Return",
+            menu_item(&menu, "Production").is_ok() && noted && !has(&ev, "change"),
+            format!("press {} | type {} | {ev:?}", said(&r), said(&typed)),
+        );
+        let returned = control.call(
+            "key",
+            json!({ "sessionKey": KEY, "displayId": id, "keys": "Return" }),
+        );
+        let next = click(plain);
+        let ev = wait_for(log, from, |ev| {
+            ev.iter().any(|e| e.ends_with("|Production")) && has(ev, "plain acted")
+        });
+        report("menu open, type + Return, then a click", &returned, &ev);
+        check(
+            "Return chooses the highlighted item, and a click right after goes out",
+            ev.iter().any(|e| e.ends_with("|Production"))
+                && next.is_ok()
+                && has(&ev, "plain acted"),
+            format!(
+                "return {} | click {} | {ev:?}",
+                said(&returned),
+                said(&next)
+            ),
         );
         let state = tree().unwrap_or_default();
         println!("final tree excerpt: {}", cut(&state, 1500));

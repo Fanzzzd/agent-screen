@@ -112,6 +112,10 @@ pub async fn handle(
     {
         menu_still_open(id, method, cx).await?;
     }
+    // The menus open at the agent's last call, for this input.
+    let seen = shown
+        .map(|id| MENUS.with(|m| m.borrow().get(&id).cloned().unwrap_or_default()))
+        .unwrap_or_default();
     let named = Args(&p)
         .int("displayId")
         .zip(Args(&p).int("windowId"))
@@ -136,6 +140,7 @@ pub async fn handle(
         }
         (reply, _) => reply,
     };
+    let mut reply = reply;
     // The menus the agent's next input may be meant for.
     if let Some(id) = shown
         && matches!(
@@ -155,7 +160,25 @@ pub async fn handle(
                 | "elementAction"
         )
     {
-        let menus = off(cx, move || windows::menus_on(id)).await;
+        // An input may have chosen an item of a menu open before it, which
+        // stays on screen a moment (#276). Other calls change no menu.
+        let chooses = matches!(
+            method,
+            "click" | "mouseUp" | "drag" | "key" | "holdKey" | "type" | "elementAction"
+        );
+        let waited = !chooses || reply.is_err();
+        let before = seen.clone();
+        let menus = off(cx, move || windows::menus_after_input(id, &before, waited)).await;
+        if method == "type"
+            && agent_screen_model::open_menu::typed_into_menu(&seen, &menus)
+            && let Ok(object) = &mut reply
+        {
+            let note = match object.get("note").and_then(Value::as_str) {
+                Some(note) => format!("{note} {TYPED_INTO_MENU}"),
+                None => TYPED_INTO_MENU.to_string(),
+            };
+            object.insert("note".into(), json!(note));
+        }
         MENUS.with(|m| m.borrow_mut().insert(id, menus));
     }
     if let Some((id, event)) = timeline
@@ -177,6 +200,9 @@ thread_local! {
         std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
+/// `type`'s note when its text went to a menu open before and after it.
+const TYPED_INTO_MENU: &str = "A menu was open, and still is, so the text went to the menu, not to a field: type-ahead in an open menu moves its highlight and chooses nothing. Press Return to choose the highlighted item, or Escape to close the menu.";
+
 /// Refuse a click or key meant for a menu that closed since the agent's
 /// last call. macOS ends an app's open menu at the user's next click or
 /// key anywhere, their own screen included, and the agent's input would
@@ -190,10 +216,11 @@ async fn menu_still_open(
     if seen.is_empty() {
         return Ok(());
     }
-    let open = off(cx, move || windows::menus_on(id)).await;
-    if seen.iter().any(|w| open.contains(w)) {
+    let listed = off(cx, move || windows::menus_on(id)).await;
+    if agent_screen_model::open_menu::input_may_go(&seen, &listed) {
         return Ok(());
     }
+    let open = agent_screen_model::open_menu::open(&listed);
     MENUS.with(|m| m.borrow_mut().insert(id, open));
     let action = match method {
         "type" => "typing",
