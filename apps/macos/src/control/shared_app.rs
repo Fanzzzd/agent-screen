@@ -43,7 +43,7 @@ pub async fn front(target: WindowTarget, cx: &AsyncApp) -> (Front, Option<u32>) 
         return (Front::No, None);
     }
     let window = target.window_id;
-    let focused = match FOCUS_UNKNOWN.load(std::sync::atomic::Ordering::Relaxed) {
+    let focused = match beside::focus_forced_unknown() {
         true => None,
         false => {
             off(cx, move || {
@@ -61,10 +61,8 @@ pub async fn front(target: WindowTarget, cx: &AsyncApp) -> (Front, Option<u32>) 
 
 /// Test hook (`debugFocusUnknown`): the front app's focused window reads
 /// as unknown, as when the app doesn't answer in time.
-static FOCUS_UNKNOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
 pub fn force_focus_unknown(on: bool) {
-    FOCUS_UNKNOWN.store(on, std::sync::atomic::Ordering::Relaxed);
+    beside::force_focus_unknown(on);
 }
 
 /// The app's name and both windows' titles, for messages.
@@ -463,19 +461,82 @@ pub async fn posted_press_allowed(
         // All the app's windows on Agent Displays: none of the user's can
         // have focus, as in a Java app that never says which one does.
         (Front::FocusUnknown, _) if !user_window(target.pid, cx).await => Ok(()),
+        // Refused before anything was sent: act_on_element's clicks wait
+        // in the Input Queue (`super::front_queue`); a drag or button
+        // press doesn't, and answers `failed`.
         (Front::OtherFocused, Some(focused)) => {
             let n = names(Beside { target, focused });
-            Err(ControlError::failed(format!(
-                "{app} is the user's front app with their window {user} focused, and a posted {what} on your window {agent} would make it {app}'s key window and take the user's typing, so nothing was sent. Use act_on_element, or wait until the user switches to another app.",
-                app = n.app,
-                user = n.user,
-                agent = n.agent,
-            )))
+            Err(blocked(
+                target,
+                format!(
+                    "{app} is the user's front app with their window {user} focused, and a posted {what} on your window {agent} would make it {app}'s key window and take the user's typing, so nothing was sent. Use act_on_element, or wait until the user switches to another app.",
+                    app = n.app,
+                    user = n.user,
+                    agent = n.agent,
+                ),
+            ))
         }
-        _ => Err(ControlError::failed(format!(
-            "{}. Nothing was sent. Retry after a moment, when the app answers, or use act_on_element.",
-            unverified(target, what)
-        ))),
+        _ => Err(blocked(
+            target,
+            format!(
+                "{}. Nothing was sent. Retry after a moment, when the app answers, or use act_on_element.",
+                unverified(target, what)
+            ),
+        )),
+    }
+}
+
+/// A click bound to an element's window sent nothing: as it was about to
+/// go out, after the wait for another display's input, the user's window
+/// of `target`'s app had focus (`mac::shared_app::posts_to`). The caller
+/// queues it.
+pub fn took_focus(target: WindowTarget) -> ControlError {
+    let app = windows::find(target.window_id).map_or_else(|| "the app".into(), |w| w.app);
+    blocked(
+        target,
+        format!(
+            "the user's window of {app} took focus as the click on your window was about to go out, and a posted click would have taken that focus from them, so nothing was sent"
+        ),
+    )
+}
+
+/// A click of `count` presses that went out in part: a press after the
+/// first was held back, as the user's window of the app took focus or the
+/// element's window left the point. Final, so it is never sent again and
+/// never pressed more times than asked.
+pub fn partial_click(count: i64) -> ControlError {
+    ControlError::failed(format!(
+        "only part of the {count}-press click went in: after the first press, the user's window of the app took focus or the element's window left the point, so the rest was held back. It will not be sent again. Take a screenshot to see what the first press did before you act again"
+    ))
+}
+
+/// act_on_element's press on an element that lists no AXPress, in a window
+/// of the user's front app whose other window may have focus (#219). An
+/// accessibility press there would do nothing, as in Dia, and a posted
+/// click could take the user's focus. Nothing was sent: the caller queues
+/// it as a click at the element's center.
+pub async fn unlisted_press(target: WindowTarget, cx: &AsyncApp) -> ControlError {
+    let none = "the element lists no accessibility press, as a page element in Dia doesn't, so an accessibility press would do nothing";
+    match front(target, cx).await {
+        (Front::OtherFocused, Some(focused)) => {
+            let n = names(Beside { target, focused });
+            blocked(
+                target,
+                format!(
+                    "{app} is the user's front app with their window {user} focused, and {none}, and a posted click on your window {agent} would make it {app}'s key window and take the user's typing, so nothing was sent",
+                    app = n.app,
+                    user = n.user,
+                    agent = n.agent,
+                ),
+            )
+        }
+        _ => blocked(
+            target,
+            format!(
+                "{}, and {none}, so nothing was sent",
+                unverified(target, "click")
+            ),
+        ),
     }
 }
 

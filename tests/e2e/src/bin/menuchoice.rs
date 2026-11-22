@@ -205,7 +205,7 @@ fn test(fixture: &std::path::Path) -> Result<()> {
             "a WebKit page's select is refused before any key",
             web.as_ref().err().is_some_and(|e| {
                 let e = format!("{e:#}");
-                e.contains("isn't in one") && e.contains("nothing was sent")
+                e.contains("in neither") && e.contains("nothing was sent")
             }),
             format!("{web:?}"),
         );

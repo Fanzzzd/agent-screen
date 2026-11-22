@@ -262,6 +262,20 @@ impl Queue {
         self.requests.values()
     }
 
+    /// The request a retry of `operation` by `owner` joins: the latest one
+    /// of that kind (`front`) with the same operation, waiting, running or
+    /// ended and not yet read, unless a newer action replaced it or the
+    /// agent withdrew it. A retry after input_pending then waits on it, or
+    /// reads what came of it, and never sends the action a second time.
+    pub fn retry_of(&self, owner: &Owner, operation: &str, front: bool) -> Option<RequestId> {
+        self.requests
+            .values()
+            .rev()
+            .find(|r| &r.owner == owner && r.operation == operation && r.front == front)
+            .filter(|r| !matches!(r.status, Status::Stopped(Stop::Replaced | Stop::Withdrawn)))
+            .map(|r| r.id)
+    }
+
     pub fn owner(&self, display: DisplayId) -> Option<&Owner> {
         self.owners.get(&display)
     }
@@ -354,14 +368,7 @@ impl Queue {
         if self.owners.get(&owner.display) != Some(&owner) {
             return Err(EnqueueError::Closed);
         }
-        if let Some(r) = self
-            .requests
-            .values()
-            .rev()
-            .find(|r| r.owner == owner && r.operation == operation && r.front == front)
-            .filter(|r| !matches!(r.status, Status::Stopped(Stop::Replaced | Stop::Withdrawn)))
-        {
-            let id = r.id;
+        if let Some(id) = self.retry_of(&owner, &operation, front) {
             // Expire first: a retry at or after the idle deadline must not
             // make the old grant busy again.
             self.tick(now);
@@ -888,6 +895,35 @@ mod tests {
             .unwrap();
         assert_eq!(q.waiting().count(), 0);
         assert_eq!(q.fronts().count(), 1);
+    }
+
+    #[test]
+    fn a_retry_joins_its_front_request_until_it_is_read_replaced_or_withdrawn() {
+        let mut q = queue();
+        let a = owner("a", 1);
+        let op = "elementAction {\"element\":4}";
+        assert_eq!(q.retry_of(&a, op, true), None);
+        let id = q
+            .enqueue_front(a.clone(), op.into(), "Press in Dia".into(), 0)
+            .unwrap();
+        // Waiting, running, and done in the background: each retry joins it.
+        assert_eq!(q.retry_of(&a, op, true), Some(id));
+        assert!(q.start_front(id, 1));
+        assert_eq!(q.retry_of(&a, op, true), Some(id));
+        assert!(q.finish_front(id, true, 2));
+        assert_eq!(q.retry_of(&a, op, true), Some(id));
+        // Another call, another owner or a loan request isn't the retry.
+        assert_eq!(q.retry_of(&a, "elementAction {\"element\":5}", true), None);
+        assert_eq!(q.retry_of(&owner("b", 2), op, true), None);
+        assert_eq!(q.retry_of(&a, op, false), None);
+        // Once read, the same call again is a new action.
+        q.forget(id);
+        assert_eq!(q.retry_of(&a, op, true), None);
+        let again = q
+            .enqueue_front(a.clone(), op.into(), "Press in Dia".into(), 3)
+            .unwrap();
+        assert!(q.withdraw(again, &a, 4));
+        assert_eq!(q.retry_of(&a, op, true), None);
     }
 
     #[test]

@@ -108,6 +108,10 @@ pub struct Look {
     /// The point, global.
     pub at: (f64, f64),
     pub window: WindowTarget,
+    /// `window` is the window that hosts what is at the point, as an
+    /// element's press click is bound by (`bound_click_reaches`), so a
+    /// panel another process draws in it counts as it.
+    pub by_host: bool,
     pub region: Rect,
     pub samples: Vec<u8>,
 }
@@ -236,6 +240,13 @@ impl InputQueue {
         let _ = self
             .queue
             .register(owner.session_key.clone(), owner.connection, display);
+    }
+
+    /// The front request a retry of `operation` by `owner` joins
+    /// (`Queue::retry_of`), with the operation cut as `submit_front` cuts it.
+    pub fn retry_front(&self, owner: &Owner, operation: &str) -> Option<RequestId> {
+        let operation: String = operation.chars().take(OPERATION_CHARS).collect();
+        self.queue.retry_of(owner, &operation, true)
     }
 
     pub fn owner(&self, display: DisplayId, connection: u64) -> Result<Owner, String> {

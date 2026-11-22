@@ -316,6 +316,123 @@ pub fn press_goes_in(listed: bool) -> bool {
     listed
 }
 
+/// How act_on_element's press reaches an element.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ElementPress {
+    /// The element lists AXPress: press it through accessibility.
+    Ax,
+    /// It lists none and the app takes posted input: a posted click at its
+    /// center, as press already does when AXPress is refused.
+    PostedClick,
+    /// It lists none and the user's window of the app may have focus: wait
+    /// in the Input Queue as a click at its center.
+    WaitForFront,
+    /// It lists none, and a click at its center can't reach it.
+    Refuse(Center),
+}
+
+/// What is at an element's center, for a click that stands for its press.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Center {
+    /// The center is off the element's Agent Display.
+    OffDisplay,
+    /// No window is there that takes a click, or none could be read.
+    NoWindow,
+    /// Another window covers it: the click would land there.
+    Covered,
+    /// The element's own window, the one the agent asked for.
+    Window,
+}
+
+impl Center {
+    /// From the element's center, if it is on the display, the window
+    /// there, by the window its panels belong to, and the element's own
+    /// windows: the one the agent asked for and the one accessibility puts
+    /// the element in, as a sheet of it.
+    pub fn of(on_display: bool, at_center: Option<u32>, own: &[u32]) -> Center {
+        match (on_display, at_center) {
+            (false, _) => Center::OffDisplay,
+            (true, None) => Center::NoWindow,
+            (true, Some(w)) if own.contains(&w) => Center::Window,
+            (true, Some(_)) => Center::Covered,
+        }
+    }
+}
+
+/// Whether a click bound to an element's own windows (`Center::of`) may go
+/// to the window at its point: the topmost window there, by the window
+/// that hosts it, as a panel another process draws in the element's
+/// window is that window's. One rule for every step of such a click: the
+/// check before it, the window the Input Queue keeps when it waits, the
+/// check as it replays, and the press as it goes out.
+pub fn bound_click_reaches(host_at_point: Option<u32>, own: &[u32]) -> bool {
+    Center::of(true, host_at_point, own) == Center::Window
+}
+
+/// Whether a bound click's press may still go out after the waits before
+/// it (another display's input, the focus, a real-input loan): the point,
+/// hit-tested again, shows the window the press is aimed at, by its
+/// `(target, host)` window IDs, and that host is one of the element's own
+/// (`bound_click_reaches`). A window that came over the point meanwhile,
+/// or one that moved away, gets nothing.
+pub fn press_still_bound(aimed: (u32, u32), now: Option<(u32, u32)>, own: &[u32]) -> bool {
+    now == Some(aimed) && bound_click_reaches(Some(aimed.1), own)
+}
+
+/// How a click checked as it goes out ended, from whether any press of it
+/// went out (`delivered`), whether one was held back because the user's
+/// window of the app took focus (`front_took`), and whether one was held
+/// back because the element's window was no longer at the point
+/// (`moved`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClickEnd {
+    /// Every press went out.
+    Sent,
+    /// Nothing went out and the user's window has focus: the whole click
+    /// waits in the Input Queue.
+    Wait,
+    /// Some presses went out, as the first of a double click, then one was
+    /// held back. Final: waiting and sending the whole click again would
+    /// press more times than asked.
+    Partial,
+    /// Nothing went out: no window, or not the element's own, at the point.
+    Nothing,
+}
+
+pub fn click_end(delivered: bool, front_took: bool, moved: bool) -> ClickEnd {
+    match (delivered, front_took, moved) {
+        (false, true, _) => ClickEnd::Wait,
+        (false, false, _) => ClickEnd::Nothing,
+        (true, true, _) | (true, _, true) => ClickEnd::Partial,
+        (true, false, false) => ClickEnd::Sent,
+    }
+}
+
+/// How act_on_element's press goes in. `listed`: the element lists
+/// AXPress. Dia answers AXPress with success on an element that lists
+/// none and does nothing, 0 of 14 (#219), so an unlisted press is a click
+/// at the element's center instead, which waits while a posted click
+/// could take the user's focus (`Front::shared`). The click, now or from
+/// the queue, goes only to the element's own window: never to one that
+/// covers it, nor to no window. `user_window`: whether the app has a
+/// window on the user's screens.
+pub fn element_press(
+    listed: bool,
+    front: Front,
+    user_window: bool,
+    center: Center,
+) -> ElementPress {
+    if listed {
+        ElementPress::Ax
+    } else if center != Center::Window {
+        ElementPress::Refuse(center)
+    } else if front.shared(user_window) {
+        ElementPress::WaitForFront
+    } else {
+        ElementPress::PostedClick
+    }
+}
+
 /// Whether Tab stops at an element: one that is enabled and lets a client
 /// set its focus. The page itself and the scroll area around it take
 /// focus too, but Tab moves among what is in them. An element a page
@@ -815,6 +932,143 @@ mod tests {
     fn a_press_goes_in_only_on_an_element_that_lists_it() {
         assert!(press_goes_in(true));
         assert!(!press_goes_in(false));
+    }
+
+    const FRONTS: [Front; 4] = [
+        Front::No,
+        Front::TargetFocused,
+        Front::OtherFocused,
+        Front::FocusUnknown,
+    ];
+
+    const CENTERS: [Center; 4] = [
+        Center::OffDisplay,
+        Center::NoWindow,
+        Center::Covered,
+        Center::Window,
+    ];
+
+    #[test]
+    fn a_listed_press_goes_through_accessibility() {
+        for front in FRONTS {
+            for user_window in [false, true] {
+                for center in CENTERS {
+                    assert_eq!(
+                        element_press(true, front, user_window, center),
+                        ElementPress::Ax,
+                        "{front:?} {user_window} {center:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_unlisted_press_is_a_posted_click_when_the_app_takes_input() {
+        for (front, user_window) in [
+            (Front::No, true),
+            (Front::No, false),
+            (Front::TargetFocused, true),
+            (Front::FocusUnknown, false),
+        ] {
+            assert_eq!(
+                element_press(false, front, user_window, Center::Window),
+                ElementPress::PostedClick,
+                "{front:?} {user_window}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unlisted_press_waits_beside_the_users_window() {
+        for (front, user_window) in [
+            (Front::OtherFocused, true),
+            (Front::OtherFocused, false),
+            (Front::FocusUnknown, true),
+        ] {
+            assert_eq!(
+                element_press(false, front, user_window, Center::Window),
+                ElementPress::WaitForFront,
+                "{front:?} {user_window}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unlisted_press_whose_click_cant_reach_its_window_is_refused() {
+        for front in FRONTS {
+            for user_window in [false, true] {
+                for center in [Center::OffDisplay, Center::NoWindow, Center::Covered] {
+                    assert_eq!(
+                        element_press(false, front, user_window, center),
+                        ElementPress::Refuse(center)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_center_belongs_to_the_requested_window_only() {
+        assert_eq!(Center::of(false, Some(7), &[7]), Center::OffDisplay);
+        assert_eq!(Center::of(true, None, &[7]), Center::NoWindow);
+        assert_eq!(Center::of(true, Some(8), &[7]), Center::Covered);
+        assert_eq!(Center::of(true, Some(7), &[7]), Center::Window);
+        // A sheet of the requested window is the element's own.
+        assert_eq!(Center::of(true, Some(9), &[7, 9]), Center::Window);
+    }
+
+    #[test]
+    fn a_bound_click_reaches_only_a_window_the_element_owns_or_hosts() {
+        // The element's window 7 and its sheet 9.
+        let own = [7, 9];
+        // Its window, its sheet, and a panel another process draws in
+        // window 7, found by its host.
+        assert!(bound_click_reaches(Some(7), &own));
+        assert!(bound_click_reaches(Some(9), &own));
+        // Another window of the app over it, a menu, or nothing.
+        assert!(!bound_click_reaches(Some(12), &own));
+        assert!(!bound_click_reaches(None, &own));
+        assert!(!bound_click_reaches(Some(7), &[]));
+    }
+
+    #[test]
+    fn a_press_goes_out_only_if_the_point_still_shows_its_window() {
+        let own = [7, 9];
+        // Aimed at window 7 itself, and at panel 30 window 7 hosts.
+        assert!(press_still_bound((7, 7), Some((7, 7)), &own));
+        assert!(press_still_bound((30, 7), Some((30, 7)), &own));
+        // During the wait, another window came over the point, a panel
+        // opened over it, the window moved away, or it was never own.
+        assert!(!press_still_bound((7, 7), Some((12, 12)), &own));
+        assert!(!press_still_bound((7, 7), Some((30, 7)), &own));
+        assert!(!press_still_bound((7, 7), None, &own));
+        assert!(!press_still_bound((12, 12), Some((12, 12)), &own));
+    }
+
+    #[test]
+    fn a_click_cut_after_its_first_press_is_final_and_never_waits_again() {
+        assert_eq!(click_end(true, false, false), ClickEnd::Sent);
+        // Held back before anything went out: the whole click waits.
+        assert_eq!(click_end(false, true, false), ClickEnd::Wait);
+        assert_eq!(click_end(false, false, true), ClickEnd::Nothing);
+        assert_eq!(click_end(false, false, false), ClickEnd::Nothing);
+        // A double click whose second press was held back: one press went
+        // in, and a wait would send two more.
+        assert_eq!(click_end(true, true, false), ClickEnd::Partial);
+        assert_eq!(click_end(true, false, true), ClickEnd::Partial);
+    }
+
+    #[test]
+    fn a_press_click_goes_out_by_the_window_that_hosts_the_hit() {
+        // At mouse-down the hit's host window is checked: a panel another
+        // process draws in the element's window counts as that window, so
+        // its click is the element's; another window of the same app
+        // covering the point, or none, gets nothing.
+        let own = [7];
+        assert_eq!(Center::of(true, Some(7), &own), Center::Window);
+        assert_eq!(Center::of(true, Some(12), &own), Center::Covered);
+        assert_eq!(Center::of(true, None, &own), Center::NoWindow);
     }
 
     #[test]

@@ -1,7 +1,8 @@
 //! set_value's steps, by the control's role (#79). A closed pop-up button
 //! takes its item's title as type-ahead; a web page's select in a Chromium
 //! app with a DevTools pipe (ADR 0010) is chosen through the pipe instead,
-//! with no item in between. A combo box takes AXValue, then AXConfirm;
+//! with no item in between, and one without the pipe takes type-ahead
+//! while posted keys reach the agent's window only. A combo box takes AXValue, then AXConfirm;
 //! anything else takes AXValue. No step opens a menu: an open menu takes
 //! the user's keyboard (ADR 0001). Each step checks for a Takeover first,
 //! and so does the job that sends it, so nothing more goes out once the
@@ -11,8 +12,8 @@
 use super::server::ControlError;
 use agent_screen_model::devtools::Engine;
 use agent_screen_model::selection::{
-    PopupMiss, Refusal, ValueRoute, keys_for, popup_kind, popup_miss, popup_title_is_safe,
-    value_route,
+    PopupKind, PopupMiss, Refusal, ValueRoute, WebSelect, keys_for, popup_kind, popup_miss,
+    popup_title_is_safe, value_route, web_select,
 };
 use std::time::{Duration, Instant};
 
@@ -87,6 +88,14 @@ pub(super) struct PopupFacts {
     pub engine: Option<Engine>,
     /// Whether the app draws with AppKit; None when that can't be told.
     pub cocoa: Option<bool>,
+    /// Whether posted keys reach the agent's window only (`Front::posts`).
+    pub posts: bool,
+    /// Whether the user may be working in another window of the app
+    /// (`Front::shared`).
+    pub shared: bool,
+    /// Whether the pop-up button lists a menu or menu items among its
+    /// children, as Chromium lists a select's options.
+    pub holds_menu: bool,
 }
 
 /// The AX and input calls set_value makes. The jobs behind `set`,
@@ -162,7 +171,7 @@ const INSTEAD: &str = "Call request_help for the user to choose it";
 /// Why no key went to the pop-up, for the agent.
 fn refusal_message(refusal: &Refusal, title: &str) -> String {
     let why = match refusal {
-        Refusal::Kind => "Agent Screen types only into an AppKit app's pop-up button, where a typed letter can't open the menu, and this one is a control of another toolkit, such as Qt, Java or Flutter, or one accessibility couldn't describe. An open menu would take the user's keyboard".to_string(),
+        Refusal::Kind => "Agent Screen types only into an AppKit app's pop-up button or a Chromium page's select, where a typed letter can't open the menu, and this one is a control of another toolkit, such as Qt, Java or Flutter, or one accessibility couldn't describe. An open menu would take the user's keyboard".to_string(),
         Refusal::Space { keys } => format!(
             "{title:?} holds a space, and a space can press the button and open its menu, so Agent Screen never types one. It would type only {keys:?}, the part before the space, if that alone reached {title:?}, but the pop-up doesn't list its items without opening, so that can't be told"
         ),
@@ -170,26 +179,30 @@ fn refusal_message(refusal: &Refusal, title: &str) -> String {
     format!("{why}. Nothing was sent and no menu was opened. {INSTEAD}")
 }
 
-/// What a web page's select gets when the pipe can't choose for it.
-fn web_refusal(engine: Option<Engine>) -> String {
-    let why = if engine == Some(Engine::Chromium) {
-        "Agent Screen chooses a web page's select through the private DevTools pipe of a Chromium app that launch_app started, and this one is out of its reach: the app has no pipe, as a browser the user started, or the select is in a frame from another site"
-    } else {
-        "Agent Screen chooses a web page's select only through the private DevTools pipe of a Chromium app that launch_app started, and this page isn't in one"
-    };
-    format!(
-        "{why}. A key typed into a web select could open its menu, which would take the user's keyboard, so nothing was sent and no menu was opened. To choose it yourself, click the select to open its menu, then click or press the item in your next call: the menu shows in a screenshot and its items in get_window_state while it is open, and it closes at the user's next click or key. For a page you can open again, a Chromium browser started with launch_app and its own --user-data-dir chooses without a menu. Or call request_help for the user to choose it"
-    )
+/// What a select in a page of another engine than Chromium gets.
+fn web_refusal() -> String {
+    "Agent Screen chooses a web page's select through the private DevTools pipe of a Chromium app that launch_app started, or by typing the option's title into the closed select of a Chromium app, and this page is in neither. A key typed into this select could open its menu, which would take the user's keyboard, so nothing was sent and no menu was opened. Open the page in a Chromium browser with launch_app, or call request_help for the user to choose it. If neither will do, a click on the select opens its menu, and its items show in get_window_state while it is open, but it closes at the user's next click or key".to_string()
 }
 
+/// What a Chromium page's select without the pipe gets while posted keys
+/// could reach the user's window of the app.
+const WEB_WAIT: &str = "the app is the user's front app with their window focused, and keys typed into the select would reach that window, so nothing was sent and no menu was opened. Call set_value again once the user switches to another app, or call request_help for the user to choose it";
+
+/// What a Chromium page's select without the pipe gets when accessibility
+/// couldn't say which window of the app has focus.
+const WEB_FOCUS_UNKNOWN: &str = "the app is the user's front app, and Accessibility could not verify which of its windows has focus, so keys typed into the select could reach the user's window. Nothing was sent and no menu was opened. Retry after a moment, or call request_help for the user to choose it";
+
 /// What type-ahead with `keys` may have chosen on the way, for the agent:
-/// a native app runs the pop-up's action for each item the pop-up shows.
-/// Empty when a single key goes straight to the item.
-fn passed_note(keys: &str) -> String {
-    if keys.chars().count() > 1 {
-        " Type-ahead may have shown other items on the way, and the app may have run the pop-up's action for each.".to_string()
-    } else {
-        String::new()
+/// a native app runs the pop-up's action for each item the pop-up shows,
+/// and a page's select fires `change` for each option it shows. Empty when
+/// a single key goes straight to the item.
+fn passed_note(keys: &str, kind: PopupKind) -> String {
+    if keys.chars().count() <= 1 {
+        return String::new();
+    }
+    match kind {
+        PopupKind::ChromiumSelect => " Type-ahead may have shown other options on the way, and the page may have got a change event for each.".to_string(),
+        PopupKind::AppKit | PopupKind::Other => " Type-ahead may have shown other items on the way, and the app may have run the pop-up's action for each.".to_string(),
     }
 }
 
@@ -212,12 +225,36 @@ async fn popup(
     let before = shown.clone().unwrap_or_default();
     let facts = access.popup_facts().await;
     check(access, display)?;
-    if facts.in_web_page == Some(true) {
+    let kind = if facts.in_web_page == Some(true) {
         if facts.engine != Some(Engine::Chromium) {
-            return Err(ControlError::failed(web_refusal(facts.engine)));
+            return Err(ControlError::failed(web_refusal()));
         }
         match access.choose_in_page(title, &before).await {
-            PageChoice::Unpiped => return Err(ControlError::failed(web_refusal(facts.engine))),
+            // No pipe, or a frame from another site: Chromium searches a
+            // closed select by its typed letters without opening it (#219).
+            PageChoice::Unpiped => {
+                match web_select(
+                    facts.engine,
+                    false,
+                    facts.holds_menu,
+                    facts.posts,
+                    facts.shared,
+                ) {
+                    WebSelect::TypeAhead => PopupKind::ChromiumSelect,
+                    WebSelect::WaitForFront => {
+                        return Err(ControlError::failed(WEB_WAIT));
+                    }
+                    WebSelect::NotSelect => {
+                        return Err(ControlError::failed(format!(
+                            "the pop-up button lists no options, so it is a page's button that opens a menu or a custom control, not a select, and keys typed into it could reach the page's shortcuts. Nothing was sent and no menu was opened. Press or click it, then choose from what it shows, or {}",
+                            INSTEAD.to_lowercase()
+                        )));
+                    }
+                    WebSelect::Pipe | WebSelect::Refuse => {
+                        return Err(ControlError::failed(WEB_FOCUS_UNKNOWN));
+                    }
+                }
+            }
             PageChoice::NotSelect => {
                 return Err(ControlError::failed(format!(
                     "the page has no select at this element, so it is a button that opens a menu or a custom control, and typing into it could open the menu. Nothing was sent and no menu was opened. {INSTEAD}"
@@ -258,8 +295,9 @@ async fn popup(
                 )));
             }
         }
-    }
-    let kind = popup_kind(facts.in_web_page, facts.engine, facts.cocoa);
+    } else {
+        popup_kind(facts.in_web_page, facts.engine, facts.cocoa)
+    };
     let keys = keys_for(title, kind)
         .map_err(|refusal| ControlError::failed(refusal_message(&refusal, title)))?;
     if shown.is_none() {
@@ -267,7 +305,7 @@ async fn popup(
             "accessibility didn't say what the pop-up button shows, so Agent Screen can't tell where type-ahead would go. Nothing was sent and no menu was opened. Refresh get_window_state and retry, or call request_help",
         ));
     }
-    let passed = passed_note(&keys);
+    let passed = passed_note(&keys, kind);
     let typed = access.type_popup(&keys).await;
     let total = keys.chars().count();
     let (done, why) = match typed {
@@ -295,7 +333,7 @@ async fn popup(
         format!(
             " It now shows {}.{}",
             shown_text(&shown),
-            passed_note(&sent)
+            passed_note(&sent, kind)
         )
     } else {
         String::new()
@@ -473,6 +511,9 @@ mod tests {
                     in_web_page: Some(false),
                     engine: Some(Engine::WebKit),
                     cocoa: Some(true),
+                    posts: true,
+                    shared: false,
+                    holds_menu: false,
                 },
                 page: PageChoice::Unpiped,
                 typed: None,
@@ -555,6 +596,9 @@ mod tests {
             in_web_page: Some(true),
             engine: Some(Engine::Chromium),
             cocoa: Some(false),
+            posts: true,
+            shared: false,
+            holds_menu: true,
         };
         fake
     }
@@ -658,26 +702,78 @@ mod tests {
     }
 
     #[test]
-    fn a_web_select_the_pipe_cant_reach_gets_no_key() {
-        let mut fake = select("Cherry");
-        let error = run(&mut fake, "Cherry").unwrap_err();
+    fn an_unpiped_chromium_select_is_chosen_by_typing_and_read_back() {
+        let mut fake = select("Preview");
+        let note = run(&mut fake, "Preview").unwrap().unwrap_or_default();
+        assert_eq!(fake.keys.as_deref(), Some("Preview"));
+        assert_eq!(
+            fake.trace,
+            ["role", "read", "facts", "pipe", "type", "read"]
+        );
+        // Each option shown on the way fires the page's change event.
+        assert!(note.contains("change event"), "{note}");
+    }
+
+    #[test]
+    fn an_unpiped_chromium_select_beside_the_users_window_gets_no_key() {
+        let mut fake = select("Preview");
+        fake.facts.posts = false;
+        fake.facts.shared = true;
+        let error = run(&mut fake, "Preview").unwrap_err();
         assert!(
-            error.message.contains("out of its reach"),
+            error.message.contains("set_value again"),
+            "{}",
+            error.message
+        );
+        // No focus-then-type advice: type goes to the last field a click
+        // picked, not to the select.
+        assert!(
+            !error.message.contains("computer type"),
             "{}",
             error.message
         );
         assert!(!fake.trace.contains(&"type"));
-        // It says how to choose with the menu open instead (#276).
+        // Focus unknown and no window of the user's: refused too.
+        let mut fake = select("Preview");
+        fake.facts.posts = false;
+        let error = run(&mut fake, "Preview").unwrap_err();
         assert!(
-            error.message.contains("click the select"),
+            error.message.contains("could not verify"),
             "{}",
             error.message
         );
+        assert!(!fake.trace.contains(&"type"));
+    }
+
+    #[test]
+    fn an_unpiped_chromium_pop_up_button_without_options_gets_no_key() {
+        let mut fake = select("Preview");
+        fake.facts.holds_menu = false;
+        let error = run(&mut fake, "Preview").unwrap_err();
+        assert!(error.message.contains("not a select"), "{}", error.message);
+        assert!(!fake.trace.contains(&"type"));
+    }
+
+    #[test]
+    fn an_unpiped_chromium_select_never_gets_a_space() {
+        let mut fake = select("Dragon fruit");
+        let error = run(&mut fake, "Dragon fruit").unwrap_err();
+        assert!(
+            error.message.contains("never types one"),
+            "{}",
+            error.message
+        );
+        assert!(!fake.trace.contains(&"type"));
+    }
+
+    #[test]
+    fn a_select_of_another_engine_gets_no_key() {
         let mut fake = select("Cherry");
         fake.facts.engine = Some(Engine::WebKit);
         let error = run(&mut fake, "Cherry").unwrap_err();
-        assert!(error.message.contains("isn't in one"), "{}", error.message);
+        assert!(error.message.contains("in neither"), "{}", error.message);
         assert!(!fake.trace.contains(&"pipe"));
+        assert!(!fake.trace.contains(&"type"));
     }
 
     #[test]

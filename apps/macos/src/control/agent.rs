@@ -24,7 +24,9 @@ use agent_screen_model::placement::{self, AppSighting, Holder, NamedApp, PutAway
 use agent_screen_model::real_click;
 use agent_screen_model::request::{Answer, HelpAsked, Kind, NamedWindow, Resolution, Woken};
 use agent_screen_model::session::Orphans;
-use agent_screen_model::shared_app::Front;
+use agent_screen_model::shared_app::{
+    Center, ClickEnd, ElementPress, Front, bound_click_reaches, element_press,
+};
 use base64::Engine;
 use futures::FutureExt;
 use gpui::{App, AsyncApp, Entity};
@@ -322,6 +324,15 @@ async fn handle_one(
     .then(|| p.int("displayId"))
     .flatten()
     .map(|id| id as DisplayId);
+    // The same element action again after input_pending: it waits on the
+    // queued click, or reads what came of it, and never presses twice.
+    if method == "elementAction"
+        && let Some(id) = acting
+        && let Some(reply) =
+            super::front_queue::rejoin(&core, connection, id, &element_operation(&p), cx).await
+    {
+        return reply;
+    }
     if let Some(id) = acting {
         crate::mac::catch::agent_acted(id);
         if method != "launchApp" {
@@ -476,8 +487,10 @@ async fn handle_one(
         }
         "click" => {
             let first = finish_arm(click_action(&core, connection, &p, cx).await, refresh_acted);
-            return super::front_queue::queue_if_blocked(&core, connection, method, &p, first, cx)
-                .await;
+            return super::front_queue::queue_if_blocked(
+                &core, connection, method, &p, first, None, cx,
+            )
+            .await;
         }
         "move" => {
             let (id, point) = target(&core, &p, cx).await?;
@@ -557,13 +570,17 @@ async fn handle_one(
         }
         "type" => {
             let first = finish_arm(type_action(&core, &p, cx).await, refresh_acted);
-            return super::front_queue::queue_if_blocked(&core, connection, method, &p, first, cx)
-                .await;
+            return super::front_queue::queue_if_blocked(
+                &core, connection, method, &p, first, None, cx,
+            )
+            .await;
         }
         "key" => {
             let first = finish_arm(key_action(&core, &p, cx).await, refresh_acted);
-            return super::front_queue::queue_if_blocked(&core, connection, method, &p, first, cx)
-                .await;
+            return super::front_queue::queue_if_blocked(
+                &core, connection, method, &p, first, None, cx,
+            )
+            .await;
         }
         "holdKey" => {
             let id = input_display(&core, &p, cx).await?;
@@ -1106,7 +1123,30 @@ async fn click_action(
         }
         Ok(window) => window,
     };
-    if let Some((target, _)) = hit_window {
+    // A queued element action's click: only to the element's own window,
+    // found by the window that hosts what is at the point, as the queue
+    // kept it and as the press checks it going out.
+    let own = own_windows(p);
+    let mut bound_to = None;
+    if let Some(own) = &own {
+        let host = off(cx, move || {
+            crate::mac::input::host_at(point).map(|(w, _)| w)
+        })
+        .await;
+        if !bound_click_reaches(host.map(|h| h.window_id), own) {
+            return Err(ControlError::failed(
+                "the element's window is no longer at its center, as when it moved or another window covers it, so the queued click was not sent. Take a screenshot and get_window_state before you act again",
+            ));
+        }
+        bound_to = host;
+    }
+    // A bound click is checked against the user's focus by its host
+    // window, so a hosted panel waits beside the user's window too.
+    let front_target = match own {
+        Some(_) => bound_to,
+        None => hit_window.map(|(t, _)| t),
+    };
+    if let Some(target) = front_target {
         let plain = modifiers == Default::default();
         let left = button == Button::Left;
         let (front, focused) = shared_app::front(target, cx).await;
@@ -1141,7 +1181,39 @@ async fn click_action(
         }
     }
     let forwarder = show_pointer(core, id, point, true, cx);
-    let (hit, stopped) = forwarder.click(point, button, count, modifiers).await;
+    // A queued element click checks the user's focus again as it goes out.
+    let check_front = own.is_some();
+    let clicked = forwarder
+        .click_in(point, button, count, modifiers, own, check_front)
+        .await;
+    let (hit, stopped) = (clicked.hit, clicked.stopped);
+    if !stopped {
+        match clicked.end() {
+            // The user went back to their window of the app as the click
+            // was about to go out: nothing was sent, and it waits again
+            // (`front_queue`).
+            ClickEnd::Wait => {
+                if let Some(host) = clicked.front_took {
+                    return Err(shared_app::took_focus(host));
+                }
+            }
+            // Cut after its first press: final, never queued again.
+            ClickEnd::Partial => {
+                if let Some(window) = hit {
+                    shared_app::note_click(id, window, point);
+                }
+                return Err(shared_app::partial_click(count));
+            }
+            // A queued element click whose window left the point while it
+            // went out: nothing was sent.
+            ClickEnd::Nothing if bound_to.is_some() => {
+                return Err(ControlError::failed(
+                    "the element's window is no longer at its center, as when it moved or another window covers it, so the queued click was not sent. Take a screenshot and get_window_state before you act again",
+                ));
+            }
+            ClickEnd::Sent | ClickEnd::Nothing => {}
+        }
+    }
     if let Some(window) = hit {
         shared_app::note_click(id, window, point);
     }
@@ -2148,7 +2220,7 @@ async fn element_action(
             .remember_user_window(window.target.pid)
             .await;
     }
-    let action_note = act(
+    let action_note = match act(
         core,
         id,
         window.target,
@@ -2157,7 +2229,38 @@ async fn element_action(
         p.string("value"),
         cx,
     )
-    .await?;
+    .await
+    {
+        // Only the user's front app refused it, before anything was sent:
+        // it waits in the Input Queue as a click at the element's center
+        // (#219). Element numbers go stale, so the click holds a point.
+        Err(e) if e.code == "front_blocked" => {
+            let params =
+                match element_click(core, id, window.target, &action, &element, p, cx).await {
+                    Ok(params) => params,
+                    Err(None) => return Err(ControlError::failed(e.message)),
+                    Err(Some(why)) => {
+                        return Err(ControlError::failed(format!(
+                            "{}. It can't wait for the user to leave the app either: {why}.",
+                            e.message.trim_end_matches('.')
+                        )));
+                    }
+                };
+            return Ok(Arm::Early(
+                super::front_queue::queue_if_blocked(
+                    core,
+                    connection,
+                    "click",
+                    &Args(&params),
+                    Err(e),
+                    Some(element_operation(p)),
+                    cx,
+                )
+                .await,
+            ));
+        }
+        other => other?,
+    };
     // Typing after focusing a field, or pressing in a window, goes
     // to that window, as it would after a click there.
     if matches!(action.as_str(), "focus" | "set_value" | "press") {
@@ -2168,6 +2271,120 @@ async fn element_action(
         return Ok(Arm::Early(reply(json!({ "note": note }))));
     }
     Ok(Arm::Finish(Ok(json!({}))))
+}
+
+/// The windows a queued element action's click may go to (`element_click`):
+/// None for an agent's own click, which goes wherever its point is.
+pub(super) fn own_windows(p: &Args<'_>) -> Option<Vec<u32>> {
+    let own = p.0.get("ownWindows")?.as_array()?;
+    Some(
+        own.iter()
+            .filter_map(|w| w.as_u64().map(|w| w as u32))
+            .collect(),
+    )
+}
+
+/// What names an element action in the Input Queue, so the same call
+/// again finds the click it waits as (`front_queue::rejoin`).
+fn element_operation(p: &Args<'_>) -> String {
+    let field = |key: &str| p.0.get(key).cloned().unwrap_or(Value::Null);
+    let call = json!({
+        "displayId": field("displayId"),
+        "windowId": field("windowId"),
+        "element": field("element"),
+        "action": field("action"),
+        "value": field("value"),
+        "realInput": field("realInput"),
+    });
+    format!("elementAction {call}")
+}
+
+/// What is at an element's center: the window there, by the window its
+/// panels belong to, must be the requested one or the element's own, as a
+/// sheet of it, for a click to stand for its press. With the element's own
+/// windows, which the click checks again as it goes out.
+async fn element_center(
+    element: &ax::Element,
+    window: WindowTarget,
+    center: Option<(f64, f64)>,
+    cx: &mut AsyncApp,
+) -> (Center, Vec<u32>) {
+    let e = ax::Sendable(element.clone());
+    let (at_center, enclosing) = off(cx, move || {
+        (
+            center.and_then(|c| crate::mac::input::host_at(c).map(|(w, _)| w.window_id)),
+            ax::enclosing_window_id(e.get()),
+        )
+    })
+    .await;
+    let own: Vec<u32> = [Some(window.window_id), enclosing]
+        .into_iter()
+        .flatten()
+        .collect();
+    (Center::of(center.is_some(), at_center, &own), own)
+}
+
+/// Why a click at an element's center can't reach it.
+fn unreachable_center(at: Center) -> &'static str {
+    match at {
+        Center::OffDisplay => {
+            "its center is not on the display. Call scroll_into_view on it, then get_window_state, and try again"
+        }
+        Center::NoWindow => {
+            "no window that takes a click is at its center. Take a screenshot and get_window_state before you retry"
+        }
+        Center::Covered | Center::Window => {
+            "another window covers its center, and the click would land there. Move that window or close it, then try again"
+        }
+    }
+}
+
+/// The `click` call an element action stands for, to wait in the Input
+/// Queue: at the element's center, in screenshot pixels, with its button
+/// and count. The queue keeps the window at that point and runs the click
+/// only while it is still there, so that window must be the element's
+/// own (`Center`). Err(None) for an action that is no click, Err(Some)
+/// with why the click can't reach the element.
+async fn element_click(
+    core: &Entity<Core>,
+    id: DisplayId,
+    window: WindowTarget,
+    action: &str,
+    element: &ax::Element,
+    p: &Args<'_>,
+    cx: &mut AsyncApp,
+) -> Result<Params, Option<String>> {
+    let (button, count) = match action {
+        "press" | "click" => ("left", 1),
+        "double_click" => ("left", 2),
+        "right_click" => ("right", 1),
+        _ => return Err(None),
+    };
+    let e = ax::Sendable(element.clone());
+    let bounds = cg::display_bounds(id);
+    let center = off(cx, move || ax::frame(e.get()))
+        .await
+        .map(|f| f.mid())
+        .filter(|c| bounds.contains(*c));
+    let (at, own) = element_center(element, window, center, cx).await;
+    let (Center::Window, Some((x, y))) = (at, center) else {
+        return Err(Some(unreachable_center(at).to_string()));
+    };
+    let scale = display_scale(core, id, cx);
+    let mut params = Params::new();
+    params.insert("displayId".into(), json!(id));
+    // Unrounded, so the point maps back to the element's center itself.
+    params.insert("x".into(), json!((x - bounds.x) * scale));
+    params.insert("y".into(), json!((y - bounds.y) * scale));
+    params.insert("button".into(), json!(button));
+    params.insert("count".into(), json!(count));
+    // The queue keeps the window at the point only if it is one of these,
+    // and the click goes out only to one of them (`own_windows`).
+    params.insert("ownWindows".into(), json!(own));
+    if let Some(key) = p.0.get("sessionKey") {
+        params.insert("sessionKey".into(), key.clone());
+    }
+    Ok(params)
 }
 
 /// Methods that see or drive the display. The rest (ending a display,
@@ -4337,31 +4554,91 @@ async fn act(
         }
         off_main(cx, Box::new(move |e| ax::try_action(e, name))).await
     };
-    let click = async |button: Button, count: i64, cx: &mut AsyncApp| -> Result<(), ControlError> {
+    // The window the click went to, if any.
+    // `own`: the element's own windows, for a click that stands for its
+    // press, which goes out only to one of them.
+    let click = async |button: Button,
+                       count: i64,
+                       own: Option<Vec<u32>>,
+                       cx: &mut AsyncApp|
+           -> Result<Option<WindowTarget>, ControlError> {
         let c = center.ok_or_else(|| {
             ControlError::failed("the element has no visible frame on the display")
         })?;
         shared_app::posted_press_allowed(c, "click", cx).await?;
-        let (hit, stopped) = show_pointer(core, id, c, true, cx)
-            .click(c, button, count, Default::default())
+        let clicked = show_pointer(core, id, c, true, cx)
+            .click_in(c, button, count, Default::default(), own, true)
             .await;
-        if stopped {
-            return Err(stopped_input(id, "the click", hit.is_some()));
+        if clicked.stopped {
+            return Err(stopped_input(id, "the click", clicked.hit.is_some()));
+        }
+        match clicked.end() {
+            // The user went back to their window of the app during the
+            // wait before the press: nothing was sent, and it waits in the
+            // Input Queue as a click (`element_action`).
+            ClickEnd::Wait => Err(shared_app::took_focus(clicked.front_took.unwrap_or(window))),
+            // A double click cut after its first press: final, never
+            // queued, so it is never pressed more times than asked.
+            ClickEnd::Partial => Err(shared_app::partial_click(count)),
+            ClickEnd::Sent | ClickEnd::Nothing => Ok(clicked.hit),
+        }
+    };
+    // A click that stands for a press: it goes out only while the window
+    // at the element's center is the element's own, checked as the press
+    // goes out, and None means nothing was sent.
+    let press_click = async |cx: &mut AsyncApp| -> Result<(), ControlError> {
+        let (_, own) = element_center(element, window, center, cx).await;
+        if click(Button::Left, 1, Some(own), cx).await?.is_none() {
+            return Err(ControlError::failed(
+                "as the click went out, the window at the element's center was not the element's own, or there was none, so nothing was sent and the element was not pressed. Take a screenshot and get_window_state before you retry",
+            ));
         }
         Ok(())
     };
     match action {
         "press" => {
-            if !perform("AXPress", cx).await {
-                click(Button::Left, 1, cx).await?;
+            // Dia answers AXPress with success on an element that lists
+            // none and does nothing (#219): such a press is a click.
+            let listed = off_main(
+                cx,
+                Box::new(|e| ax::actions(e).iter().any(|a| a == "AXPress")),
+            )
+            .await;
+            let (front, _) = shared_app::front(window, cx).await;
+            let user_window = !listed
+                && front == Front::FocusUnknown
+                && shared_app::user_window(window.pid, cx).await;
+            let at = match listed {
+                true => Center::Window,
+                false => element_center(element, window, center, cx).await.0,
+            };
+            match element_press(listed, front, user_window, at) {
+                ElementPress::Ax => {
+                    if !perform("AXPress", cx).await {
+                        press_click(cx).await?;
+                    }
+                }
+                ElementPress::PostedClick => {
+                    press_click(cx).await?;
+                    note = Some(UNLISTED_PRESS_NOTE.to_string());
+                }
+                ElementPress::WaitForFront => {
+                    return Err(shared_app::unlisted_press(window, cx).await);
+                }
+                ElementPress::Refuse(at) => {
+                    return Err(ControlError::failed(format!(
+                        "the element lists no accessibility press, so it takes a click at its center, and nothing was sent: {}.",
+                        unreachable_center(at)
+                    )));
+                }
             }
         }
-        "click" => click(Button::Left, 1, cx).await?,
-        "double_click" => click(Button::Left, 2, cx).await?,
-        "right_click" => click(Button::Right, 1, cx).await?,
+        "click" => _ = click(Button::Left, 1, None, cx).await?,
+        "double_click" => _ = click(Button::Left, 2, None, cx).await?,
+        "right_click" => _ = click(Button::Right, 1, None, cx).await?,
         "show_menu" => {
             if !perform("AXShowMenu", cx).await {
-                click(Button::Right, 1, cx).await?;
+                click(Button::Right, 1, None, cx).await?;
             }
         }
         "focus" => {
@@ -4487,7 +4764,7 @@ impl super::values::ValueAccess for AxValues<'_> {
     async fn popup_facts(&mut self) -> super::values::PopupFacts {
         let item = ax::Sendable(self.element.clone());
         let win_pid = self.window.pid;
-        off(self.cx, move || {
+        let mut facts = off(self.cx, move || {
             let elem_pid = ax::pid_of(item.get());
             super::values::PopupFacts {
                 in_web_page: ax::in_web_area(item.get()),
@@ -4497,9 +4774,33 @@ impl super::values::ValueAccess for AxValues<'_> {
                 cocoa: elem_pid
                     .and_then(app::is_cocoa)
                     .or_else(|| app::is_cocoa(win_pid)),
+                posts: true,
+                shared: false,
+                holds_menu: false,
             }
         })
-        .await
+        .await;
+        // Only a select in a Chromium page reads these (`web_select`): a
+        // native pop-up button gets no extra accessibility reads, as its
+        // children or its app's focus, before its keys, which must keep
+        // type-ahead's cadence.
+        if facts.in_web_page == Some(true)
+            && facts.engine == Some(agent_screen_model::devtools::Engine::Chromium)
+        {
+            // Whether keys typed into a select without the pipe reach the
+            // agent's window only (#110).
+            let (front, _) = shared_app::front(self.window, self.cx).await;
+            let user_window =
+                front == Front::FocusUnknown && shared_app::user_window(win_pid, self.cx).await;
+            let item = ax::Sendable(self.element.clone());
+            facts.posts = front.posts();
+            facts.shared = front.shared(user_window);
+            facts.holds_menu = off(self.cx, move || {
+                crate::mac::shared_app::holds_menu(item.get())
+            })
+            .await;
+        }
+        facts
     }
 
     async fn choose_in_page(&mut self, title: &str, shown: &str) -> super::values::PageChoice {
@@ -7229,6 +7530,9 @@ async fn wait_until_still(id: DisplayId, size: (f64, f64), cx: &mut AsyncApp) {
     }
     keep_counting(id, cx);
 }
+
+/// act_on_element's press on an element that lists no AXPress (#219).
+const UNLISTED_PRESS_NOTE: &str = "The element lists no accessibility press, as a page element in Dia doesn't, so the press went in as a background click at its center. Take a screenshot to see what it did.";
 
 /// What an agent hears after pressing a menu item of an app built on VS
 /// Code, such as Cursor: with the terminal focused, Edit > Find opened the
