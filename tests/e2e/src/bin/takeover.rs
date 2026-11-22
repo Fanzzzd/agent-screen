@@ -1,7 +1,9 @@
 //! Takeover through the Viewer, beside the user's Agent Screen and out of
 //! their sight: the Viewer opens on a stage display, and the user's clicks
 //! and keys are made inside the app, through the Viewer's own handler. The
-//! user's pointer and keyboard stay untouched, so this runs at any time.
+//! user's pointer and keyboard stay untouched. The screen recording it
+//! starts lays its overlay over every screen for a few seconds, so its
+//! sign asks for hands off.
 //!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e takeover
 

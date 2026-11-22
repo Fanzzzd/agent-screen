@@ -263,7 +263,7 @@ pub const SCRIPTS: &[Script] = &[
     script("control", &[Takeover], Full, Hook, 1).no_app().manual(NEEDS_APP),
     script("conversation", &[Takeover, WindowAccess], Full, Hook, 1),
     script("crosswindow", &[WindowAccess, Windows], Full, Hook, 2).hands_off(),
-    script("cursormenu", &[Elements], Full, Agent, 1),
+    script("cursormenu", &[Elements], Full, Agent, 1).hands_off(),
     script("demo", &[], Full, Hook, 3)
         .manual("it records the README's demo and writes docs/media/demo.gif"),
     script("diafocused", &[AgentInput, Browser], Full, Agent, 1)
@@ -280,7 +280,7 @@ pub const SCRIPTS: &[Script] = &[
         "it drives your own Dia: run it with E2E_DIA=1 while you type in another Dia window",
     ),
     script("displaychange", &[Peek, Displays], Full, Hook, 2).hands_off(),
-    script("electron", &[AgentInput, Windows, Browser], Full, Agent, 1),
+    script("electron", &[AgentInput, Windows, Browser], Full, Agent, 1).hands_off(),
     script("endhandover", &[WindowAccess, Windows], Full, Hook, 3),
     script("filedrag", &[InputQueue, AgentInput, Browser], Full, Real, 1).hands_off(),
     script("firstclick", &[Browser, AgentInput], Full, Agent, 1),
@@ -293,10 +293,10 @@ pub const SCRIPTS: &[Script] = &[
     script("holdmode", &[Displays], Full, Agent, 1),
     script("ime", &[InputMethod, AgentInput], Core, Real, 1).hands_off(),
     script("inputqueue", &[InputQueue], Full, Hook, 1).hands_off(),
-    script("keys", &[AgentInput, Browser], Full, Agent, 1).hands_off(),
+    script("keys", &[AgentInput, Browser], Full, Agent, 1),
     script("lastapp", &[Displays, Windows], Full, Agent, 1),
     script("latewindow", &[Windows], Full, Agent, 1).hands_off(),
-    script("launchagain", &[Windows], Full, Agent, 1),
+    script("launchagain", &[Windows], Full, Agent, 1).hands_off(),
     script("launchhere", &[Windows, ViewerInput], Full, Hook, 2).hands_off(),
     script("load", &[Performance], Full, Agent, 12).hands_off().manual(MEASURES),
     script("loanfocus", &[InputQueue, Windows], Full, Hook, 1).hands_off(),
@@ -304,7 +304,7 @@ pub const SCRIPTS: &[Script] = &[
     script("mcporphan", &[Displays], Full, Agent, 0),
     script("mcpv1", &[Displays], Full, Agent, 1),
     script("menuchoice", &[Elements], Full, Hook, 1).hands_off(),
-    script("menuclosed", &[Elements, Browser], Full, Agent, 1).hands_off(),
+    script("menuclosed", &[Elements, Browser], Full, Agent, 1),
     script("menupress", &[Elements, InputQueue], Full, Real, 1).hands_off(),
     script("mirrorsafe", &[Displays], Full, Agent, 1),
     script("nativeclick", &[ViewerInput], Full, Hook, 2),
@@ -317,7 +317,7 @@ pub const SCRIPTS: &[Script] = &[
     script("peekrapid", &[Peek, Displays], Full, Hook, 4).hands_off(),
     script("perf", &[Performance], Full, Agent, 6).manual(MEASURES),
     script("placebrowser", &[Windows, Browser], Full, Agent, 1),
-    script("placeheld", &[Windows], Full, Agent, 2).hands_off(),
+    script("placeheld", &[Windows], Full, Agent, 2),
     script("placesize", &[Windows], Core, Agent, 1),
     script("pointer", &[Viewer], Full, Hook, 2)
         .manual("it records the Agent Pointer to judge by eye and checks nothing"),
@@ -337,7 +337,7 @@ pub const SCRIPTS: &[Script] = &[
     script("samebundle", &[Windows], Full, Agent, 1).hands_off(),
     script("scrolljump", &[AgentInput, Browser], Full, Agent, 1),
     script("secondwindow", &[Windows], Full, Agent, 1).hands_off(),
-    script("selectvalue", &[Elements, Browser], Full, Agent, 1).hands_off(),
+    script("selectvalue", &[Elements, Browser], Full, Agent, 1),
     script("selfupdate", &[Release], Full, Hook, 1).no_app().manual(
         "it needs SPARKLE_ED_KEY_FILE and builds the release bundle, which takes minutes",
     ),
@@ -347,26 +347,26 @@ pub const SCRIPTS: &[Script] = &[
     script("shared", &[AgentInput], Full, Hook, 1).hands_off(),
     script("sharedbrowser", &[AgentInput, Browser, Elements, InputQueue], Full, Real, 1).hands_off(),
     script("signupcontrols", &[Elements, Browser], Full, Agent, 1),
-    script("slowwindow", &[Windows, Browser], Full, Agent, 1),
+    script("slowwindow", &[Windows, Browser], Full, Agent, 1).hands_off(),
     script("smoke", &[AgentInput, Screenshots], Full, Agent, 1).no_app().manual(NEEDS_APP),
     script("sound", &[Recording], Full, Agent, 1).hands_off(),
     script("spares", &[Displays], Core, Agent, 2),
     script("sparerepark", &[Displays], Full, Agent, 1).hands_off(),
     script("sparesize", &[Displays], Full, Agent, 2),
-    script("statusicon", &[Peek], Full, Agent, 1).hands_off(),
+    script("statusicon", &[Peek], Full, Agent, 1),
     script("stop", &[], Full, Agent, 0)
         .no_app()
         .manual("a tool: it quits a test instance a stopped script left running"),
-    script("subtreestate", &[Elements], Full, Agent, 1),
+    script("subtreestate", &[Elements], Full, Agent, 1).hands_off(),
     script("suite", &[], Full, Agent, 0).no_app().manual("a tool: it runs the others"),
-    script("takeover", &[Takeover, ViewerInput], Core, Hook, 2),
+    script("takeover", &[Takeover, ViewerInput], Core, Hook, 2).hands_off(),
     script("timing", &[Performance, Displays], Full, Agent, 11).hands_off().manual(MEASURES),
-    script("typedrops", &[AgentInput, Browser], Full, Agent, 1).hands_off(),
+    script("typedrops", &[AgentInput, Browser], Full, Agent, 1),
     script("unmirror", &[Displays], Full, Agent, 4),
     script("updatewait", &[Displays], Full, Agent, 1),
     script("viewerdrag", &[ViewerInput], Full, Hook, 2),
     script("viewerheader", &[Viewer, Takeover], Full, Hook, 1).hands_off(),
-    script("viewerime", &[InputMethod, ViewerInput], Core, Hook, 2),
+    script("viewerime", &[InputMethod, ViewerInput], Core, Hook, 2).hands_off(),
     script("viewerkey", &[ViewerInput], Full, Hook, 2),
     script("viewerpicture", &[Viewer, Screenshots, Displays], Core, Hook, 3),
     script("viewerpopup", &[ViewerInput], Core, Real, 2).hands_off(),
@@ -519,7 +519,7 @@ mod tests {
     #[test]
     fn the_sign_and_the_build_follow_the_manifest() {
         assert!(hands_off("oneclick"));
-        assert!(!hands_off("takeover"));
+        assert!(!hands_off("compactstate"));
         assert!(hands_off("a script nobody listed"));
         assert!(needs_app("takeover"));
         for name in ["control", "selfupdate", "smoke", "stop", "suite"] {

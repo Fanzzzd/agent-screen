@@ -337,6 +337,7 @@ impl McpClient {
 
     /// Write a tools/call and go on; its result comes with [`Call::wait`].
     pub fn begin(&self, name: &str, args: Value) -> Result<Call<'_>> {
+        crate::countdown_before(name);
         if name == "create_display" {
             crate::spend_display()?;
         }

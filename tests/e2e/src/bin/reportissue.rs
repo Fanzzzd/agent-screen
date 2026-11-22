@@ -112,6 +112,7 @@ fn main() -> ExitCode {
         let control = Control::connect()?;
         let session = format!("reportissue-{}", now_ms());
         let client = McpClient::start(&[("CLAUDE_CODE_SESSION_ID", &session)])?;
+        agent_screen_tests::countdown();
         let result = test(&control, &client, pid, &mock, &opens);
         client.close();
         let _ = control.call("debugShow", json!({ "surface": "report-card-on" }));

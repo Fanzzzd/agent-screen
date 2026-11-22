@@ -487,9 +487,10 @@ pub fn probe(args: &[&str]) -> Result<String> {
 
 // MARK: The sign
 
-/// The sign `run` shows on the main screen (`tools/overlay.swift`): a count
-/// from 3 in the middle with the script's name, then a badge in the
-/// bottom-right corner with the current step and each check, then the
+/// The sign `run` shows on every real screen (`tools/overlay.swift`): a
+/// badge in the bottom-right corner while the script prepares, a count
+/// from 3 in the middle with the script's name before it acts, then the
+/// badge again with the current step and each check, then the
 /// result and "可以操作了" when the script ends, whatever the result: a
 /// skip, an error and a panic too. One per process, however many
 /// threads the script runs. E2E_NO_SIGN=1 turns it off.
@@ -522,29 +523,68 @@ fn script_name() -> String {
         .unwrap_or_else(|| "e2e".into())
 }
 
+/// Set once `run` has started the body: only then does an action count
+/// down first.
+static RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static COUNTDOWN: std::sync::Once = std::sync::Once::new();
+
+/// Count down from 3 on the sign, once per run, and return once the count
+/// is over. A script calls it after its setup, right before its first step
+/// that needs hands off. A script that doesn't call it counts down at its
+/// first real input, create_display, launch_app or debugShow. Later calls return at
+/// once; other threads wait for the count to end. Outside `run`, nothing.
+pub fn countdown() {
+    if !RUNNING.load(Ordering::SeqCst) {
+        return;
+    }
+    COUNTDOWN.call_once(|| start_sign(&script_name()));
+}
+
+/// Count down first when a tool or control method is one that acts.
+pub(crate) fn countdown_before(method: &str) {
+    // debugShow puts a surface on the user's screen.
+    const ACTS: &[&str] = &[
+        "create_display",
+        "createDisplay",
+        "launch_app",
+        "launchApp",
+        "debugShow",
+    ];
+    if ACTS.contains(&method) {
+        countdown();
+    }
+}
+
 /// Count down from 3 and return once the count is over, the sign shrunk to
-/// its badge. A sign that can't start leaves the script to run without.
+/// its badge, for a script that needs the user's hands off or asks them to
+/// act. Any other script stays on Agent Displays: its badge only says it
+/// runs, with no count and no watch for the user's input. A sign that can't
+/// start leaves the script to run without.
 fn start_sign(name: &str) {
+    let acts = manifest::user_acts(name);
+    if !counts_down() {
+        sign_step("running, you can keep working / 运行中，可以继续操作");
+        return;
+    }
     if !open_sign() {
         return;
     }
     let Some(mut sign) = self::sign().take() else {
         return;
     };
-    let acts = manifest::user_acts(name);
-    if let Some(text) = acts {
-        sign.say(&format!("count 3 {name}: {text}"));
-    } else if manifest::hands_off(name) {
-        sign.say(&format!(
+    match acts {
+        Some(text) => sign.say(&format!("count 3 {name}: {text}")),
+        None => sign.say(&format!(
             "count 3 {name}: don't touch the mouse or keyboard / 请勿操作鼠标和键盘"
-        ));
-    } else {
-        sign.say(&format!(
-            "calm 3 {name}: Agent Screen e2e running / 测试运行中"
-        ));
+        )),
     }
     sleep_ms(3000);
     sign.say(&format!("badge {name}"));
+    sign.say(if acts.is_some() {
+        "step running / 运行中"
+    } else {
+        "step running, hands off / 运行中，请勿操作"
+    });
     *self::sign() = Some(sign);
     // The user's input is what the script asked for.
     if acts.is_none() {
@@ -728,6 +768,7 @@ impl Drop for SignHidden {
 /// Real pointer and key input; `hover` with a region captures it, without
 /// the sign.
 pub fn hid(args: &[&str]) -> Result<String> {
+    countdown();
     stop_if_you_acted("hid")?;
     let _hidden = (args.first() == Some(&"hover") && args.len() > 3).then(hide_sign);
     OWN_INPUT.store(now_ms() as u64, Ordering::SeqCst);
@@ -739,6 +780,7 @@ pub fn hid(args: &[&str]) -> Result<String> {
 /// A script posts real input of its own now, through another tool than
 /// `hid`: the watch for the user's input leaves it out.
 pub fn own_input_now() {
+    countdown();
     OWN_INPUT.store(now_ms() as u64, Ordering::SeqCst);
 }
 
@@ -962,16 +1004,19 @@ pub fn skip(reason: &str) -> ! {
 pub fn run(body: impl FnOnce() -> Result<()>) -> ExitCode {
     start_sighting();
     let name = script_name();
-    // The build comes before the countdown, so the user keeps the Mac
-    // while it runs. A failed build fails the script when it starts the app.
+    // The sign says the user can keep working until the countdown, which
+    // comes right before the script acts: the build, the app's start and
+    // the script's setup come first. A failed build fails the script when
+    // it starts the app.
+    open_sign();
     if manifest::needs_app(&name) {
-        open_sign();
         let _ = bundle_debug();
     }
     // The Swift helpers and fixture apps too: built on first use, they
     // compiled after the countdown and kept a hands-off user waiting.
     prebuild_tools();
-    start_sign(&name);
+    sign_step("preparing, you can keep working / 准备中，可以继续操作");
+    RUNNING.store(true, Ordering::SeqCst);
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
@@ -1207,6 +1252,13 @@ fn wait_until(limit: Duration, mut ready: impl FnMut() -> Option<&'static str>) 
     false
 }
 
+/// Whether the running script needs the user's hands off or asks them to
+/// act: only then does it count down and wait for them to stop.
+fn counts_down() -> bool {
+    let name = script_name();
+    manifest::hands_off(&name) || manifest::user_acts(&name).is_some()
+}
+
 /// Seconds without mouse or keyboard input before a script starts:
 /// E2E_IDLE_SECS, 3 by default.
 fn quiet_seconds() -> u64 {
@@ -1241,7 +1293,7 @@ pub fn wait_for_quiet() -> bool {
         } else if !probe(&["displays"]).is_ok_and(|s| s == "0") {
             Some(DISPLAYS)
         } else {
-            (idle_seconds() < quiet_seconds()).then_some(YOU)
+            (idle_seconds() < quiet_seconds() && counts_down()).then_some(YOU)
         }
     })
 }
@@ -1257,7 +1309,7 @@ pub fn wait_for_idle() -> bool {
         if locked() {
             Some(LOCK)
         } else {
-            (idle_seconds() < quiet_seconds()).then_some(YOU)
+            (idle_seconds() < quiet_seconds() && counts_down()).then_some(YOU)
         }
     })
 }

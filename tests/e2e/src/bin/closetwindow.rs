@@ -77,6 +77,7 @@ fn workspace_of(window: u64) -> Option<String> {
 }
 
 fn test() -> Result<()> {
+    agent_screen_tests::countdown();
     sign_step("Field opens and goes to a hidden workspace / Field 打开后移到隐藏工作区");
     allow_on_your_screen(
         "Field",

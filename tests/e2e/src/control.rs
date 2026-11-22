@@ -71,6 +71,7 @@ impl Control {
 
     /// Write a request and go on; its reply comes with [`ControlCall::wait`].
     pub fn begin(&self, method: &str, params: Value) -> Result<ControlCall> {
+        crate::countdown_before(method);
         if method == "createDisplay" {
             crate::spend_display()?;
         }

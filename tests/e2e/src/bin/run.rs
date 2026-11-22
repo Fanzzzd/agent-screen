@@ -231,6 +231,8 @@ fn focus() -> Result<()> {
     }
     start_debug_app(&[])?;
     let control = Control::connect()?;
+    // The keyholder window takes the user's focus as it shows.
+    agent_screen_tests::countdown();
     let mut holder = agent_screen_tests::command(tool("keyholder")?)
         .arg("12")
         .stdout(Stdio::piped())
