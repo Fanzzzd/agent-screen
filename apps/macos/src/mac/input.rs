@@ -2539,7 +2539,8 @@ impl DragSight {
             *cache = Some((key, cg::remote_panels()));
         }
         if let Some((_, panels)) = cache.as_ref() {
-            mark_panels(&mut hits, panels);
+            let popup_menu = CGWindowLevelForKey(CGWindowLevelKey::PopUpMenuWindowLevelKey) as i64;
+            mark_panels(&mut hits, panels, popup_menu);
         }
         DragScene {
             hits,
@@ -2769,7 +2770,8 @@ fn cached_remote_panels(list: &[Hit]) -> Vec<cg::WindowInfo> {
 fn hits() -> Vec<Hit> {
     let mut list = hits_on_screen();
     let panels = cached_remote_panels(&list);
-    mark_panels(&mut list, &panels);
+    let popup_menu = CGWindowLevelForKey(CGWindowLevelKey::PopUpMenuWindowLevelKey) as i64;
+    mark_panels(&mut list, &panels, popup_menu);
     list
 }
 
@@ -2779,9 +2781,11 @@ fn hit_list(
     panels: Vec<cg::WindowInfo>,
     menu: i64,
     status: i64,
+    popup_menu: i64,
+    is_remote: impl Fn(i32) -> bool,
 ) -> Vec<Hit> {
     let mut list = reachable(on_screen, menu, status);
-    mark_panels(&mut list, &panels);
+    mark_panels_using(&mut list, &panels, popup_menu, is_remote);
     list
 }
 
@@ -2810,20 +2814,46 @@ fn reachable(on_screen: Vec<cg::WindowInfo>, menu: i64, status: i64) -> Vec<Hit>
 }
 
 /// An app's file panel is drawn by another process, behind an empty
-/// window of the app's: input sent to the app never reaches it.
-fn mark_panels(list: &mut [Hit], panels: &[cg::WindowInfo]) {
+/// window of the app's, and a popover's content (Finder's Share pop-up,
+/// #306) inside the app's popover window: input sent to the app never
+/// reaches it. Point each such hit at the process that draws it.
+fn mark_panels(list: &mut [Hit], panels: &[cg::WindowInfo], popup_menu: i64) {
+    mark_panels_using(list, panels, popup_menu, cg::is_remote_view_service);
+}
+
+fn mark_panels_using(
+    list: &mut [Hit],
+    panels: &[cg::WindowInfo],
+    popup_menu: i64,
+    is_remote: impl Fn(i32) -> bool,
+) {
+    use agent_screen_model::remote_view;
     for hit in list {
-        let same = |a: f64, b: f64| (a - b).abs() <= 1.0;
-        if let Some(panel) = panels.iter().find(|p| {
-            p.target.pid != hit.target.pid
-                && p.layer == hit.layer
-                && same(p.bounds.x, hit.bounds.x)
-                && same(p.bounds.y, hit.bounds.y)
-                && same(p.bounds.width, hit.bounds.width)
-                && same(p.bounds.height, hit.bounds.height)
-        }) {
-            hit.target = panel.target;
+        if is_remote(hit.target.pid) {
+            continue;
         }
+        let (index, views): (Vec<usize>, Vec<(Rect, i64)>) = panels
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.target.pid != hit.target.pid)
+            .map(|(i, p)| (i, (p.bounds, p.layer)))
+            .unzip();
+        // An open menu keeps its own routing (#207).
+        let allow_inset = hit.layer != popup_menu;
+        let Some(i) = remote_view::pick(hit.bounds, hit.layer, &views, allow_inset) else {
+            continue;
+        };
+        let (bounds, layer) = views[i];
+        let target = panels[index[i]].target;
+        if remote_view::fit(hit.bounds, hit.layer, bounds, layer, allow_inset)
+            == Some(remote_view::Fit::Inset)
+        {
+            log::debug!(
+                "input: popover {:?} drawn by remote view {target:?}",
+                hit.host
+            );
+        }
+        hit.target = target;
     }
 }
 
@@ -3321,7 +3351,14 @@ mod remote_panel_tests {
             alpha: 1.0,
         };
         let remote = window(target("remote"));
-        let hits = hit_list(vec![window(target("host"))], vec![remote.clone()], 24, 25);
+        let hits = hit_list(
+            vec![window(target("host"))],
+            vec![remote.clone()],
+            24,
+            25,
+            101,
+            |_| false,
+        );
         let hit = hits.into_iter().find(|h| h.bounds.contains(at)).unwrap();
         assert_eq!(hit.host, target("host"));
         assert_eq!(hit.target, target("remote"));
@@ -3355,6 +3392,101 @@ mod remote_panel_tests {
         let expected = &fixture["expected_local"];
         assert!((local.0 - expected[0].as_f64().unwrap()).abs() < 0.000001);
         assert!((local.1 - expected[1].as_f64().unwrap()).abs() < 0.000001);
+    }
+}
+
+#[cfg(test)]
+mod popover_routing_tests {
+    use super::*;
+    use objc2_core_graphics::CGWindowListOption;
+
+    const FINDER: WindowTarget = WindowTarget {
+        pid: 100,
+        window_id: 50,
+    };
+    const SHARING: WindowTarget = WindowTarget {
+        pid: 200,
+        window_id: 60,
+    };
+    const POPOVER: Rect = Rect::new(1000.0, 200.0, 320.0, 380.0);
+    // The arrow takes 13 pt above the remote content.
+    const CONTENT: Rect = Rect::new(1000.0, 213.0, 320.0, 367.0);
+
+    fn window(target: WindowTarget, bounds: Rect, layer: i64) -> cg::WindowInfo {
+        cg::WindowInfo {
+            target,
+            owner_name: "Fixture".into(),
+            title: String::new(),
+            bounds,
+            layer,
+            alpha: 1.0,
+        }
+    }
+
+    fn popover_hit(layer: i64, is_remote: impl Fn(i32) -> bool) -> Hit {
+        let list = hit_list(
+            vec![window(FINDER, POPOVER, layer)],
+            vec![window(SHARING, CONTENT, 3)],
+            24,
+            25,
+            101,
+            is_remote,
+        );
+        assert_eq!(list.len(), 1);
+        list[0]
+    }
+
+    #[test]
+    fn share_popover_click_goes_to_the_remote_view() {
+        for layer in [0, 3] {
+            let hit = popover_hit(layer, |p| p == SHARING.pid);
+            assert_eq!(hit.host, FINDER);
+            assert_eq!(hit.target, SHARING);
+            assert_eq!(hit.bounds, POPOVER);
+        }
+        let hit = popover_hit(0, |p| p == SHARING.pid);
+        let at = (1100.0, 300.0);
+        let mut fields = Vec::new();
+        let (resolved, local) = stamp_routing_using(
+            at,
+            hit.target,
+            |id| {
+                cg::window_bounds_using(id, Some(hit.target.pid), |option, relative| {
+                    assert_eq!(option, CGWindowListOption::OptionIncludingWindow);
+                    assert_eq!(relative, SHARING.window_id);
+                    vec![window(SHARING, CONTENT, 3)]
+                })
+            },
+            |field, value| fields.push((field, value)),
+            |_| {},
+        );
+        assert!(fields.contains(&(40, SHARING.pid as i64)));
+        assert!(fields.contains(&(51, SHARING.window_id as i64)));
+        assert_eq!(resolved, Some(CONTENT));
+        assert!((local.0 - 100.0).abs() < 0.000001);
+        assert!((local.1 - 87.0).abs() < 0.000001);
+    }
+
+    #[test]
+    fn popup_menu_layer_host_is_not_retargeted_by_inset() {
+        let hit = popover_hit(101, |p| p == SHARING.pid);
+        assert_eq!(hit.target, FINDER);
+    }
+
+    #[test]
+    fn remote_service_window_is_never_retargeted() {
+        let hit = popover_hit(0, |p| p == FINDER.pid || p == SHARING.pid);
+        assert_eq!(hit.target, FINDER);
+    }
+
+    #[test]
+    fn retargeted_popover_is_not_an_app_window() {
+        let hit = popover_hit(0, |p| p == SHARING.pid);
+        let owners = std::collections::BTreeMap::new();
+        assert_eq!(
+            click_check_in(&[hit], 8, (1100.0, 300.0), &owners),
+            Ok(None)
+        );
     }
 }
 
@@ -3393,7 +3525,7 @@ mod routing_bounds_tests {
         remote.bounds.width += 2.0;
         for panels in [Vec::new(), vec![remote]] {
             // An ordinary/non-XPC process is not in the remote-panel list.
-            let list = hit_list(vec![host.clone()], panels, 24, 25);
+            let list = hit_list(vec![host.clone()], panels, 24, 25, 101, |_| false);
             assert_eq!(list.len(), 1);
             assert_eq!(list[0].target, host.target);
             assert_eq!(list[0].bounds, host.bounds);

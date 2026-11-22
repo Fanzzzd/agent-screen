@@ -95,3 +95,4 @@ Amended 2026-11-14 for issue #205. A sheet opened with `NSWindow.beginSheet`, su
 - During a drag, an open pop-up menu (level 101) owned by an app on the Agent Display counts as part of the display's windows rather than an outside cover.
 - A real click may target an open pop-up menu (level 101) owned by an app that has a window on the Agent Display when the menu lies wholly inside the display. Before pressing, the loan checks both the owning window's frame and the menu's frame, and refuses if the menu closed or moved while waiting.
 
+Amended 2026-11-22 for issue #306: a popover whose content another process draws, as Finder's Share popover, is a window of the app with the remote content listed inside its frame, not at it; background clicks and the Viewer go to the process that draws the content.
