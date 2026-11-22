@@ -662,6 +662,30 @@ pub fn confirm(title: &str, text: &str, go: &str) -> bool {
     alert.runModal() == objc2_app_kit::NSAlertFirstButtonReturn
 }
 
+const TOOLS_LOADED_BY: &str = "ToolsLoadedBy";
+const TOOLS_LOADED_AT: &str = "ToolsLoadedAt";
+
+/// Keep which client last loaded the tools, and when, so Settings and the
+/// menu can still say it after Agent Screen restarts with no session open.
+pub fn remember_tools_loaded(client: &str) {
+    let defaults = objc2_foundation::NSUserDefaults::standardUserDefaults();
+    let value = NSString::from_str(client);
+    unsafe { defaults.setObject_forKey(Some(&value), &NSString::from_str(TOOLS_LOADED_BY)) };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or_default();
+    defaults.setDouble_forKey(now, &NSString::from_str(TOOLS_LOADED_AT));
+}
+
+/// The client that last loaded the tools, and when, in seconds since 1970.
+pub fn tools_last_loaded() -> Option<(String, f64)> {
+    let defaults = objc2_foundation::NSUserDefaults::standardUserDefaults();
+    let client = defaults.stringForKey(&NSString::from_str(TOOLS_LOADED_BY))?;
+    let at = defaults.doubleForKey(&NSString::from_str(TOOLS_LOADED_AT));
+    (at > 0.0).then(|| (client.to_string(), at))
+}
+
 /// Put text on the clipboard.
 pub fn copy(text: &str) {
     let board = objc2_app_kit::NSPasteboard::generalPasteboard();

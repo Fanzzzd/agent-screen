@@ -212,27 +212,53 @@ fn build(mtm: MainThreadMarker) -> Assist {
     }
 }
 
+/// What the helper asks the user to do.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Step {
+    /// Agent Screen has no entry in the list yet: drag the icon in.
+    Unlisted,
+    /// It has one: flip its switch.
+    Listed,
+    /// The switch may be on, and macOS still says no, as for an entry left
+    /// from another copy of the app: remove the entry and add it again.
+    StillOff,
+}
+
 /// Show the helper for `p`. `listed`: Agent Screen already has an entry in
 /// the list, so the user only flips its switch.
 pub fn show(p: super::permissions::Permission, listed: bool) {
+    show_step(p, if listed { Step::Listed } else { Step::Unlisted });
+}
+
+pub fn show_step(p: super::permissions::Permission, step: Step) {
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
     ASSIST.with(|a| {
         let mut a = a.borrow_mut();
         let assist = a.get_or_insert_with(|| build(mtm));
-        let (title, detail) = if listed {
+        let (title, detail) = if step == Step::StillOff {
             (
-                t("Turn on Agent Screen in the list", "打开列表里 Agent Screen 的开关").to_string(),
+                // Both steps: the user may not have turned it on yet.
+                t("Turn on Agent Screen in the list", "打开列表中 Agent Screen 的开关").to_string(),
+                t(
+                    "Already on and still Off? Select it, press −,\nthen drag the icon at left into the list.",
+                    "已开启仍无效？选中它并点 − 移除，\n再把左边的图标拖进列表。",
+                )
+                .to_string(),
+            )
+        } else if step == Step::Listed {
+            (
+                t("Turn on Agent Screen in the list", "打开列表中 Agent Screen 的开关").to_string(),
                 tf!(
                     "Find Agent Screen in the “{}” list.\nNot there? Drag the icon at left into the list.",
-                    "在“{}”列表里找到 Agent Screen。\n没有的话，把左边的图标拖进列表。",
+                    "在“{}”列表中找到 Agent Screen。\n若没有，请把左边的图标拖进列表。",
                     p.name()
                 ),
             )
         } else {
             (
-                t("Drag the icon into the list above", "把左边的图标拖进上面的列表").to_string(),
+                t("Drag the icon into the list above", "把图标拖进上方列表").to_string(),
                 tf!(
                     "Then turn on Agent Screen in the “{}” list.",
                     "拖进“{}”列表后，打开 Agent Screen 的开关。",
@@ -265,8 +291,8 @@ pub fn show(p: super::permissions::Permission, listed: bool) {
 
 /// Show the helper at a point, global top-left, without following System
 /// Settings; for checking its look.
-pub fn preview(p: super::permissions::Permission, listed: bool, x: f64, y: f64) {
-    show(p, listed);
+pub fn preview(p: super::permissions::Permission, step: Step, x: f64, y: f64) {
+    show_step(p, step);
     SHOWN.set(false);
     ASSIST.with(|a| {
         if let Some(a) = a.borrow().as_ref() {

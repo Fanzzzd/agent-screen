@@ -471,7 +471,7 @@ impl Render for HelpCard {
         let size = (display.width, display.height);
         let fit = picture(size);
         let frame = self.streams.read(cx).frame(id);
-        let picture = match frame {
+        let picture = match frame.filter(|_| crate::mac::permissions::last().screen) {
             Some(frame) => surface(frame)
                 .object_fit(ObjectFit::Contain)
                 .size_full()

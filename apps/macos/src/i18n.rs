@@ -94,6 +94,22 @@ macro_rules! tf {
     };
 }
 
+/// A local calendar day, given in seconds since 1970: "Nov 18" or
+/// "11月18日".
+pub fn day(seconds: f64) -> String {
+    let seconds = seconds as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe { libc::localtime_r(&seconds, &mut tm) };
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let month = tm.tm_mon.clamp(0, 11) as usize;
+    match lang() {
+        Lang::En => format!("{} {}", MONTHS[month], tm.tm_mday),
+        Lang::ZhHans => format!("{}月{}日", month + 1, tm.tm_mday),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
