@@ -41,6 +41,14 @@ pub fn answers_launch(
     }
 }
 
+/// Whether a running app that can't open a new window may get a URL in
+/// a window it already has (#309). The system sends the URL to the app's
+/// front window. The app must have at least one window, and this display
+/// must hold them all, including minimized, hidden and other-Space windows.
+pub fn url_into_held_window(app_windows: &[u32], held: &std::collections::HashSet<u32>) -> bool {
+    !app_windows.is_empty() && app_windows.iter().all(|w| held.contains(w))
+}
+
 /// Whether a process with this parent and `argv` is the instance `open`
 /// started with `asked` after `--args`.
 pub fn is_opened(parent: i32, argv: &[String], asked: &[String]) -> bool {
@@ -355,6 +363,18 @@ pub fn undescribed_window(known: Option<u32>, listed: &[Listed]) -> Option<u32> 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn url_into_held_window_needs_every_window_held() {
+        use super::url_into_held_window;
+        use std::collections::HashSet;
+
+        let held = HashSet::from([5]);
+        assert!(url_into_held_window(&[5], &held));
+        assert!(!url_into_held_window(&[5, 6], &held));
+        assert!(!url_into_held_window(&[], &held));
+        assert!(!url_into_held_window(&[5], &HashSet::new()));
+    }
+
     #[test]
     fn only_the_pages_window_answers_a_launch_through_the_pipe() {
         use super::answers_launch;

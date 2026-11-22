@@ -484,7 +484,9 @@ pub fn definitions() -> Vec<Value> {
             &[
                 "Open an app in the background and put its new window on the display. If the app is already running,",
                 "Agent Screen asks it for a new window and moves only that one, never a window of the user's.",
-                "open opens a URL or file in the window. arguments or environment start a new instance of the app with them,",
+                "open opens a URL or file in the window. For a running app that can't open a new window, such as System Settings,",
+                "a URL opens in its window once every window of the app is on your display (place_window first).",
+                "arguments or environment start a new instance of the app with them,",
                 "as a development build needs. Google Chrome starts as a separate instance for agents, on a profile every agent",
                 "session shares, which keeps its sign-ins and has none of the user's. Another Chromium browser the user runs",
                 "opens in their own process, and the result says shared: true with a note. For a separate profile in a browser",
@@ -2362,6 +2364,12 @@ fn launch_reason(reply: &Value) -> Value {
                 "reason": "already_running",
                 "note": "The app was already running on your display and allows only one instance: the new one quit and passed its arguments and environment to the running one. This is the running instance's window; nothing new started.",
             }),
+            Some("display_window") => json!({
+                "window": window,
+                "wasRunning": true,
+                "reason": "display_window",
+                "note": "The app can't open a new window, so the URL opened in its window already on your display. Take a screenshot before you act.",
+            }),
             _ => json!({ "window": window, "wasRunning": was_running }),
         },
         _ => {
@@ -2377,10 +2385,10 @@ fn launch_reason(reply: &Value) -> Value {
                     "The app started moments ago, by the user or another agent, and isn't ready to open a window yet; nothing moved. Wait a few seconds and call launch_app again. Don't ask the user to quit it: its first window may be someone's work."
                 }
                 "no_new_window" => {
-                    "The app was already running and its menus have no command that opens a plain new window, as in Calculator or Notes; nothing was created or moved. Ask the user to quit it and call launch_app again, or to hand its window over."
+                    "The app was already running and its menus have no command that opens a plain new window, as in Calculator or Notes; nothing was created or moved. Ask the user to quit it and call launch_app again, or to hand its window over with place_window. Once all its windows are on your display, launch_app with open opens a URL in its window."
                 }
                 "menus_unreadable" => {
-                    "The app was already running and Agent Screen couldn't read or use its menus, so it didn't ask for a window; nothing moved. Ask the user to quit it and call launch_app again, or to hand its window over."
+                    "The app was already running and Agent Screen couldn't read or use its menus, so it didn't ask for a window; nothing moved. Ask the user to quit it and call launch_app again, or to hand its window over with place_window. Once all its windows are on your display, launch_app with open opens a URL in its window."
                 }
                 "app_busy" => {
                     "The app was already running and its New Window command is greyed out, as while it shows a dialog; nothing moved. Ask the user to finish what the app is showing, then call launch_app again."
@@ -2890,6 +2898,20 @@ mod tests {
         assert_eq!(single["window"]["windowId"], 8);
         assert_eq!(single["reason"], "already_running");
         assert!(single["note"].as_str().unwrap().contains("one instance"));
+        let held = launch_output(&json!({
+            "window": { "windowId": 9 },
+            "wasRunning": true,
+            "reason": "display_window",
+        }));
+        assert_eq!(held["window"]["windowId"], 9);
+        assert_eq!(held["wasRunning"], true);
+        assert_eq!(held["reason"], "display_window");
+        assert!(
+            held["note"]
+                .as_str()
+                .unwrap()
+                .contains("already on your display")
+        );
         for reason in [
             "still_starting",
             "existing_window",
@@ -2905,7 +2927,11 @@ mod tests {
             assert!(none["window"].is_null());
             assert_eq!(none["reason"], reason);
             assert!(none["wasRunning"].is_boolean());
-            assert!(none["note"].as_str().unwrap().len() > 40, "{reason}");
+            let note = none["note"].as_str().unwrap();
+            assert!(note.len() > 40, "{reason}");
+            if matches!(reason, "no_new_window" | "menus_unreadable") {
+                assert!(note.contains("place_window"), "{reason}");
+            }
         }
         let shared = launch_output(&json!({
             "window": { "windowId": 9 }, "wasRunning": true, "shared": true,
