@@ -150,6 +150,36 @@ fn agent_window(control: &Control, id: &Value) -> Result<Option<Value>> {
     }))
 }
 
+fn cycle_front_app(holder_pid: &str, label: &str) -> Result<()> {
+    sh_lenient(
+        "/usr/bin/osascript",
+        &["-e", "tell application \"Finder\" to activate"],
+    );
+    sleep_ms(500);
+    let mid_front = front_app();
+    if mid_front != "Finder" {
+        bail!("setup ({label}): Finder did not become frontmost (front app: {mid_front:?})");
+    }
+    sh_lenient(
+        "/usr/bin/osascript",
+        &[
+            "-e",
+            &format!(
+                "tell application \"System Events\" to set frontmost of (first process whose unix id is {holder_pid}) to true"
+            ),
+        ],
+    );
+    sleep_ms(1200);
+    let back_front = sh_lenient(tool("probe")?, &["frontpid"]);
+    if back_front.trim() != holder_pid {
+        bail!(
+            "setup ({label}): stand-in did not regain frontmost (front pid {}, expected {holder_pid})",
+            back_front.trim()
+        );
+    }
+    Ok(())
+}
+
 fn front_app() -> String {
     sh_lenient(
         "/usr/bin/osascript",
@@ -376,21 +406,7 @@ fn test(
 
     // 2. Another app takes the front and gives it back: the agent's
     // window lost key status, and the next key wakes it again.
-    sh_lenient(
-        "/usr/bin/osascript",
-        &["-e", "tell application \"Finder\" to activate"],
-    );
-    sleep_ms(500);
-    sh_lenient(
-        "/usr/bin/osascript",
-        &[
-            "-e",
-            &format!(
-                "tell application \"System Events\" to set frontmost of (first process whose unix id is {holder_pid}) to true"
-            ),
-        ],
-    );
-    sleep_ms(1200);
+    cycle_front_app(&holder_pid, "round 2")?;
     let from = lines(log, 0).len();
     let said_from = holder_lines(&printed, 0).len();
     let (keyed, sources) = sources_during(4, pid, || {
@@ -436,21 +452,7 @@ fn test(
             cut(&said(&keyed), 300)
         ),
     );
-    sh_lenient(
-        "/usr/bin/osascript",
-        &["-e", "tell application \"Finder\" to activate"],
-    );
-    sleep_ms(500);
-    sh_lenient(
-        "/usr/bin/osascript",
-        &[
-            "-e",
-            &format!(
-                "tell application \"System Events\" to set frontmost of (first process whose unix id is {holder_pid}) to true"
-            ),
-        ],
-    );
-    sleep_ms(1200);
+    cycle_front_app(&holder_pid, "round 3")?;
     let from = lines(log, 0).len();
     let said_from = holder_lines(&printed, 0).len();
     let ((clicked, keyed), sources) = sources_during(4, pid, || {
