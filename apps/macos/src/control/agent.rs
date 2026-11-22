@@ -4810,14 +4810,15 @@ fn user_key_window(pid: i32) -> Option<WindowTarget> {
 struct Launched {
     window: Option<windows::Window>,
     was_running: bool,
-    /// Why there is no window. For an app Agent Screen started:
+    /// Why the launch returned this window or none. For an app Agent Screen started:
     /// `still_starting`, none yet; one it opens soon moves onto the display.
     /// For a running app: `existing_window`, the file shows in a window it
     /// had; `still_opening`, the file's window hasn't come yet;
     /// `just_started`, the user or another session started it moments ago
     /// and it isn't ready; `no_new_window`, its menus have no New Window;
     /// `app_busy`, that item is greyed out; `menus_unreadable`, its menus
-    /// can't be read or used.
+    /// can't be read or used. With `display_window`, a running app that
+    /// couldn't open a new window opened the URL in a window this display holds.
     reason: Option<&'static str>,
     /// The process, when this launch started it.
     pid: Option<i32>,
@@ -5644,6 +5645,36 @@ enum RunningWindowStop {
     Missing(&'static str),
 }
 
+/// The window this display holds that a running app's URL may open in,
+/// when the app has no window outside the display's records (#309).
+async fn held_url_window(
+    core: &Entity<Core>,
+    id: DisplayId,
+    pid: i32,
+    cx: &mut AsyncApp,
+) -> Option<windows::Window> {
+    let held = core.read_with(cx, |c, _| {
+        c.displays
+            .get(id)
+            .map(|d| d.records.keys().copied().collect())
+            .unwrap_or_default()
+    });
+    off(cx, move || {
+        let app_windows: Vec<_> = cg::windows_of(pid)
+            .into_iter()
+            .filter(|w| w.layer == 0 && w.bounds.width > 40.0 && w.bounds.height > 40.0)
+            .map(|w| w.target.window_id)
+            .collect();
+        if !agent_screen_model::launch::url_into_held_window(&app_windows, &held) {
+            return None;
+        }
+        windows::on_display(id)
+            .into_iter()
+            .find(|w| w.target.pid == pid && w.layer == 0 && held.contains(&w.target.window_id))
+    })
+    .await
+}
+
 /// Ask a running app for a new window: through the agents' instance pipe
 /// (ADR 0022), or through the app's New Window menu item with retries for an
 /// app that just started.
@@ -6000,8 +6031,9 @@ async fn launch_now(
 
     // A starting app opens the URL or file in its first window. A running
     // one opens a file in a window of its own, but a URL as a tab of its
-    // front window, which may be the user's: it gets a new window first,
-    // below, and the URL after.
+    // front window, which may be the user's. Ask for a new window first.
+    // If it can't open one, send the URL only when this display holds
+    // all of the app's windows.
     let is_url = target.is_some_and(|t| !t.starts_with('/'));
     // A running app given a file: its window is the one that shows the
     // file, whenever it comes, and never one the user opens meanwhile.
@@ -6260,17 +6292,71 @@ async fn launch_now(
                 // No window will take the user's focus: what was held goes to
                 // their window, which still has it.
                 finish_key_hold(&mut hold, agent_screen_model::key_hold::End::NoWindow, cx).await;
+                if let RunningWindowStop::Missing("no_new_window" | "menus_unreadable") = stop
+                    && is_url
+                    && agents.is_none()
+                    && let Some(url) = target
+                    && let Some(window) = held_url_window(core, id, pid, cx).await
+                {
+                    let opened = match open_in_background(
+                        path.clone(),
+                        Some(url.to_string()),
+                        false,
+                        &Start::default(),
+                        cx,
+                    )
+                    .await
+                    {
+                        Some(outcome) => {
+                            cx.background_executor()
+                                .spawn(async move {
+                                    outcome
+                                        .recv_timeout(Duration::from_secs(10))
+                                        .unwrap_or(false)
+                                })
+                                .await
+                        }
+                        None => false,
+                    };
+                    // Give the catch time to place a new window the URL opens.
+                    cx.background_executor()
+                        .timer(Duration::from_millis(500))
+                        .await;
+                    drop(catch);
+                    if !opened {
+                        return Err(ControlError::failed(format!(
+                            "{name} could not open the URL in its window on this display"
+                        )));
+                    }
+                    log::info!(
+                        "launch: {name} has no new window; opened the URL in its window {} on this display",
+                        window.target.window_id
+                    );
+                    return Ok(Launched {
+                        window: Some(window),
+                        was_running: true,
+                        reason: Some("display_window"),
+                        pid: None,
+                        shared: false,
+                    });
+                }
                 drop(catch);
                 return match stop {
                     RunningWindowStop::Failed(err) => Err(err),
                     RunningWindowStop::Missing(reason) if is_url => {
-                        let next = if matches!(reason, "just_started" | "still_starting") {
-                            "wait a few seconds and call launch_app again".to_string()
-                        } else {
-                            format!("ask the user to quit {name}, then call launch_app again")
+                        let next = match reason {
+                            "just_started" | "still_starting" => {
+                                "Wait a few seconds and call launch_app again".to_string()
+                            }
+                            "app_busy" => format!(
+                                "Ask the user to finish what {name} is showing, then call launch_app again"
+                            ),
+                            _ => format!(
+                                "Ask the user to hand its window over with place_window, then call launch_app again with the same open to open the URL in that window. Or ask the user to quit {name}, then call launch_app again"
+                            ),
                         };
                         Err(ControlError::failed(format!(
-                            "{name} is running and can't open a new window now ({reason}), so the URL was not opened; {next}"
+                            "{name} is running and can't open a new window now ({reason}), so the URL was not opened. {next}."
                         )))
                     }
                     RunningWindowStop::Missing(reason) => Ok(Launched {
@@ -6587,7 +6673,7 @@ async fn launch_now(
     // would add a tab to whatever window the user has in front.
     if was_running && is_url {
         return Err(ControlError::failed(format!(
-            "{name} opened no new window, so the URL was not opened; ask the user to quit {name}, then call launch_app again"
+            "{name} opened no new window, so the URL was not opened. Ask the user to hand its window over with place_window, then call launch_app again with the same open. Or ask the user to quit {name}, then call launch_app again."
         )));
     }
     Ok(Launched {
