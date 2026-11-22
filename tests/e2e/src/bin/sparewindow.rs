@@ -7,13 +7,16 @@
 //! left it there.
 //!
 //! The test build counts you idle at once (AGENTSCREEN_IDLE_SECS=0), so a
-//! tidy every 15 s makes the spares, and each creation's first display
-//! counts as a unit twin (AGENTSCREEN_TEST_UNIT_TWIN=1). The script makes a
-//! display and opens Field on it with launch_app. Every 50 ms it notes where
-//! Field's window is: it must exist the whole time, and stay on its display
-//! while the first spare is made. Then the script moves the window onto
-//! that spare, as macOS drops a window when the displays change, and the
-//! second spare's display change must bring it back. The old regather
+//! tidy every 30 s (AGENTSCREEN_TIDY_SECS) makes the spares, and each
+//! creation's first display counts as a unit twin
+//! (AGENTSCREEN_TEST_UNIT_TWIN=1). The script makes a display and opens
+//! Field on it with launch_app. Every 50 ms it notes where Field's window
+//! is: it must exist the whole time, and stay on its display while the
+//! first spare is made. Once that change's regather has settled
+//! (`debugRegather`), the script moves the window onto the spare, as macOS
+//! drops a window when the displays change, and checks it stays there
+//! until the second spare's display change, whose regather must bring it
+//! back. The old regather
 //! counted a spare as an Agent Display and left it there, out of sight.
 //! With E2E_LOG=FILE it also reads the app's log: the window is back, and
 //! nothing went to your screen or vanished. E2E_DIA=1 uses a new window of
@@ -48,6 +51,7 @@ fn main() -> ExitCode {
             ("AGENTSCREEN_LANG", "en"),
             ("AGENTSCREEN_IDLE_SECS", "0"),
             ("AGENTSCREEN_TEST_UNIT_TWIN", "1"),
+            ("AGENTSCREEN_TIDY_SECS", "30"),
         ])?;
         let result = if dia {
             let page = format!("file://{}", fixture("web/keys.html").display());
@@ -183,6 +187,29 @@ fn stayed(when: &str, watched: &Watched, pid: i64, wid: i64, id: u64) {
     }
 }
 
+/// The latest regather's generation, and whether it runs.
+fn regather(control: &Control) -> Result<(u64, bool)> {
+    let v = control.call("debugRegather", json!({}))?;
+    Ok((
+        v["generation"].as_u64().context("generation")?,
+        v["running"].as_bool().context("running")?,
+    ))
+}
+
+/// Wait up to 40 s for a regather newer than `after` to finish: its
+/// generation, or None.
+fn regather_settles(control: &Control, after: u64) -> Result<Option<u64>> {
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(40) {
+        let (generation, running) = regather(control)?;
+        if generation > after && !running {
+            return Ok(Some(generation));
+        }
+        sleep_ms(100);
+    }
+    Ok(None)
+}
+
 /// The display log's creations and releases since `from`.
 fn changes(from: usize) {
     let log = display_log();
@@ -267,6 +294,18 @@ fn test(app: &str, page: Option<&str>) -> Result<()> {
     let Some(&spare) = spares().first() else {
         bail!("no spare");
     };
+    // The first change's regather must be over first, or it, not the
+    // second spare's, would bring the window back. A tidy every 30 s
+    // (AGENTSCREEN_TIDY_SECS) leaves room between them.
+    let settled = regather_settles(&control, 0)?;
+    check(
+        "the first spare's regather settles before the second spare",
+        settled.is_some() && spares().len() == 1,
+        format!("regather {settled:?}, spares {:?}", spares()),
+    );
+    let Some(first) = settled else {
+        bail!("the regather never settled");
+    };
     // As macOS drops a window elsewhere when the displays change: the
     // agent's window on the spare, which no session shows. The next
     // display change, the second spare, must bring it back.
@@ -282,13 +321,27 @@ fn test(app: &str, page: Option<&str>) -> Result<()> {
         moved["moved"] == true && there.is_some_and(|f| inside(f, onto)),
         format!("{moved} | window {there:?}, spare {onto:?}"),
     );
-    let watched = watch(pid, wid, id, Duration::from_secs(60), 8, || {
+    // Nothing brings it back before the next display change.
+    sleep_ms(1500);
+    let (generation, _) = regather(&control)?;
+    let still = window(pid, wid);
+    check(
+        "the window stays on the spare until the displays change again",
+        generation == first && still.is_some_and(|f| inside(f, onto)),
+        format!("regather {generation} (was {first}), window {still:?}"),
+    );
+    let watched = watch(pid, wid, id, Duration::from_secs(60), 1, || {
         spares().len() >= 2
     });
+    let after = regather_settles(&control, first)?;
     check(
-        "the idle app makes a second spare through a unit twin",
-        watched.done && twins() >= 2,
-        format!("spares {:?}, twins released {}", spares(), twins()),
+        "the idle app makes a second spare through a unit twin, and its regather settles",
+        watched.done && twins() >= 2 && after.is_some(),
+        format!(
+            "spares {:?}, twins released {}, regather {after:?}",
+            spares(),
+            twins()
+        ),
     );
     stayed("as the second spare was made", &watched, pid, wid, id);
     changes(from);
@@ -299,7 +352,7 @@ fn test(app: &str, page: Option<&str>) -> Result<()> {
             .filter(|l| {
                 l.contains("as the displays changed")
                     || l.contains("after the displays changed")
-                    || l.contains("after every try")
+                    || l.contains("tries to put it back")
             })
             .collect();
         println!("     regather log:\n       {}", lines.join("\n       "));
@@ -310,7 +363,7 @@ fn test(app: &str, page: Option<&str>) -> Result<()> {
                 .any(|l| l.contains(&format!("window {wid} is back on display {id}")))
                 && !lines
                     .iter()
-                    .any(|l| l.contains("after every try") || l.contains("is gone after")),
+                    .any(|l| l.contains("tries to put it back") || l.contains("is gone after")),
             format!("{lines:#?}"),
         );
     }

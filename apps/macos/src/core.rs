@@ -1485,11 +1485,23 @@ fn idle() -> Duration {
     IDLE
 }
 
+/// `TIDY_EVERY`, or AGENTSCREEN_TIDY_SECS in a test build.
+fn tidy_every() -> Duration {
+    if cfg!(debug_assertions)
+        && let Some(secs) = std::env::var("AGENTSCREEN_TIDY_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+    {
+        return Duration::from_secs(secs);
+    }
+    TIDY_EVERY
+}
+
 /// Releases and the ready spare wait for the user to be idle (`tidy`).
 pub fn watch_idle(core: Entity<Core>, cx: &mut App) {
     cx.spawn(async move |cx: &mut AsyncApp| {
         loop {
-            cx.background_executor().timer(TIDY_EVERY).await;
+            cx.background_executor().timer(tidy_every()).await;
             core.update(cx, |core, cx| core.tidy(cx));
         }
     })
