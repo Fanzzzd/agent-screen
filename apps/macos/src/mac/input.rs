@@ -1590,6 +1590,11 @@ struct Hit {
     host: WindowTarget,
     bounds: Rect,
     layer: i64,
+    /// For a popover whose content another process draws (#306), that
+    /// content's frame inside `bounds`. `target` draws only this part:
+    /// a point outside it, such as on the arrow, goes to `host`. None for
+    /// a file panel drawn at the host's frame, and for any other window.
+    content: Option<Rect>,
 }
 
 fn record_hit(hit: Option<Hit>) {
@@ -2028,15 +2033,11 @@ impl Worker {
         ) else {
             return;
         };
-        stamp_routing(&event, at, hit.target);
+        let (routed, _) = stamp_routing(&event, at, hit.target);
         // AppKit routes a scroll by its location in the window, and drops it
-        // when that point misses: give it relative to the window.
-        unsafe {
-            SSEventSetWindowLocation(
-                &event,
-                CGPoint::new(at.0 - hit.bounds.x, at.1 - hit.bounds.y),
-            )
-        };
+        // when that point misses: give it relative to the window that draws it.
+        let local = hit.scroll_location(at, routed);
+        unsafe { SSEventSetWindowLocation(&event, CGPoint::new(local.0, local.1)) };
         deliver(&event, hit.target.pid, false);
     }
 
@@ -2159,7 +2160,7 @@ impl Worker {
     /// before its first keys.
     fn wake_panel(&mut self, panel: Hit) {
         let id = panel.target.window_id;
-        if self.pressed_panels.contains(&id) {
+        if !panel.needs_wake(&self.pressed_panels) {
             return;
         }
         log::debug!("input: waking file panel {:?}", panel.target);
@@ -2206,9 +2207,7 @@ impl Worker {
             target.target,
             target.host
         );
-        if target.target != target.host {
-            self.wake_panel(target);
-        }
+        self.wake_panel(target);
         self.focus_waking(target.target, wake);
         // Without the wake, as for `keys_target`, nothing goes out yet.
         if wake && !self.keys_reach(target.target) {
@@ -2374,7 +2373,42 @@ impl Worker {
 }
 
 fn topmost_hit_in(hits: &[Hit], at: (f64, f64)) -> Option<Hit> {
-    hits.iter().find(|h| h.bounds.contains(at)).copied()
+    hits.iter()
+        .find(|h| h.bounds.contains(at))
+        .map(|h| h.at(at))
+}
+
+impl Hit {
+    /// Where a point on this window goes: a point of a popover outside
+    /// the content another process draws, such as on its arrow, goes to
+    /// the app's window.
+    fn at(self, at: (f64, f64)) -> Hit {
+        match self.content {
+            Some(content) if !content.contains(at) => Hit {
+                target: self.host,
+                content: None,
+                ..self
+            },
+            _ => self,
+        }
+    }
+
+    /// Whether keys need a click on this window first: a file panel drawn
+    /// at the app's window's frame takes keys only once clicked. A popover
+    /// another process draws gets none: the click would land on its
+    /// controls before the key.
+    fn needs_wake(&self, pressed_panels: &[u32]) -> bool {
+        self.target != self.host
+            && self.content.is_none()
+            && !pressed_panels.contains(&self.target.window_id)
+    }
+
+    /// The point AppKit routes a scroll by: relative to the frame
+    /// WindowServer reports for the target, else to the content or window
+    /// frame hit-tested.
+    fn scroll_location(&self, at: (f64, f64), routed: Option<Rect>) -> (f64, f64) {
+        diagnostics::local_point(at, routed.or(self.content).or(Some(self.bounds)))
+    }
 }
 
 /// Fields WindowServer and Chromium use to route an event to a window that
@@ -2727,6 +2761,7 @@ fn hits_on_screen() -> Vec<Hit> {
             target,
             bounds,
             layer,
+            content: None,
         })
         .collect()
 }
@@ -2809,6 +2844,7 @@ fn reachable(on_screen: Vec<cg::WindowInfo>, menu: i64, status: i64) -> Vec<Hit>
             target: w.target,
             bounds: w.bounds,
             layer: w.layer,
+            content: None,
         })
         .collect()
 }
@@ -2840,18 +2876,16 @@ fn mark_panels_using(
             .unzip();
         // An open menu keeps its own routing (#207).
         let allow_inset = hit.layer != popup_menu;
-        let Some(i) = remote_view::pick(hit.bounds, hit.layer, &views, allow_inset) else {
+        let Some((i, fit)) = remote_view::pick(hit.bounds, hit.layer, &views, allow_inset) else {
             continue;
         };
-        let (bounds, layer) = views[i];
         let target = panels[index[i]].target;
-        if remote_view::fit(hit.bounds, hit.layer, bounds, layer, allow_inset)
-            == Some(remote_view::Fit::Inset)
-        {
+        if fit == remote_view::Fit::Inset {
             log::debug!(
                 "input: popover {:?} drawn by remote view {target:?}",
                 hit.host
             );
+            hit.content = Some(views[i].0);
         }
         hit.target = target;
     }
@@ -3300,6 +3334,7 @@ mod click_diagnostics_tests {
             host: target,
             bounds: Rect::new(4680.0, -1981.0, 497.0, 182.0),
             layer: 8,
+            content: None,
         };
         let rows = diagnostics::tests::capture(|| {
             diagnostics::within(Click::when(false), Phase::Down, || record_hit(Some(hit)));
@@ -3443,6 +3478,7 @@ mod popover_routing_tests {
             assert_eq!(hit.host, FINDER);
             assert_eq!(hit.target, SHARING);
             assert_eq!(hit.bounds, POPOVER);
+            assert_eq!(hit.content, Some(CONTENT));
         }
         let hit = popover_hit(0, |p| p == SHARING.pid);
         let at = (1100.0, 300.0);
@@ -3487,6 +3523,69 @@ mod popover_routing_tests {
             click_check_in(&[hit], 8, (1100.0, 300.0), &owners),
             Ok(None)
         );
+    }
+
+    #[test]
+    fn a_press_on_the_arrow_goes_to_finder_and_one_on_the_content_to_sharing() {
+        let list = [popover_hit(0, |p| p == SHARING.pid)];
+        let goes_to = |at| topmost_hit_in(&list, at).map(|h| h.target);
+        // On the arrow, above the content's top edge at y = 213.
+        assert_eq!(goes_to((1100.0, 205.0)), Some(FINDER));
+        assert_eq!(goes_to((1100.0, 212.5)), Some(FINDER));
+        assert_eq!(goes_to((1100.0, 213.5)), Some(SHARING));
+        assert_eq!(goes_to((1100.0, 300.0)), Some(SHARING));
+        assert!(
+            topmost_hit_in(&list, (1100.0, 205.0))
+                .unwrap()
+                .content
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn keys_on_an_unclicked_popover_send_no_wake_click() {
+        let popover = popover_hit(0, |p| p == SHARING.pid);
+        assert!(!popover.needs_wake(&[]));
+        // A file panel at the app window's frame still gets its wake click,
+        // once.
+        let list = hit_list(
+            vec![window(FINDER, POPOVER, 0)],
+            vec![window(SHARING, POPOVER, 0)],
+            24,
+            25,
+            101,
+            |p| p == SHARING.pid,
+        );
+        let panel = list[0];
+        assert_eq!(panel.target, SHARING);
+        assert!(panel.content.is_none());
+        assert!(panel.needs_wake(&[]));
+        assert!(!panel.needs_wake(&[SHARING.window_id]));
+    }
+
+    #[test]
+    fn a_scroll_near_the_content_bottom_lands_inside_it() {
+        let list = [popover_hit(0, |p| p == SHARING.pid)];
+        // 5 pt above the bottom edge, which the popover and its content share.
+        let at = (1100.0, 575.0);
+        let hit = topmost_hit_in(&list, at).unwrap();
+        assert_eq!(hit.target, SHARING);
+        for routed in [Some(CONTENT), None] {
+            let local = hit.scroll_location(at, routed);
+            assert!((local.0 - 100.0).abs() < 0.000001);
+            assert!((local.1 - 362.0).abs() < 0.000001);
+            assert!(local.1 < CONTENT.height);
+        }
+        // An ordinary window keeps its window-relative point.
+        let finder = Hit {
+            target: FINDER,
+            host: FINDER,
+            bounds: POPOVER,
+            layer: 0,
+            content: None,
+        };
+        assert_eq!(finder.scroll_location(at, None), (100.0, 375.0));
+        assert_eq!(finder.scroll_location(at, Some(POPOVER)), (100.0, 375.0));
     }
 }
 
@@ -3728,6 +3827,7 @@ mod popup_tests {
                 target: appex_menu,
                 bounds: menu_rect,
                 layer: 101,
+                content: None,
             },
             Hit {
                 host: sheet,
@@ -3737,6 +3837,7 @@ mod popup_tests {
                 },
                 bounds: sheet_rect,
                 layer: 8,
+                content: None,
             },
         ];
         let at_menu = (4650.0, -520.0);
@@ -3766,6 +3867,7 @@ mod popup_tests {
                 target: stranger_menu,
                 bounds: menu_rect,
                 layer: 101,
+                content: None,
             },
             hits[1],
         ];
@@ -3812,6 +3914,7 @@ mod popup_tests {
             },
             bounds: sheet_rect,
             layer: 0,
+            content: None,
         };
         let bystander = Hit {
             host: WindowTarget {
@@ -3824,12 +3927,14 @@ mod popup_tests {
             },
             bounds: Rect::new(4700.0, -500.0, 200.0, 200.0),
             layer: 0,
+            content: None,
         };
         let native_menu = Hit {
             host: sheet,
             target: sheet,
             bounds: menu_rect,
             layer: 101,
+            content: None,
         };
         let all_windows = vec![hits[0], bystander, hits[1], behind_host];
         assert_eq!(
@@ -3856,6 +3961,7 @@ mod popup_tests {
             },
             bounds: Rect::new(4000.0, -600.0, 400.0, 300.0),
             layer: 0,
+            content: None,
         };
         let own_below = Hit {
             host: WindowTarget {
@@ -3868,6 +3974,7 @@ mod popup_tests {
             },
             bounds: Rect::new(3950.0, -650.0, 500.0, 400.0),
             layer: 0,
+            content: None,
         };
         let mut owners = std::collections::BTreeMap::new();
         owners.insert(101, 7);
@@ -3940,6 +4047,7 @@ mod popup_tests {
             },
             bounds: Rect::new(0.0, 0.0, 800.0, 600.0),
             layer: 0,
+            content: None,
         };
         let moved = Hit {
             bounds: Rect::new(10.0, 0.0, 800.0, 600.0),
@@ -3978,6 +4086,7 @@ mod popup_tests {
             },
             bounds: Rect::new(100.0, 100.0, 300.0, 200.0),
             layer: 0,
+            content: None,
         };
         let own = Hit {
             host: WindowTarget {
@@ -3990,6 +4099,7 @@ mod popup_tests {
             },
             bounds: Rect::new(100.0, 100.0, 300.0, 200.0),
             layer: 0,
+            content: None,
         };
         let mut owners = std::collections::BTreeMap::new();
         owners.insert(101, 7);

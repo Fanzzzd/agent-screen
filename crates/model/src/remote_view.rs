@@ -59,18 +59,19 @@ pub fn fit(
     (allow_inset && inside).then_some(Fit::Inset)
 }
 
-/// Index of the view in `views` that draws `host`: the first Exact in list
-/// order, else the Inset with the smallest summed edge gap (ties: first).
+/// The view in `views` that draws `host`, by index, and how it fits: the
+/// first Exact in list order, else the Inset with the smallest summed edge
+/// gap (ties: first).
 pub fn pick(
     host: Rect,
     host_layer: i64,
     views: &[(Rect, i64)],
     allow_inset: bool,
-) -> Option<usize> {
+) -> Option<(usize, Fit)> {
     let mut best: Option<(usize, f64)> = None;
     for (i, &(view, layer)) in views.iter().enumerate() {
         match fit(host, host_layer, view, layer, allow_inset) {
-            Some(Fit::Exact) => return Some(i),
+            Some(Fit::Exact) => return Some((i, Fit::Exact)),
             Some(Fit::Inset) => {
                 let gap: f64 = gaps(host, view).iter().map(|g| g.max(0.0)).sum();
                 if best.is_none_or(|(_, b)| gap < b) {
@@ -80,7 +81,7 @@ pub fn pick(
             None => {}
         }
     }
-    best.map(|(i, _)| i)
+    best.map(|(i, _)| (i, Fit::Inset))
 }
 
 #[cfg(test)]
@@ -133,8 +134,11 @@ mod tests {
         let gap30 = (Rect::new(1000.0, 230.0, 320.0, 350.0), 3);
         let exact = (HOST, 0);
         let gap10 = (Rect::new(1000.0, 210.0, 320.0, 370.0), 3);
-        assert_eq!(pick(HOST, 0, &[gap30, exact, gap10], true), Some(1));
-        assert_eq!(pick(HOST, 0, &[gap30, gap10], true), Some(1));
+        assert_eq!(
+            pick(HOST, 0, &[gap30, exact, gap10], true),
+            Some((1, Fit::Exact))
+        );
+        assert_eq!(pick(HOST, 0, &[gap30, gap10], true), Some((1, Fit::Inset)));
         assert_eq!(pick(HOST, 0, &[gap30, gap10], false), None);
     }
 
