@@ -111,7 +111,10 @@ static bool SSProcessForWindow(CGWindowID windowID, pid_t pid, SSProcessSerialNu
     return SS.getProcessForPID != NULL && SS.getProcessForPID(pid, psn) == 0;
 }
 
-// 248-byte Carbon event record: 0x8a is 0x01 for focus, 0x02 for defocus.
+// 248-byte Carbon event record: an AppKit-defined event (0x0D) whose
+// subtype at 0x8a is 0x01, application activated, or 0x02, deactivated.
+// AppKit in the target takes 0x01 for its app becoming active and posts
+// that to the app, though WindowServer's front app doesn't change (#273).
 static void SSFocusRecord(uint8_t record[0xF8], CGWindowID windowID, uint8_t direction) {
     memset(record, 0, 0xF8);
     record[0x04] = 0xF8;
