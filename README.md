@@ -8,12 +8,13 @@
 <h1>Agent Screen</h1>
 
 <p><strong>Give each AI agent its own Mac screen.</strong><br>
-Claude Code or Codex opens apps, clicks and types on a virtual display, while your cursor, keyboard and windows stay yours.</p>
+A free, MIT-licensed macOS 15+ menu bar app that gives each Claude Code, Codex, or MCP agent session its own virtual display, while your cursor, keyboard and windows stay yours.</p>
 
 <p>
 <a href="https://agentscreen.app">Website</a> ·
 <a href="#install">Install</a> ·
 <a href="https://github.com/Fanzzzd/agent-screen/releases/latest">Download</a> ·
+<a href="docs/clients.md">MCP Clients</a> ·
 <a href="docs/DEVELOPMENT.md">Develop</a>
 </p>
 
@@ -24,11 +25,21 @@ Claude Code or Codex opens apps, clicks and types on a virtual display, while yo
 
 </div>
 
+```sh
+brew tap fanzzzd/agent-screen
+brew trust fanzzzd/agent-screen
+brew install --cask agent-screen
+```
+
+macOS 15 (Sequoia) or later · Apple-notarized DMG also on [GitHub Releases](https://github.com/Fanzzzd/agent-screen/releases/latest) · Then open Agent Screen and press **Connect…** in Settings (or see [full install steps](#install)).
+
 ![You work in your editor and spreadsheet while agents grab your pointer. Agent Screen moves each agent onto a display of its own, and your pointer stays put. One agent asks for help with a sign-in; you take over, sign in and hand it back.](docs/media/demo.gif)
 
 <sub>An animation of Agent Screen's behavior, built from its interface and recordings of the repo's test sessions. More at [agentscreen.app](https://agentscreen.app).</sub>
 
-Built-in computer use drives your real mouse and keyboard, so you stop working while the agent works. Agent Screen moves the agent onto a display of its own. You watch it from the menu bar, step in when it asks, and hand the screen back with one click.
+Built-in computer use drives your real mouse and keyboard, so you stop working while the agent works. Agent Screen moves each agent session onto a virtual display of its own and sends clicks and keys in the background through SkyLight and Accessibility. You watch every agent from the menu bar, step in when it asks, and hand the screen back with one click.
+
+**Status and releases.** Agent Screen is in active early development (`0.1.x`). Releases ship frequently through GitHub Releases, the Homebrew tap, and automatic Sparkle updates; `main` can document upcoming changes ahead of the latest tagged DMG release. It uses private macOS APIs (SkyLight, `CGVirtualDisplay`), so it is not on the Mac App Store and future macOS updates may require patches; it is not a security sandbox. See [CHANGELOG.md](CHANGELOG.md) and [Known limits](#known-limits).
 
 ## What you get
 
