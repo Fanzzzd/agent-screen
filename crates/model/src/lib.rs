@@ -31,6 +31,7 @@ pub mod placement;
 pub mod real_click;
 pub mod real_drag;
 pub mod recording_playback;
+pub mod regather;
 pub mod remote_view;
 pub mod report;
 pub mod request;

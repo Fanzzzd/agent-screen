@@ -267,7 +267,7 @@ impl VirtualDisplay {
             // user's displays: in a mirror set the user's display would
             // take the size too.
             settle_mode(display.id, width, height);
-            let Some(twin) = cg::unit_twin(display.id) else {
+            let Some(twin) = cg::unit_twin(display.id).or_else(|| forced_twin(&twinned)) else {
                 twinned.push(display);
                 if let Some(unit) = release_if_on_user(&mut twinned, others, before) {
                     return Err(NotMade::OnUser { unit });
@@ -1306,6 +1306,17 @@ fn put_back(origins: &[(u32, (f64, f64))]) {
             CGCompleteDisplayConfiguration(config, FOR_SESSION);
         }
     }
+}
+
+/// The first display of a creation counts as a unit twin, in an isolated
+/// debug instance with AGENTSCREEN_TEST_UNIT_TWIN set, so a test takes the
+/// twin path, a display made and another released, without a unit number
+/// taken. Says the twin is display 0.
+fn forced_twin(earlier: &[VirtualDisplay]) -> Option<u32> {
+    (earlier.is_empty()
+        && knob("AGENTSCREEN_TEST_UNIT_TWIN").is_some()
+        && std::env::var("AGENTSCREEN_INSTANCE").as_deref() == Ok("e2e"))
+    .then_some(0)
 }
 
 /// Report a display on the user's screen without one there, in an

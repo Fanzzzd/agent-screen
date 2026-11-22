@@ -115,6 +115,7 @@ pub const PATHS: &[(&str, &[Area])] = &[
     ("crates/model/src/pointer_geometry.rs", &[Viewer]),
     ("crates/model/src/real_click.rs", &[InputQueue]),
     ("crates/model/src/real_drag.rs", &[InputQueue]),
+    ("crates/model/src/regather.rs", &[Displays, Windows]),
     ("crates/model/src/recording_playback.rs", &[Recording]),
     ("crates/model/src/report.rs", &[Settings]),
     ("crates/model/src/returns.rs", &[WindowAccess]),
