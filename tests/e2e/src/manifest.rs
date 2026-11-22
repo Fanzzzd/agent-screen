@@ -358,6 +358,7 @@ pub const SCRIPTS: &[Script] = &[
     script("spares", &[Displays], Core, Agent, 2),
     script("sparerepark", &[Displays], Full, Agent, 1).hands_off(),
     script("sparesize", &[Displays], Full, Agent, 2),
+    script("sparewindow", &[Displays, Windows], Full, Agent, 6),
     script("statusicon", &[Peek], Full, Agent, 1),
     script("stop", &[], Full, Agent, 0)
         .no_app()

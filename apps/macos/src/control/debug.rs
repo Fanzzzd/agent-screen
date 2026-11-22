@@ -76,6 +76,17 @@ pub(super) async fn handle(
             Ok(json!({ "streams": streams }))
         }
         "debugWebPreview" => Ok(crate::web::debug_status()),
+        // The latest display change's regather (#291): its generation and
+        // whether it still runs, so a test can wait for it to settle.
+        "debugRegather" => {
+            let status = cx.update(|cx| {
+                crate::ui::shell::current()
+                    .and_then(|shell| shell.upgrade())
+                    .map(|shell| shell.read(cx).regather_status())
+            });
+            let (generation, running) = status.unwrap_or((0, false));
+            Ok(json!({ "generation": generation, "running": running }))
+        }
         "debugViewerInput" => debug_viewer_input(p, cx).await,
         // Test hook: the front app's focused window reads as unknown, as
         // when the app doesn't answer accessibility in time.

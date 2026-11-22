@@ -297,6 +297,10 @@ pub struct Shell {
     /// Whether AeroSpace leaves Agent Displays alone; None without AeroSpace.
     aerospace: Option<aerospace::Ignoring>,
     guard_generation: u64,
+    /// The latest display change's regather; an older one stops.
+    regather_generation: u64,
+    /// The regather that runs, if one does.
+    regather_running: Option<u64>,
     asking_count: usize,
     /// Screen Recording and Accessibility, as last checked.
     permissions: permissions::Status,
@@ -820,6 +824,8 @@ impl Shell {
             conflicts: Vec::new(),
             aerospace: None,
             guard_generation: 0,
+            regather_generation: 0,
+            regather_running: None,
             asking_count: 0,
             permissions: permissions::status(),
             notifications: notify::Auth::Unknown,
@@ -5460,46 +5466,199 @@ open -a AeroSpace";
     /// the user's workspaces are, for the next time.
     /// The displays changed. When one comes or goes, macOS moves the others
     /// and may drop their windows on the user's screen, where AeroSpace
-    /// tiles them in the user's workspace. Put each window of a live Agent
-    /// Display back once the displays have settled.
+    /// tiles them in the user's workspace, or on a spare, a unit twin or
+    /// another session's display. Put each window of a live Agent Display
+    /// back on the display it is recorded on (#291).
+    ///
+    /// `agent_screen_model::regather` decides each pass. Before each move,
+    /// return and record dropped, the window must still be recorded there
+    /// and this regather still the latest: a Take Back or a newer display
+    /// change meanwhile wins. A window that doesn't leave on its return
+    /// keeps its record.
     fn schedule_regather(&mut self, cx: &mut Context<Self>) {
+        use agent_screen_model::regather::{self, Regather, Step};
+        self.regather_generation += 1;
+        let generation = self.regather_generation;
+        self.regather_running = Some(generation);
         cx.spawn(async move |this, cx| {
-            for wait in [500, 1500] {
+            let mut state = Regather::new();
+            let mut pass = 0;
+            while state.runs(pass) {
                 cx.background_executor()
-                    .timer(Duration::from_millis(wait))
+                    .timer(Duration::from_millis(regather::wait_before(pass)))
                     .await;
-                let Ok(windows) = this.update(cx, |shell, cx| {
-                    shell
-                        .core
-                        .read(cx)
-                        .displays
-                        .list
-                        .iter()
-                        .filter(|d| !d.is_ended())
-                        .flat_map(|d| d.records.values().map(move |r| (d.id, r.target)))
-                        .collect::<Vec<(DisplayId, WindowTarget)>>()
+                pass += 1;
+                let Ok(Some(windows)) = this.update(cx, |shell, cx| {
+                    (shell.regather_generation == generation).then(|| shell.recorded_live(cx))
                 }) else {
                     return;
                 };
-                cx.background_executor()
-                    .spawn(async move {
-                        for (id, target) in windows {
-                            if windows::find(target.window_id).is_some()
-                                && !windows::on_virtual_display(target.window_id)
-                            {
-                                let moved = crate::mac::ax::move_into(target, cg::display_bounds(id));
-                                log::info!(
-                                    "window {} fell off display {id} as the displays changed; put back: {}",
-                                    target.window_id,
-                                    moved.is_ok()
-                                );
+                let keys: Vec<regather::Key> =
+                    windows.iter().map(|&(id, t)| (t.window_id, id)).collect();
+                state.retain(&keys);
+                for (id, target) in windows {
+                    let window = target.window_id;
+                    let owns = |this: &WeakEntity<Shell>, cx: &mut AsyncApp| {
+                        this.update(cx, |shell, cx| shell.regather_owns(generation, id, target, cx))
+                            .ok()
+                            .flatten()
+                    };
+                    match owns(&this, cx) {
+                        None => return,
+                        Some(false) => continue,
+                        Some(true) => {}
+                    }
+                    let (own, frame) = cx
+                        .background_executor()
+                        .spawn(async move {
+                            // By owner too: a remote panel may miss a
+                            // targeted lookup while the full list has it.
+                            (cg::display_bounds(id), cg::routing_window_bounds(target))
+                        })
+                        .await;
+                    match state.step(window, id, regather::place(frame, own)) {
+                        Step::Stay => {}
+                        Step::Back => log::info!(
+                            "window {window} is back on display {id} after the displays changed"
+                        ),
+                        Step::PutBack => {
+                            // Decided with the times it went home so far: a
+                            // Take Back in its lane meanwhile cancels the
+                            // move, and one after it sends the window home.
+                            let seen = this
+                                .update(cx, |shell, cx| {
+                                    shell
+                                        .regather_owns(generation, id, target, cx)
+                                        .map(|owns| owns.then(|| windows::times_returned(window)))
+                                })
+                                .ok()
+                                .flatten();
+                            let Some(seen) = seen else {
+                                return;
+                            };
+                            let Some(seen) = seen else {
+                                continue;
+                            };
+                            let moved = cx
+                                .background_executor()
+                                .spawn(async move { windows::put_back_unless_returned(target, own, seen) })
+                                .await;
+                            log::info!(
+                                "window {window} fell off display {id} as the displays changed, now at {frame:?}; put back (try {}): {moved:?}",
+                                state.tries(window, id)
+                            );
+                        }
+                        Step::Vanished => {
+                            log::warn!(
+                                "window {window} of display {id} is gone after the displays changed, in no window list twice: its app closed it"
+                            );
+                            if owns(&this, cx) == Some(true) {
+                                let _ = this.update(cx, |shell, cx| shell.regather_forget(id, window, cx));
                             }
                         }
-                    })
-                    .await;
+                        Step::HandToUser => {
+                            // None once superseded; Some(None) once the
+                            // record went meanwhile.
+                            let found = this
+                                .update(cx, |shell, cx| {
+                                    shell.regather_owns(generation, id, target, cx).map(|owns| {
+                                        owns.then(|| {
+                                            (shell.record_home(id, window, cx), main_screen_name())
+                                        })
+                                    })
+                                })
+                                .ok()
+                                .flatten();
+                            let Some(found) = found else {
+                                return;
+                            };
+                            let Some((home, main_name)) = found else {
+                                continue;
+                            };
+                            let returned = cx
+                                .background_executor()
+                                .spawn(async move {
+                                    dismissal::give_back(target, home.as_ref(), main_name.as_deref())
+                                })
+                                .await;
+                            let forget = state.handed(window, id, returned);
+                            log::warn!(
+                                "window {window} stayed off display {id} after {} tries to put it back; returned to the user's screen: {returned}{}",
+                                regather::MAX_TRIES,
+                                if forget { "" } else { "; it keeps its record" }
+                            );
+                            if forget && owns(&this, cx) == Some(true) {
+                                let _ = this.update(cx, |shell, cx| shell.regather_forget(id, window, cx));
+                            }
+                        }
+                    }
+                }
             }
+            let _ = this.update(cx, |shell, _| {
+                if shell.regather_running == Some(generation) {
+                    shell.regather_running = None;
+                }
+            });
         })
         .detach();
+    }
+
+    /// The windows recorded on live Agent Displays.
+    fn recorded_live(&self, cx: &App) -> Vec<(DisplayId, WindowTarget)> {
+        self.core
+            .read(cx)
+            .displays
+            .list
+            .iter()
+            .filter(|d| !d.is_ended())
+            .flat_map(|d| d.records.values().map(move |r| (d.id, r.target)))
+            .collect()
+    }
+
+    /// None once a newer regather started; else whether `target` is still
+    /// recorded on live display `id`.
+    fn regather_owns(
+        &self,
+        generation: u64,
+        id: DisplayId,
+        target: WindowTarget,
+        cx: &App,
+    ) -> Option<bool> {
+        if self.regather_generation != generation {
+            return None;
+        }
+        Some(
+            self.core
+                .read(cx)
+                .displays
+                .get(id)
+                .filter(|d| !d.is_ended())
+                .and_then(|d| d.records.get(&target.window_id))
+                .is_some_and(|r| r.target == target),
+        )
+    }
+
+    /// Where `window`, recorded on `id`, came from.
+    fn record_home(&self, id: DisplayId, window: u32, cx: &App) -> Option<crate::model::Home> {
+        self.core
+            .read(cx)
+            .displays
+            .get(id)
+            .and_then(|d| d.records.get(&window))
+            .and_then(|r| r.home.clone())
+    }
+
+    fn regather_forget(&mut self, id: DisplayId, window: u32, cx: &mut Context<Self>) {
+        self.core.update(cx, |core, cx| {
+            core.displays.forget_on(id, window);
+            cx.notify();
+        });
+    }
+
+    /// For `debugRegather`: the latest display change's regather and
+    /// whether it still runs.
+    pub fn regather_status(&self) -> (u64, bool) {
+        (self.regather_generation, self.regather_running.is_some())
     }
 
     fn schedule_guard(&mut self, cx: &mut Context<Self>) {

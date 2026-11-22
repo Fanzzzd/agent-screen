@@ -932,6 +932,20 @@ pub fn place_for_agent(
     LANES.agent_move(target.window_id, || place(target, display, screen_name))
 }
 
+/// Put a window that fell off its display back into `bounds` after the
+/// displays changed (#291), decided when it had gone home `seen` times,
+/// unless it went home since: a Take Back, in the same lane, always wins.
+/// Blocking.
+pub fn put_back_unless_returned(
+    target: WindowTarget,
+    bounds: Rect,
+    seen: u64,
+) -> Result<(), String> {
+    LANES.unless_returned_since(target.window_id, seen, false, || {
+        ax::move_into(target, bounds).map_err(|e| format!("{e:?}"))
+    })
+}
+
 /// Mark a window as the user's, after any move for the agent in flight,
 /// then send it home with `home`, before any later one. `home` says whether
 /// the window left the display, and so does this. Blocking.
