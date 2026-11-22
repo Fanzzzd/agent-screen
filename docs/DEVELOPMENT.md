@@ -268,6 +268,7 @@ AGENTSCREEN_INSTANCE=e2e cargo e2e mcpclients # real MCP clients installed on th
 AGENTSCREEN_INSTANCE=e2e cargo e2e lastapp    # the only app on a display quits, and the display stays: a screenshot and the next launch_app on it work (needs Field.app from `ime`)
 AGENTSCREEN_INSTANCE=e2e cargo e2e holdmode       # an active or spare display macOS switches to 800×600 by itself is back at the size it was made with, and the display log says so; 1 display
 AGENTSCREEN_INSTANCE=e2e cargo e2e spares         # an ended display comes back as the next one, with no display change, and the display log records the app start and each display released at quit
+AGENTSCREEN_INSTANCE=e2e cargo e2e sparerepark # a spare macOS moved against the main screen's right edge, with no Agent Display live, is parked off it again within 5 s (#286); the spare touches your screen meanwhile; 1 display
 AGENTSCREEN_INSTANCE=e2e cargo e2e warmspare      # while you are idle the app makes two spares, and the next two displays take them with no display change; 3 displays
 AGENTSCREEN_INSTANCE=e2e cargo e2e serials        # a new display takes the serial a released one freed
 AGENTSCREEN_INSTANCE=e2e cargo e2e arrangement    # new displays park in a grid off the top-right corner of your rightmost screen, beside each other while the row fits, sharing no edge with your screens; nothing already there moves; 2 displays

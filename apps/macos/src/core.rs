@@ -10,6 +10,7 @@ use crate::model::{DisplayId, Displays, EndReason, Owner, WindowId};
 use crate::numbers::Numbers;
 use agent_screen_model::budget::{Budget, ColorState, MadeLimit};
 use agent_screen_model::request::{Answer, Effect, Kind, RequestId, Unanswered};
+use agent_screen_model::retry::Backoff;
 use gpui::{App, AsyncApp, Context, Entity};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -91,10 +92,14 @@ pub struct Core {
     /// display, so overlapping `ScreensChanged` notifications never shift
     /// unrecorded windows twice or overwrite newer baselines (H1).
     repark_state: agent_screen_model::arrangement::ReparkState,
-    /// Tries at parking a moved display again, since it was last in place.
-    reparks: HashMap<DisplayId, u8>,
-    /// Tries at giving a display its size back, since it last ran at it.
-    remodes: HashMap<DisplayId, u8>,
+    /// Failed tries at parking a moved display again, since it was last in
+    /// place, and when the next is due (#286).
+    reparks: Backoff<DisplayId>,
+    /// Failed tries at giving a display its size back, since it last ran
+    /// at it, and when the next is due.
+    remodes: Backoff<DisplayId>,
+    /// A later `repark` or `hold_modes` is set for a retry that waits.
+    retry_set: (bool, bool),
     /// Apps an Agent Session is launching. Two launches of one app at once
     /// can't tell their new windows apart, so they take turns.
     pub launching: HashSet<std::path::PathBuf>,
@@ -163,8 +168,9 @@ impl Core {
             sessions: HashMap::new(),
             tucked: HashSet::new(),
             repark_state: Default::default(),
-            reparks: HashMap::new(),
-            remodes: HashMap::new(),
+            reparks: Backoff::default(),
+            remodes: Backoff::default(),
+            retry_set: (false, false),
             launching: HashSet::new(),
             kept_catches: Vec::new(),
             returning: Vec::new(),
@@ -271,11 +277,18 @@ impl Core {
             helper_ready: self.reclaim.helper == Some(colorsync::Helper::Ready),
         };
         let online = crate::mac::cg::online().len();
-        match state.allows(online, self.spares.len()) {
+        // Retiring displays are ended ones that wait for the user to be idle
+        // before they go: they cost the budget as much as spares (#286).
+        match state.allows(online, self.retiring.len(), self.spares.len()) {
             Budget::Allow => Ok(()),
-            Budget::ReleaseSpares => {
-                for spare in std::mem::take(&mut self.spares) {
-                    crate::lifecycle::note("released", spare.handle.id, "spare over budget");
+            Budget::Release { spares } => {
+                for display in std::mem::take(&mut self.retiring) {
+                    crate::lifecycle::note("released", display.id, "retiring, over budget");
+                }
+                if spares {
+                    for spare in std::mem::take(&mut self.spares) {
+                        crate::lifecycle::note("released", spare.handle.id, "spare over budget");
+                    }
                 }
                 Ok(())
             }
@@ -417,6 +430,12 @@ impl Core {
         // it was told to open its window at, and open it on the user's
         // screen (#123). The next tidy comes soon enough.
         if !self.launching.is_empty() {
+            return;
+        }
+        // Display sleep comes after a minute of idle too. While the user's
+        // displays sleep, a new spare can't be parked, and every try counts
+        // as a failure that refuses agents' displays for 10 minutes (#286).
+        if !crate::mac::cg::users_awake() {
             return;
         }
         let mut released = false;
@@ -718,26 +737,44 @@ impl Core {
     /// window writes (`M3`), then run a serialized window-shift pass (`H1`, `L2`).
     pub fn repark(&mut self, cx: &mut Context<Self>) {
         let virtual_ids = self.virtual_ids();
-        let mut candidates = Vec::new();
-        for d in &self.displays.list {
-            if self.tucked.contains(&d.id) {
-                let tries = self.reparks.get(&d.id).copied().unwrap_or(0);
-                candidates.push((d.id, tries));
-            }
-        }
+        let now = mono_ms();
+        // Every display of ours that was parked: spares and retiring ones
+        // too, which no session uses but which still take the pointer if
+        // macOS reattaches them next to the user's screen (#286). One whose
+        // last try failed waits its turn.
+        let parked: Vec<DisplayId> = self
+            .displays
+            .list
+            .iter()
+            .map(|d| d.id)
+            .filter(|id| self.tucked.contains(id))
+            .chain(self.spares.iter().map(|s| s.handle.id))
+            .chain(self.retiring.iter().map(|d| d.id))
+            .collect();
+        self.reparks.retain(|id| parked.contains(id));
+        let candidates: Vec<(DisplayId, bool)> = parked
+            .into_iter()
+            .map(|id| (id, self.reparks.due(&id, now)))
+            .collect();
         cx.spawn(async move |this, cx| {
             let (tucked_ok, retried) = cx
                 .background_executor()
                 .spawn(async move {
                     display::configure(move || {
+                        // With the user's displays asleep no spot can be
+                        // verified out of their way; their wake is a
+                        // display change that parks again.
+                        if !crate::mac::cg::users_awake() {
+                            return (Vec::new(), Vec::new());
+                        }
                         park_fillers(&virtual_ids);
                         let mut connected = display::arrangement_connected(&virtual_ids);
                         let mut tucked_ok = Vec::new();
                         let mut retried = Vec::new();
-                        for &(id, tries) in &candidates {
+                        for &(id, due) in &candidates {
                             if display::is_tucked(id, &virtual_ids) && connected {
                                 tucked_ok.push(id);
-                            } else if tries < 3 {
+                            } else if due {
                                 let parked = display::tuck_away(id, &virtual_ids);
                                 connected = display::arrangement_connected(&virtual_ids);
                                 log::debug!("display {id} was moved; parked again: {parked}");
@@ -755,12 +792,57 @@ impl Core {
                 .await;
             let _ = this.update(cx, |core, cx| {
                 for id in tucked_ok {
-                    core.reparks.remove(&id);
+                    core.reparks.succeeded(&id);
                 }
+                let now = mono_ms();
                 for id in retried {
-                    *core.reparks.entry(id).or_default() += 1;
+                    core.reparks.failed(id, now);
+                    log::info!(
+                        "display {id}: parking again failed {} times in a row; tries again in {} ms",
+                        core.reparks.failures(&id),
+                        core.reparks.next_in(now).unwrap_or(0)
+                    );
                 }
+                core.retry_later(true, cx);
                 core.run_repark_shifts(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Run `repark` (`parking`) or `hold_modes` again once the soonest retry
+    /// that waits is due: a failure is retried without waiting for the next
+    /// display change.
+    fn retry_later(&mut self, parking: bool, cx: &mut Context<Self>) {
+        let backoff = if parking {
+            &self.reparks
+        } else {
+            &self.remodes
+        };
+        let set = if parking {
+            &mut self.retry_set.0
+        } else {
+            &mut self.retry_set.1
+        };
+        let Some(wait) = backoff.next_in(mono_ms()) else {
+            return;
+        };
+        if *set {
+            return;
+        }
+        *set = true;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(wait.max(50)))
+                .await;
+            let _ = this.update(cx, |core, cx| {
+                if parking {
+                    core.retry_set.0 = false;
+                    core.repark(cx);
+                } else {
+                    core.retry_set.1 = false;
+                    core.hold_modes(cx);
+                }
             });
         })
         .detach();
@@ -917,8 +999,9 @@ impl Core {
                     .iter()
                     .map(|s| (s.handle.id, s.size.0 as u32, s.size.1 as u32)),
             )
-            .filter(|(id, _, _)| self.remodes.get(id).copied().unwrap_or(0) < 3)
             .collect();
+        let live: Vec<DisplayId> = candidates.iter().map(|c| c.0).collect();
+        self.remodes.retain(|id| live.contains(id));
         if candidates.is_empty() {
             return;
         }
@@ -940,19 +1023,24 @@ impl Core {
                 })
                 .await;
             let restore: Vec<(DisplayId, u32, u32)> = this
-                .update(cx, |core, _| {
+                .update(cx, |core, cx| {
                     for id in matched {
-                        core.remodes.remove(&id);
+                        core.remodes.succeeded(&id);
                     }
+                    // A wrong mode is tried again after a wait, however
+                    // often it came back, until the display runs at its size.
+                    let now = mono_ms();
                     let mut out = Vec::new();
                     for (id, width, height) in wrong {
-                        let tries = core.remodes.entry(id).or_default();
-                        if *tries >= 3 {
+                        if !core.remodes.due(&id, now) {
                             continue;
                         }
-                        *tries += 1;
+                        core.remodes.failed(id, now);
                         out.push((id, width, height));
                     }
+                    // Look again once the next try is due, to see whether
+                    // this one held.
+                    core.retry_later(false, cx);
                     out
                 })
                 .unwrap_or_default();
@@ -1292,8 +1380,8 @@ impl Core {
             self.elements.retain(|(display, _), _| *display != id);
             self.tucked.remove(&id);
             self.repark_state.remove_display(id);
-            self.reparks.remove(&id);
-            self.remodes.remove(&id);
+            self.reparks.succeeded(&id);
+            self.remodes.succeeded(&id);
             self.kept_catches.retain(|(display, _)| *display != id);
             self.returning.retain(|(display, _)| *display != id);
             self.pending_returns.remove_display(id);
@@ -1537,6 +1625,12 @@ pub fn watch_alerts(core: Entity<Core>, cx: &mut App) {
         }
     })
     .detach();
+}
+
+/// Milliseconds on a clock that only goes forward, for retry waits.
+fn mono_ms() -> u64 {
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_millis() as u64
 }
 
 /// Park the kept twins out of the way like any display of Agent Screen's.
