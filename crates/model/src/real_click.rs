@@ -14,6 +14,37 @@ pub const GAP_MS: u64 = 40;
 // double-click speed setting goes down to about 0.15 s between presses.
 const _: () = assert!(HOLD_MS + GAP_MS < 150);
 
+/// How long a loan waits for its app to take AXFrontmost before it
+/// activates the app, and how long it then waits for the activation.
+pub const FRONT_WRITE_WAIT: std::time::Duration = std::time::Duration::from_millis(200);
+pub const FRONT_ACTIVATE_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// What a loan does while its app is not in front yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForwardStep {
+    Wait,
+    /// The app took the AXFrontmost write and stayed behind, as Dia does
+    /// (issue #255): bring it through NSRunningApplication.
+    Activate,
+    GiveUp,
+}
+
+/// The loan's step `elapsed` after its AXFrontmost write, with the app still
+/// behind; `activated` says whether it activated the app already.
+pub fn forward_step(elapsed: std::time::Duration, activated: bool) -> ForwardStep {
+    if !activated {
+        if elapsed > FRONT_WRITE_WAIT {
+            ForwardStep::Activate
+        } else {
+            ForwardStep::Wait
+        }
+    } else if elapsed > FRONT_WRITE_WAIT + FRONT_ACTIVATE_WAIT {
+        ForwardStep::GiveUp
+    } else {
+        ForwardStep::Wait
+    }
+}
+
 /// The `computer` actions that accept `real_input`: a complete drag, a
 /// split press, which only asks, and a complete left click. A right or
 /// middle click is refused with `NO_MENU_CLICK`.
@@ -412,6 +443,21 @@ pub fn short_title(title: &str, max: usize) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_app_that_stays_behind_after_axfrontmost_is_activated_once_then_given_up() {
+        use std::time::Duration;
+        let ms = Duration::from_millis;
+        assert_eq!(forward_step(ms(0), false), ForwardStep::Wait);
+        assert_eq!(forward_step(ms(200), false), ForwardStep::Wait);
+        assert_eq!(forward_step(ms(201), false), ForwardStep::Activate);
+        // Even a late first check activates before giving up: the write
+        // alone never fails the loan.
+        assert_eq!(forward_step(ms(5000), false), ForwardStep::Activate);
+        assert_eq!(forward_step(ms(201), true), ForwardStep::Wait);
+        assert_eq!(forward_step(ms(1200), true), ForwardStep::Wait);
+        assert_eq!(forward_step(ms(1201), true), ForwardStep::GiveUp);
+    }
 
     #[test]
     fn left_clicks_take_real_input_and_others_do_not() {

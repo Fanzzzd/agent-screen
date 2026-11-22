@@ -439,10 +439,16 @@ fn write_front(pid: i32) {
 /// the same, it goes back to where it was before anything is pressed;
 /// claimed, AeroSpace leaves it alone from then on.
 ///
+/// Some apps take the AXFrontmost write and stay behind, as Dia does
+/// (issue #255). After 200 ms the loan activates such an app through
+/// NSRunningApplication, with the loan's window already main, and touches
+/// the claim file again for that activation.
+///
 /// A window already main in the app in front, as after an earlier loan of
 /// the same grant, needs none of this: nothing activates, so no window
 /// manager lays anything out.
 pub fn come_forward(target: WindowTarget, go: impl Fn() -> bool) -> Result<(), &'static str> {
+    use agent_screen_model::real_click::{ForwardStep, forward_step};
     if already_forward(target) {
         return if go() {
             Ok(())
@@ -457,16 +463,37 @@ pub fn come_forward(target: WindowTarget, go: impl Fn() -> bool) -> Result<(), &
     write_front(target.pid);
     let asked = std::time::Instant::now();
     let mut still = asked;
+    // From the last request to come forward: the AX write, then an
+    // activation if the app took the write and stayed behind.
+    let mut since = asked;
+    let mut activated = false;
     loop {
         if !go() {
             return Err("the approval ended before anything was pressed");
         }
-        if aerospace && asked.elapsed() < TOUCHING {
+        if aerospace && since.elapsed() < TOUCHING {
             super::claims::touch();
         }
         if super::app::frontmost_pid() != Some(target.pid) {
-            if asked.elapsed() > Duration::from_secs(1) {
-                return Err("the app didn't come to the front");
+            match forward_step(asked.elapsed(), activated) {
+                ForwardStep::Wait => {}
+                ForwardStep::Activate => {
+                    // Dia takes AXFrontmost and stays behind (#255). AXMain
+                    // came first, so the activation brings the agent's
+                    // window, not one of the user's.
+                    activated = true;
+                    since = std::time::Instant::now();
+                    log::info!(
+                        "input queue: pid {} ignored AXFrontmost; activating it",
+                        target.pid
+                    );
+                    if !super::app::activate(target.pid) {
+                        return Err("macOS refused to bring the app to the front");
+                    }
+                }
+                ForwardStep::GiveUp => {
+                    return Err("the app didn't come to the front");
+                }
             }
         } else if !aerospace {
             return Ok(());
@@ -484,10 +511,10 @@ pub fn come_forward(target: WindowTarget, go: impl Fn() -> bool) -> Result<(), &
                 return Err("the window moved off the Agent Display and couldn't be put back");
             }
             still = std::time::Instant::now();
-        } else if asked.elapsed() >= TOUCHING && still.elapsed() >= SETTLED {
+        } else if since.elapsed() >= TOUCHING && still.elapsed() >= SETTLED {
             return Ok(());
         }
-        if asked.elapsed() > SETTLE_LIMIT {
+        if since.elapsed() > SETTLE_LIMIT {
             return Err("a window manager kept moving the window off the Agent Display");
         }
         thread::sleep(Duration::from_millis(10));
