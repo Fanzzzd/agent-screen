@@ -2687,9 +2687,9 @@ fn click_check_in(
     if let Some(foreign) = foreign_recorded_top_window_in(list, display, at, owners) {
         return Err(foreign);
     }
-    let target = list
-        .iter()
-        .find(|h| h.bounds.contains(at))
+    // A popover's arrow or border is the app's window, as a press there
+    // goes to it (`Hit::at`); its content is another process's view.
+    let target = topmost_hit_in(list, at)
         .filter(|h| h.layer == 0 && h.target == h.host)
         .map(|h| (h.target, h.bounds));
     Ok(target)
@@ -2894,9 +2894,7 @@ fn mark_panels_using(
 /// The app window at a global point, as a press there would hit it, and
 /// its frame. None for a menu, a pop-up, or a panel another process draws.
 pub fn window_at(at: (f64, f64)) -> Option<(WindowTarget, Rect)> {
-    hits()
-        .into_iter()
-        .find(|h| h.bounds.contains(at))
+    topmost_hit_in(&hits(), at)
         .filter(|h| h.layer == 0 && h.target == h.host)
         .map(|h| (h.target, h.bounds))
 }
@@ -2957,7 +2955,9 @@ fn resolve_real_click(
     is_remote: impl Fn(i32) -> bool,
     at: (f64, f64),
 ) -> Option<RealClickHit> {
-    let hit = hits.iter().find(|h| h.bounds.contains(at))?;
+    // Resolved at the point: a popover's arrow or border is the app's, so
+    // Accessibility reads the app there and the remote view on its content.
+    let hit = topmost_hit_in(hits, at)?;
     if (0..=8).contains(&hit.layer) && display_windows.contains(&hit.host) {
         return Some(RealClickHit {
             window: hit.host,
@@ -3523,6 +3523,40 @@ mod popover_routing_tests {
             click_check_in(&[hit], 8, (1100.0, 300.0), &owners),
             Ok(None)
         );
+    }
+
+    #[test]
+    fn the_arrow_is_finders_window_for_the_click_guard() {
+        let list = [popover_hit(0, |p| p == SHARING.pid)];
+        let owners = std::collections::BTreeMap::new();
+        // On the arrow the guard sees Finder's window, as the press goes
+        // there; on the content the click takes the forwarding path.
+        assert_eq!(
+            click_check_in(&list, 8, (1100.0, 205.0), &owners),
+            Ok(Some((FINDER, POPOVER)))
+        );
+        assert_eq!(click_check_in(&list, 8, (1100.0, 213.5), &owners), Ok(None));
+        assert_eq!(
+            topmost_hit_in(&list, (1100.0, 213.5)).map(|h| h.target),
+            Some(SHARING)
+        );
+    }
+
+    #[test]
+    fn real_click_reads_the_process_that_draws_the_point() {
+        let list = [popover_hit(0, |p| p == SHARING.pid)];
+        let at = |y| resolve_real_click(&list, &[FINDER], 101, |p| p == SHARING.pid, (1100.0, y));
+        for (y, pid) in [
+            (205.0, FINDER.pid),
+            (212.5, FINDER.pid),
+            (213.5, SHARING.pid),
+        ] {
+            let hit = at(y).unwrap();
+            assert_eq!(hit.ax_pid, pid, "at y = {y}");
+            assert_eq!(hit.window, FINDER);
+            assert_eq!(hit.window_frame, POPOVER);
+            assert_eq!(hit.menu, None);
+        }
     }
 
     #[test]
