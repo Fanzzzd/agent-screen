@@ -69,7 +69,7 @@ fn test(field: &std::path::Path) -> Result<()> {
     let added = after.get(log.len()..).unwrap_or(&after);
     check(
         "the log keeps the panic's message and place",
-        added.contains("panic: ") && added.contains("debugPanic") && added.contains("agent.rs"),
+        added.contains("panic: ") && added.contains("debugPanic") && added.contains("debug.rs"),
         cut(added, 300),
     );
     sleep_ms(1000);

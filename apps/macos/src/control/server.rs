@@ -190,6 +190,35 @@ impl Shared {
     }
 }
 
+/// The app's display ledger, which the MCP hosts read, with the live
+/// displays it was last told of.
+static LEDGER: std::sync::OnceLock<(Arc<Ledger>, Mutex<Vec<agent_screen_mcp::ledger::Live>>)> =
+    std::sync::OnceLock::new();
+
+/// Keep the ledger in step with the model: its live displays and the apps
+/// still theirs (`Displays::live_apps`), so after a restart no display
+/// adopts an app the user took back or one of a display that had ended
+/// (ADR 0021). Writes only when they changed.
+pub fn keep_ledger<H>(displays: &crate::model::Displays<H>) {
+    let Some((ledger, seen)) = LEDGER.get() else {
+        return;
+    };
+    let live: Vec<agent_screen_mcp::ledger::Live> = displays
+        .live_apps()
+        .into_iter()
+        .map(|(id, session, apps)| agent_screen_mcp::ledger::Live {
+            display: id as u64,
+            session,
+            apps: apps.into_iter().map(i64::from).collect(),
+        })
+        .collect();
+    let mut seen = seen.lock().unwrap_or_else(|e| e.into_inner());
+    if *seen != live {
+        ledger.sync(&live);
+        *seen = live;
+    }
+}
+
 /// How often the app looks for orphaned MCP processes.
 const SWEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -206,11 +235,9 @@ pub fn start() -> anyhow::Result<mpsc::UnboundedReceiver<Event>> {
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     std_listener.set_nonblocking(true)?;
     let (events, rx) = mpsc::unbounded();
-    let shared = Arc::new(Shared::new(
-        events,
-        Arc::new(Ledger::persistent(agent_screen_mcp::endpoint::ledger_path())),
-        Box::new(Mac),
-    ));
+    let ledger = Arc::new(Ledger::persistent(agent_screen_mcp::endpoint::ledger_path()));
+    let _ = LEDGER.set((ledger.clone(), Mutex::default()));
+    let shared = Arc::new(Shared::new(events, ledger, Box::new(Mac)));
     std::thread::Builder::new()
         .name("agent-screen-control".into())
         .spawn(move || {

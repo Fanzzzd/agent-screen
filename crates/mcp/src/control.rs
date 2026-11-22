@@ -210,7 +210,16 @@ impl Control {
         let params = with_session(params);
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         let (tx, rx) = oneshot::channel();
-        connection.pending.lock().unwrap().insert(id, tx);
+        {
+            // Under the lock `receive` drains with at its end: a call that
+            // comes after the drain hears the connection closed, instead of
+            // waiting for an answer that never comes.
+            let mut pending = connection.pending.lock().unwrap();
+            if !connection.open.load(Ordering::Relaxed) {
+                return Err(closed("the connection closed"));
+            }
+            pending.insert(id, tx);
+        }
         let mut line = serde_json::to_vec(&json!({ "id": id, "method": method, "params": params }))
             .map_err(|e| ControlError::new("failed", e.to_string()))?;
         line.push(b'\n');
@@ -387,8 +396,9 @@ async fn receive(
         };
         let _ = settle.send(outcome);
     }
+    let mut pending = pending.lock().unwrap();
     open.store(false, Ordering::Relaxed);
-    for (_, settle) in pending.lock().unwrap().drain() {
+    for (_, settle) in pending.drain() {
         let _ = settle.send(Err(closed("The Agent Screen app closed the connection.")));
     }
 }
@@ -400,6 +410,42 @@ fn closed(detail: &str) -> ControlError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A call that reaches a connection after its reader ended, and after
+    /// the reader answered every waiting call, hears that it closed.
+    #[test]
+    fn a_call_after_the_connection_ended_does_not_wait_forever() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let (app, ours) = tokio::io::duplex(1 << 16);
+                let (reader, writer) = tokio::io::split(ours);
+                let pending: Arc<std::sync::Mutex<HashMap<u64, oneshot::Sender<Reply>>>> =
+                    Arc::default();
+                let open = Arc::new(AtomicBool::new(true));
+                let connection = Connection {
+                    writer: Mutex::new(Box::new(writer)),
+                    pending: pending.clone(),
+                    open: open.clone(),
+                };
+                // The app ends its side without reading: the reader drains.
+                let (app_reads, mut app_writes) = tokio::io::split(app);
+                app_writes.shutdown().await.unwrap();
+                let reader: Reader = Box::new(reader);
+                receive(BufReader::new(reader), pending, open).await;
+                let control = Control::default();
+                let answered = tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    control.call_on(&connection, "listDisplays", json!({})),
+                )
+                .await;
+                drop(app_reads);
+                let reply = answered.expect("the call waited for an answer that never comes");
+                assert_eq!(reply.unwrap_err().code, "unavailable");
+            });
+    }
 
     #[test]
     fn change_baselines_are_separate_for_roots_and_traversal_depths() {
