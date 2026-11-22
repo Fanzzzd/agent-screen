@@ -67,9 +67,15 @@ case "unhide":
   // bringing it to the front.
   let pid = pid_t(args[2])!
   let app = NSRunningApplication(processIdentifier: pid)
-  _ = app?.unhide()
-  let end = Date(timeIntervalSinceNow: 1)
+  // An app just let go of being hidden may ignore the first unhide: ask
+  // again until it shows, for up to 3 s.
+  let end = Date(timeIntervalSinceNow: 3)
+  var asked = Date.distantPast
   while Date() < end, app?.isHidden == true {
+    if Date().timeIntervalSince(asked) > 0.25 {
+      _ = app?.unhide()
+      asked = Date()
+    }
     RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
   }
   print(app?.isHidden == false ? "shown" : "hidden")

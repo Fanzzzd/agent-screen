@@ -26,6 +26,7 @@ pub mod menu_press;
 pub mod model;
 pub mod new_window;
 pub mod numbers;
+pub mod open_menu;
 pub mod placement;
 pub mod real_click;
 pub mod real_drag;

@@ -289,6 +289,24 @@ pub fn on_screen_ids_where(keep: impl Fn(i32, i64, Rect) -> bool) -> Vec<u32> {
     out
 }
 
+/// Ids and alpha of on-screen windows of other processes that `keep`
+/// takes by layer and bounds, desktop elements left out.
+pub fn on_screen_alpha_where(keep: impl Fn(i64, Rect) -> bool) -> Vec<(u32, f64)> {
+    let me = std::process::id() as i32;
+    let mut out = Vec::new();
+    list_raw(
+        CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements,
+        0,
+        |pid, window_id, layer, bounds, info| {
+            if pid != me && keep(layer, bounds) {
+                let alpha = unsafe { cf::float(info, cf::kCGWindowAlpha) }.unwrap_or(1.0);
+                out.push((window_id, alpha));
+            }
+        },
+    );
+    out
+}
+
 /// On-screen windows input can reach, front to back, without reading window
 /// titles. Filters by layer, alpha and owner before allocating anything.
 pub fn on_screen_hit_candidates(menu: i64, status: i64) -> Vec<(WindowTarget, i64, Rect)> {

@@ -178,7 +178,7 @@ fn web_refusal(engine: Option<Engine>) -> String {
         "Agent Screen chooses a web page's select only through the private DevTools pipe of a Chromium app that launch_app started, and this page isn't in one"
     };
     format!(
-        "{why}. A key typed into a web select could open its menu, which would take the user's keyboard, so nothing was sent and no menu was opened. For a page you can open again, start a Chromium browser with launch_app and its own --user-data-dir. Otherwise call request_help for the user to choose it"
+        "{why}. A key typed into a web select could open its menu, which would take the user's keyboard, so nothing was sent and no menu was opened. To choose it yourself, click the select to open its menu, then click or press the item in your next call: the menu shows in a screenshot and its items in get_window_state while it is open, and it closes at the user's next click or key. For a page you can open again, a Chromium browser started with launch_app and its own --user-data-dir chooses without a menu. Or call request_help for the user to choose it"
     )
 }
 
@@ -667,6 +667,12 @@ mod tests {
             error.message
         );
         assert!(!fake.trace.contains(&"type"));
+        // It says how to choose with the menu open instead (#276).
+        assert!(
+            error.message.contains("click the select"),
+            "{}",
+            error.message
+        );
         let mut fake = select("Cherry");
         fake.facts.engine = Some(Engine::WebKit);
         let error = run(&mut fake, "Cherry").unwrap_err();
