@@ -553,7 +553,11 @@ async fn handle_one(
                 return Err(e);
             }
             let Some(pressed) = forwarder.chord(chord, true, within).await else {
-                let e = keys_refused(&forwarder, id).await;
+                let e = if forwarder.agent_stopped() {
+                    stopped_input(id, "the held keys", false)
+                } else {
+                    keys_refused(&forwarder, id).await
+                };
                 forwarder.keys_done().await;
                 return Err(e);
             };
@@ -1108,9 +1112,12 @@ async fn click_action(
         }
     }
     let forwarder = show_pointer(core, id, point, true, cx);
-    let hit = forwarder.click(point, button, count, modifiers).await;
+    let (hit, stopped) = forwarder.click(point, button, count, modifiers).await;
     if let Some(window) = hit {
         shared_app::note_click(id, window, point);
+    }
+    if stopped {
+        return Err(stopped_input(id, "the click", hit.is_some()));
     }
     Ok(Arm::Finish(match hit {
         Some(window) => Ok(json!({ "windowId": window.window_id })),
@@ -1234,6 +1241,9 @@ async fn drag_action(
     shared_app::posted_press_allowed(from, "drag", cx).await?;
     let forwarder = show_pointer(core, id, from, true, cx);
     let dragged = forwarder.drag(from, to, modifiers).await;
+    if dragged == Sent::Nowhere && forwarder.agent_stopped() {
+        return Err(stopped_input(id, "the drag", false));
+    }
     let released = match dragged {
         Sent::Stopped(at) => at,
         _ => to,
@@ -1525,7 +1535,12 @@ async fn key_action(
             // A posted key may move focus on from what the last
             // click picked, as Tab does.
             shared_app::forget(id);
-            match forwarder.press(chord, repeat, bounds).await {
+            let sent = forwarder.press(chord, repeat, bounds).await;
+            if forwarder.agent_stopped() && sent.is_none_or(|n| n < repeat.max(1)) {
+                let some = sent.is_some_and(|n| n > 0);
+                return Err(partial(pressed, stopped_input(id, "the keys", some)));
+            }
+            match sent {
                 None => return Err(partial(pressed, keys_refused(&forwarder, id).await)),
                 // The app came to the front partway through.
                 Some(sent) if sent < repeat.max(1) => {
@@ -4298,9 +4313,12 @@ async fn act(
             ControlError::failed("the element has no visible frame on the display")
         })?;
         shared_app::posted_press_allowed(c, "click", cx).await?;
-        show_pointer(core, id, c, true, cx)
+        let (hit, stopped) = show_pointer(core, id, c, true, cx)
             .click(c, button, count, Default::default())
             .await;
+        if stopped {
+            return Err(stopped_input(id, "the click", hit.is_some()));
+        }
         Ok(())
     };
     match action {
@@ -8722,6 +8740,20 @@ async fn wait_for_change(
 }
 
 /// Whether the user is operating display `id`.
+/// The user took over display `id` while the agent's input waited to go
+/// out, so the rest of it never went (#287, ADR 0004). `some` when part of
+/// it went out before.
+fn stopped_input(id: DisplayId, what: &str, some: bool) -> ControlError {
+    let sent = if some {
+        "after part of it went out"
+    } else {
+        "before it went out"
+    };
+    ControlError::takeover(format!(
+        "the user took over display {id} {sent}, so the rest of {what} was not sent. Call wait_for_control to wait until they hand it back."
+    ))
+}
+
 fn takeover(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) -> bool {
     core.read_with(cx, |c, _| c.displays.get(id).is_some_and(|d| d.takeover))
 }
