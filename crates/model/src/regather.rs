@@ -23,7 +23,7 @@
 //! confirmed. A window missing from two passes in a row is logged and
 //! forgotten.
 
-use crate::model::{Rect, WindowId};
+use crate::model::{DisplayId, Rect, WindowId};
 use std::collections::{HashMap, HashSet};
 
 /// When the first passes run, in milliseconds after the one before; the
@@ -83,14 +83,18 @@ pub enum Step {
     HandToUser,
 }
 
+/// A window as recorded on a display: a window whose record moves to
+/// another display starts over there, with every try.
+pub type Key = (WindowId, DisplayId);
+
 /// One regather: what it saw of each window in earlier passes.
 #[derive(Debug, Default)]
 pub struct Regather {
-    tries: HashMap<WindowId, u32>,
-    missing: HashMap<WindowId, u32>,
+    tries: HashMap<Key, u32>,
+    missing: HashMap<Key, u32>,
     /// Windows whose return to the user's screen wasn't confirmed: left
     /// where they are, record and all, for the rest of this regather.
-    stuck: HashSet<WindowId>,
+    stuck: HashSet<Key>,
 }
 
 impl Regather {
@@ -98,8 +102,10 @@ impl Regather {
         Self::default()
     }
 
-    /// The step for `window`, seen at `place` in this pass.
-    pub fn step(&mut self, window: WindowId, place: Place) -> Step {
+    /// The step for `window`, recorded on `display`, seen at `place` in
+    /// this pass.
+    pub fn step(&mut self, window: WindowId, display: DisplayId, place: Place) -> Step {
+        let window = (window, display);
         if self.stuck.contains(&window) {
             return Step::Stay;
         }
@@ -142,7 +148,8 @@ impl Regather {
     /// window is confirmed off every Agent Display. Whether to forget its
     /// record. One that didn't leave keeps its record and the place to
     /// return it to, and this regather leaves it alone.
-    pub fn handed(&mut self, window: WindowId, returned: bool) -> bool {
+    pub fn handed(&mut self, window: WindowId, display: DisplayId, returned: bool) -> bool {
+        let window = (window, display);
         if !returned {
             self.stuck.insert(window);
         }
@@ -152,15 +159,16 @@ impl Regather {
     /// Keep what this regather knows only of `recorded`, the windows still
     /// recorded on live displays: one whose record went meanwhile, by a
     /// Take Back or the agent's own move, keeps no regather running.
-    pub fn retain(&mut self, recorded: &[WindowId]) {
+    pub fn retain(&mut self, recorded: &[Key]) {
         self.tries.retain(|w, _| recorded.contains(w));
         self.missing.retain(|w, _| recorded.contains(w));
         self.stuck.retain(|w| recorded.contains(w));
     }
 
-    /// How many times `window` was put back in this regather so far.
-    pub fn tries(&self, window: WindowId) -> u32 {
-        self.tries.get(&window).copied().unwrap_or(0)
+    /// How many times `window` was put back on `display` in this regather
+    /// so far.
+    pub fn tries(&self, window: WindowId, display: DisplayId) -> u32 {
+        self.tries.get(&(window, display)).copied().unwrap_or(0)
     }
 
     /// Whether pass `next` runs: every pass of `PASSES_MS`, then more while
@@ -176,6 +184,7 @@ impl Regather {
 mod tests {
     use super::*;
 
+    const D: DisplayId = 1;
     const OWN: Rect = Rect::new(8128.0, -2240.0, 1280.0, 800.0);
 
     fn at(x: f64, y: f64) -> Option<Rect> {
@@ -209,7 +218,7 @@ mod tests {
     fn a_window_that_stays_home_is_left_alone() {
         let mut r = Regather::new();
         for pass in 0..PASSES_MS.len() {
-            assert_eq!(r.step(1, Place::Home), Step::Stay);
+            assert_eq!(r.step(1, D, Place::Home), Step::Stay);
             assert!(r.runs(pass + 1) || pass + 1 == PASSES_MS.len());
         }
         assert!(!r.runs(PASSES_MS.len()));
@@ -222,11 +231,11 @@ mod tests {
     fn a_put_back_that_fails_is_tried_again_each_pass() {
         let mut r = Regather::new();
         for n in 1..=MAX_TRIES {
-            assert_eq!(r.step(7, Place::Off), Step::PutBack);
-            assert_eq!(r.tries(7), n);
+            assert_eq!(r.step(7, D, Place::Off), Step::PutBack);
+            assert_eq!(r.tries(7, D), n);
         }
-        assert_eq!(r.step(7, Place::Off), Step::HandToUser);
-        assert_eq!(r.tries(7), 0);
+        assert_eq!(r.step(7, D, Place::Off), Step::HandToUser);
+        assert_eq!(r.tries(7, D), 0);
     }
 
     #[test]
@@ -234,13 +243,13 @@ mod tests {
         let mut r = Regather::new();
         let last = PASSES_MS.len() - 1;
         for _ in 0..last {
-            assert_eq!(r.step(7, Place::Home), Step::Stay);
+            assert_eq!(r.step(7, D, Place::Home), Step::Stay);
         }
-        assert_eq!(r.step(7, Place::Off), Step::PutBack);
+        assert_eq!(r.step(7, D, Place::Off), Step::PutBack);
         // The regather goes on past `PASSES_MS` for its remaining tries.
         let mut pass = last + 1;
         while r.runs(pass) {
-            match r.step(7, Place::Off) {
+            match r.step(7, D, Place::Off) {
                 Step::PutBack => {}
                 Step::HandToUser => break,
                 other => panic!("pass {pass}: {other:?}"),
@@ -255,13 +264,13 @@ mod tests {
     fn a_window_recorded_mid_regather_gets_every_try() {
         let mut r = Regather::new();
         for pass in 0..3 {
-            r.step(1, Place::Home);
+            r.step(1, D, Place::Home);
             assert!(r.runs(pass + 1));
         }
         let mut steps = Vec::new();
         let mut pass = 3;
         while r.runs(pass) {
-            steps.push(r.step(2, Place::Off));
+            steps.push(r.step(2, D, Place::Off));
             if steps.last() == Some(&Step::HandToUser) {
                 break;
             }
@@ -275,10 +284,10 @@ mod tests {
     #[test]
     fn a_window_put_back_is_noted_once_it_is_home() {
         let mut r = Regather::new();
-        assert_eq!(r.step(7, Place::Off), Step::PutBack);
-        assert_eq!(r.step(7, Place::Off), Step::PutBack);
-        assert_eq!(r.step(7, Place::Home), Step::Back);
-        assert_eq!(r.step(7, Place::Home), Step::Stay);
+        assert_eq!(r.step(7, D, Place::Off), Step::PutBack);
+        assert_eq!(r.step(7, D, Place::Off), Step::PutBack);
+        assert_eq!(r.step(7, D, Place::Home), Step::Back);
+        assert_eq!(r.step(7, D, Place::Home), Step::Stay);
         assert!(!r.runs(PASSES_MS.len()));
     }
 
@@ -286,74 +295,97 @@ mod tests {
     fn a_window_that_isnt_confirmed_returned_keeps_its_record_and_is_left_alone() {
         let mut r = Regather::new();
         for _ in 0..MAX_TRIES {
-            r.step(7, Place::Off);
+            r.step(7, D, Place::Off);
         }
-        assert_eq!(r.step(7, Place::Off), Step::HandToUser);
-        assert!(!r.handed(7, false), "the record stays");
-        assert_eq!(r.step(7, Place::Off), Step::Stay);
-        assert_eq!(r.step(7, Place::Gone), Step::Stay);
+        assert_eq!(r.step(7, D, Place::Off), Step::HandToUser);
+        assert!(!r.handed(7, D, false), "the record stays");
+        assert_eq!(r.step(7, D, Place::Off), Step::Stay);
+        assert_eq!(r.step(7, D, Place::Gone), Step::Stay);
         assert!(!r.runs(PASSES_MS.len()));
     }
 
     #[test]
     fn a_window_confirmed_returned_loses_its_record() {
         let mut r = Regather::new();
-        assert!(r.handed(7, true));
+        assert!(r.handed(7, D, true));
     }
 
     #[test]
     fn a_window_missing_from_one_pass_only_is_kept() {
         // WindowServer's list may skip a window mid-reconfiguration.
         let mut r = Regather::new();
-        assert_eq!(r.step(3, Place::Gone), Step::Stay);
+        assert_eq!(r.step(3, D, Place::Gone), Step::Stay);
         assert!(r.runs(MAX_PASSES - 1), "a second look is due");
-        assert_eq!(r.step(3, Place::Home), Step::Stay);
-        assert_eq!(r.step(3, Place::Gone), Step::Stay);
-        assert_eq!(r.step(3, Place::Home), Step::Stay);
+        assert_eq!(r.step(3, D, Place::Home), Step::Stay);
+        assert_eq!(r.step(3, D, Place::Gone), Step::Stay);
+        assert_eq!(r.step(3, D, Place::Home), Step::Stay);
     }
 
     #[test]
     fn a_window_missing_two_passes_in_a_row_vanished_once() {
         let mut r = Regather::new();
-        assert_eq!(r.step(3, Place::Gone), Step::Stay);
-        assert_eq!(r.step(3, Place::Gone), Step::Vanished);
-        assert_eq!(r.step(3, Place::Gone), Step::Stay);
+        assert_eq!(r.step(3, D, Place::Gone), Step::Stay);
+        assert_eq!(r.step(3, D, Place::Gone), Step::Vanished);
+        assert_eq!(r.step(3, D, Place::Gone), Step::Stay);
     }
 
     #[test]
     fn a_window_that_vanished_after_falling_off_is_not_handed_over() {
         let mut r = Regather::new();
-        assert_eq!(r.step(5, Place::Off), Step::PutBack);
-        assert_eq!(r.step(5, Place::Gone), Step::Stay);
-        assert_eq!(r.step(5, Place::Gone), Step::Vanished);
-        assert_eq!(r.tries(5), 0);
-        assert_eq!(r.step(5, Place::Gone), Step::Stay);
+        assert_eq!(r.step(5, D, Place::Off), Step::PutBack);
+        assert_eq!(r.step(5, D, Place::Gone), Step::Stay);
+        assert_eq!(r.step(5, D, Place::Gone), Step::Vanished);
+        assert_eq!(r.tries(5, D), 0);
+        assert_eq!(r.step(5, D, Place::Gone), Step::Stay);
     }
 
     #[test]
     fn windows_are_judged_apart() {
         let mut r = Regather::new();
-        assert_eq!(r.step(1, Place::Off), Step::PutBack);
-        assert_eq!(r.step(2, Place::Home), Step::Stay);
-        assert_eq!(r.step(1, Place::Home), Step::Back);
-        assert_eq!(r.step(2, Place::Home), Step::Stay);
+        assert_eq!(r.step(1, D, Place::Off), Step::PutBack);
+        assert_eq!(r.step(2, D, Place::Home), Step::Stay);
+        assert_eq!(r.step(1, D, Place::Home), Step::Back);
+        assert_eq!(r.step(2, D, Place::Home), Step::Stay);
     }
 
     #[test]
     fn a_window_no_longer_recorded_keeps_no_pass_running() {
         let mut r = Regather::new();
-        r.step(1, Place::Off);
-        r.step(2, Place::Gone);
+        r.step(1, D, Place::Off);
+        r.step(2, D, Place::Gone);
         assert!(r.runs(PASSES_MS.len()));
-        r.retain(&[3]);
+        r.retain(&[(3, D)]);
         assert!(!r.runs(PASSES_MS.len()));
-        assert_eq!(r.tries(1), 0);
+        assert_eq!(r.tries(1, D), 0);
+    }
+
+    /// Its record moved to display 2 meanwhile, as the agent moving it
+    /// does: it gets every try there, not a hand-over with none.
+    #[test]
+    fn a_window_whose_record_moved_gets_fresh_tries_on_its_new_display() {
+        let mut r = Regather::new();
+        for _ in 0..MAX_TRIES {
+            assert_eq!(r.step(7, D, Place::Off), Step::PutBack);
+        }
+        r.retain(&[(7, 2)]);
+        assert_eq!(r.tries(7, D), 0);
+        assert_eq!(r.step(7, 2, Place::Off), Step::PutBack);
+        assert_eq!(r.tries(7, 2), 1);
+    }
+
+    #[test]
+    fn a_record_moved_without_a_retain_between_still_starts_over() {
+        let mut r = Regather::new();
+        for _ in 0..MAX_TRIES {
+            r.step(7, D, Place::Off);
+        }
+        assert_eq!(r.step(7, 2, Place::Off), Step::PutBack);
     }
 
     #[test]
     fn passes_stop_at_the_cap() {
         let mut r = Regather::new();
-        r.step(1, Place::Off);
+        r.step(1, D, Place::Off);
         assert!(r.runs(MAX_PASSES - 1));
         assert!(!r.runs(MAX_PASSES));
         assert_eq!(wait_before(0), PASSES_MS[0]);

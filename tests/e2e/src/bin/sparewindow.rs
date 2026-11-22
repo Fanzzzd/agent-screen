@@ -272,6 +272,9 @@ fn test(app: &str, page: Option<&str>) -> Result<()> {
             })
             .collect()
     };
+    // The regather the spare's display change starts must be newer than
+    // any so far, createDisplay's among them.
+    let (before_spare, _) = regather(&control)?;
     // The first spare, made through a unit twin: a display made, another
     // made, the first released, the second parked.
     let watched = watch(pid, wid, id, Duration::from_secs(60), 5, || {
@@ -297,7 +300,7 @@ fn test(app: &str, page: Option<&str>) -> Result<()> {
     // The first change's regather must be over first, or it, not the
     // second spare's, would bring the window back. A tidy every 30 s
     // (AGENTSCREEN_TIDY_SECS) leaves room between them.
-    let settled = regather_settles(&control, 0)?;
+    let settled = regather_settles(&control, before_spare)?;
     check(
         "the first spare's regather settles before the second spare",
         settled.is_some() && spares().len() == 1,

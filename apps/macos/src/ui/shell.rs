@@ -5493,8 +5493,9 @@ open -a AeroSpace";
                 }) else {
                     return;
                 };
-                let ids: Vec<u32> = windows.iter().map(|(_, t)| t.window_id).collect();
-                state.retain(&ids);
+                let keys: Vec<regather::Key> =
+                    windows.iter().map(|&(id, t)| (t.window_id, id)).collect();
+                state.retain(&keys);
                 for (id, target) in windows {
                     let window = target.window_id;
                     let owns = |this: &WeakEntity<Shell>, cx: &mut AsyncApp| {
@@ -5515,24 +5516,36 @@ open -a AeroSpace";
                             (cg::display_bounds(id), cg::routing_window_bounds(target))
                         })
                         .await;
-                    match state.step(window, regather::place(frame, own)) {
+                    match state.step(window, id, regather::place(frame, own)) {
                         Step::Stay => {}
                         Step::Back => log::info!(
                             "window {window} is back on display {id} after the displays changed"
                         ),
                         Step::PutBack => {
-                            match owns(&this, cx) {
-                                None => return,
-                                Some(false) => continue,
-                                Some(true) => {}
-                            }
+                            // Decided with the times it went home so far: a
+                            // Take Back in its lane meanwhile cancels the
+                            // move, and one after it sends the window home.
+                            let seen = this
+                                .update(cx, |shell, cx| {
+                                    shell
+                                        .regather_owns(generation, id, target, cx)
+                                        .map(|owns| owns.then(|| windows::times_returned(window)))
+                                })
+                                .ok()
+                                .flatten();
+                            let Some(seen) = seen else {
+                                return;
+                            };
+                            let Some(seen) = seen else {
+                                continue;
+                            };
                             let moved = cx
                                 .background_executor()
-                                .spawn(async move { crate::mac::ax::move_into(target, own) })
+                                .spawn(async move { windows::put_back_unless_returned(target, own, seen) })
                                 .await;
                             log::info!(
                                 "window {window} fell off display {id} as the displays changed, now at {frame:?}; put back (try {}): {moved:?}",
-                                state.tries(window)
+                                state.tries(window, id)
                             );
                         }
                         Step::Vanished => {
@@ -5568,7 +5581,7 @@ open -a AeroSpace";
                                     dismissal::give_back(target, home.as_ref(), main_name.as_deref())
                                 })
                                 .await;
-                            let forget = state.handed(window, returned);
+                            let forget = state.handed(window, id, returned);
                             log::warn!(
                                 "window {window} stayed off display {id} after {} tries to put it back; returned to the user's screen: {returned}{}",
                                 regather::MAX_TRIES,

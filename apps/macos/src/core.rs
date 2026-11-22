@@ -1485,9 +1485,11 @@ fn idle() -> Duration {
     IDLE
 }
 
-/// `TIDY_EVERY`, or AGENTSCREEN_TIDY_SECS in a test build.
+/// `TIDY_EVERY`, or AGENTSCREEN_TIDY_SECS in a test build of the isolated
+/// e2e instance.
 fn tidy_every() -> Duration {
     if cfg!(debug_assertions)
+        && std::env::var("AGENTSCREEN_INSTANCE").as_deref() == Ok("e2e")
         && let Some(secs) = std::env::var("AGENTSCREEN_TIDY_SECS")
             .ok()
             .and_then(|v| v.parse().ok())
