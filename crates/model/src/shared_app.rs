@@ -397,18 +397,21 @@ pub fn user_window_to_remember(focused: Option<u32>, on_agent_display: bool) -> 
     focused.filter(|_| !on_agent_display)
 }
 
-/// Whether a focus record may go to `target`, a window of an app in the
-/// background whose key window is `key`, as far as anyone can tell.
+/// Whether a focus record may go to a window of an app in the background
+/// whose key window, as Accessibility names it, is `key`.
 ///
 /// The record is AppKit's "application activated" event. AppKit in the
 /// app takes it for its app becoming active, posts that to the app, and
 /// Electron apps report it as `did-become-active`, though WindowServer
-/// keeps the user's app in front (#273). It only makes a window key that
-/// is its app's key window already, or may be: when another window of the
-/// app is key, a click or accessibility moves key status, and the record
-/// would be only an activation the app hears about.
-pub fn focus_record_needed(key: Option<u32>, target: u32) -> bool {
-    key.is_none_or(|key| key == target)
+/// keeps the user's app in front (#273). When another window of the app
+/// is key, it moves nothing: a click or accessibility moves key status.
+/// When the target is key already, keys reach it without the record, and
+/// after the front app changed the wake click makes its page take clicks
+/// again (electronfront and nativeclick, measured with and without it).
+/// So it goes out only where the app names no key window, as a new window
+/// or an app too busy to answer.
+pub fn focus_record_needed(key: Option<u32>) -> bool {
+    key.is_none()
 }
 
 /// What to do with a remembered user window once the agent's input is
@@ -441,6 +444,39 @@ pub fn hand_back(
         None => HandBack::Retry,
         Some(_) if focused_on_agent_display => HandBack::Restore,
         Some(_) => HandBack::Leave,
+    }
+}
+
+/// Hand-back passes in a row that may fail to make the user's window
+/// main again, before it is let go.
+pub const HAND_BACK_TRIES: u8 = 3;
+
+/// How long after a failed hand-back the next pass runs, in milliseconds,
+/// when no other input asks for one sooner.
+pub const HAND_BACK_RETRY_MS: u64 = 300;
+
+/// What becomes of a remembered user window after a hand-back pass:
+/// `None` to forget it, or its count of failed passes to keep it with.
+/// More than 0 asks for another pass after `HAND_BACK_RETRY_MS`.
+///
+/// `step` is `hand_back` read just now, so a pass after a failure checks
+/// the app's focus again first: a window the user picked meanwhile is
+/// left alone. `written`, read for `HandBack::Restore` only: whether
+/// making the user's window main through accessibility succeeded. A busy
+/// app can time out on that write, and the agent's window would then stay
+/// key until the user switches back to the app (#273).
+pub fn after_hand_back(step: HandBack, written: bool, failures: u8) -> Option<u8> {
+    let failed = || Some(failures + 1).filter(|&f| f < HAND_BACK_TRIES);
+    match step {
+        HandBack::Leave => None,
+        // The user's window has focus again: nothing to retry.
+        HandBack::Keep => Some(0),
+        // The app didn't say. Before any failure, wait for the next
+        // hand-back as always; after one, this pass counts.
+        HandBack::Retry if failures == 0 => Some(0),
+        HandBack::Retry => failed(),
+        HandBack::Restore if written => None,
+        HandBack::Restore => failed(),
     }
 }
 
@@ -811,15 +847,47 @@ mod tests {
     fn no_focus_record_while_another_window_of_the_app_is_key() {
         // The user's window 7 is key in the background app: waking the
         // agent's window 9, or handing focus back to 7 while 9 is key.
-        assert!(!focus_record_needed(Some(7), 9));
-        assert!(!focus_record_needed(Some(9), 7));
+        assert!(!focus_record_needed(Some(7)));
     }
 
     #[test]
-    fn a_focus_record_still_goes_to_the_key_window_or_when_none_is_known() {
-        // Key already, as before the front app changed since.
-        assert!(focus_record_needed(Some(9), 9));
+    fn no_focus_record_to_a_window_that_is_key_already() {
+        // The agent's window 9 was key before the front app changed.
+        assert!(!focus_record_needed(Some(9)));
+    }
+
+    #[test]
+    fn a_focus_record_still_goes_when_no_key_window_is_known() {
         // The app didn't say, as a new window or a hung app.
-        assert!(focus_record_needed(None, 9));
+        assert!(focus_record_needed(None));
+    }
+
+    #[test]
+    fn a_failed_hand_back_is_kept_and_tried_again_a_few_times() {
+        // The AXMain write timed out: keep the user's window, retry soon.
+        assert_eq!(after_hand_back(HandBack::Restore, false, 0), Some(1));
+        assert_eq!(after_hand_back(HandBack::Restore, false, 1), Some(2));
+        // Then let it go, as for an app that stopped answering.
+        assert_eq!(after_hand_back(HandBack::Restore, false, 2), None);
+        // A pass the app didn't answer counts once a write failed.
+        assert_eq!(after_hand_back(HandBack::Retry, false, 1), Some(2));
+        assert_eq!(after_hand_back(HandBack::Retry, false, 2), None);
+    }
+
+    #[test]
+    fn a_retry_ends_when_focus_went_back_or_the_user_picked_a_window() {
+        assert_eq!(after_hand_back(HandBack::Restore, true, 2), None);
+        // The user picked another window of theirs meanwhile.
+        assert_eq!(after_hand_back(HandBack::Leave, false, 1), None);
+        // The user's window is focused again: kept as before any failure.
+        assert_eq!(after_hand_back(HandBack::Keep, false, 2), Some(0));
+    }
+
+    #[test]
+    fn without_a_failure_a_hand_back_waits_as_before() {
+        assert_eq!(after_hand_back(HandBack::Restore, true, 0), None);
+        assert_eq!(after_hand_back(HandBack::Keep, false, 0), Some(0));
+        assert_eq!(after_hand_back(HandBack::Retry, false, 0), Some(0));
+        assert_eq!(after_hand_back(HandBack::Leave, false, 0), None);
     }
 }

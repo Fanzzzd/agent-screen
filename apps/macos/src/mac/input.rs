@@ -420,7 +420,25 @@ impl Default for Forwarder {
             .name("agent-screen-input".into())
             .spawn(move || {
                 let mut worker = Worker::new();
-                while let Ok(job) = rx.recv() {
+                loop {
+                    // A hand-back that failed runs again on its own, unless
+                    // other input comes first.
+                    let job = match worker.retry_at {
+                        Some(at) => {
+                            match rx.recv_timeout(at.saturating_duration_since(Instant::now())) {
+                                Ok(job) => job,
+                                Err(mpsc::RecvTimeoutError::Timeout) => {
+                                    worker.restore_focus();
+                                    continue;
+                                }
+                                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                            }
+                        }
+                        None => match rx.recv() {
+                            Ok(job) => job,
+                            Err(_) => break,
+                        },
+                    };
                     job(&mut worker);
                 }
             })
@@ -1554,8 +1572,10 @@ struct Worker {
     /// The window that last had a click, and `ACTIVATIONS` then.
     woken: Option<(u32, u64)>,
     /// The user's window in a shared app whose key focus the agent's keys
-    /// took; handed back when they are done.
-    restore: Vec<WindowTarget>,
+    /// took, with its failed hand-backs; handed back when they are done.
+    restore: Vec<(WindowTarget, u8)>,
+    /// When a failed hand-back runs again.
+    retry_at: Option<Instant>,
     /// The display's windows when keys last went out, to tell one a
     /// shortcut opened since.
     known: Vec<u32>,
@@ -1614,6 +1634,7 @@ impl Worker {
             focused_at: 0,
             woken: None,
             restore: Vec::new(),
+            retry_at: None,
             known: Vec::new(),
             pressed_panels: Vec::new(),
             refused: None,
@@ -1681,9 +1702,9 @@ impl Worker {
         } else if self.focused == Some(target) && self.focused_at == activations() {
             return;
         }
-        // Nor does it go there: AppKit in the app would take it for its
-        // app's activation (#273).
-        let record = agent_screen_model::shared_app::focus_record_needed(before, target.window_id);
+        // Nor while the app names any window key, the target included:
+        // AppKit in the app would take it for its app's activation (#273).
+        let record = agent_screen_model::shared_app::focus_record_needed(before);
         // A window of an app in the background becomes key on a click and
         // drops that click: a new window, or any once the front app has
         // changed. Spend one where nothing is pressed, unless it had one
@@ -1695,7 +1716,9 @@ impl Worker {
                 title_bar_point(target, bounds).or_else(|| beside(target, bounds))
             });
             if let Some(at) = at {
-                log::debug!("input: waking {target:?} at {at:?}, focus record {record}");
+                log::debug!(
+                    "input: waking {target:?} at {at:?}, key window {before:?}, focus record {record}"
+                );
                 self.wake_at(target, at, record);
                 return;
             }
@@ -1728,15 +1751,18 @@ impl Worker {
     /// The user's window of an app to hand key focus back to: the latest,
     /// one per app.
     fn remember(&mut self, window: WindowTarget) {
-        self.restore.retain(|w| w.pid != window.pid);
-        self.restore.push(window);
+        self.restore.retain(|(w, _)| w.pid != window.pid);
+        self.restore.push((window, 0));
     }
 
     /// Hand key focus back to the user's window the agent's keys took it
     /// from. The agent's window is focused again on its next keys.
     fn restore_focus(&mut self) {
-        use agent_screen_model::shared_app::{HandBack, hand_back};
-        for window in std::mem::take(&mut self.restore) {
+        use agent_screen_model::shared_app::{
+            HAND_BACK_RETRY_MS, HandBack, after_hand_back, hand_back,
+        };
+        self.retry_at = None;
+        for (window, failures) in std::mem::take(&mut self.restore) {
             // Not in the middle of another display's keys to the app.
             let _held = AppKeys::hold(window.pid);
             let now = super::ax::focused_window_id(window.pid);
@@ -1751,33 +1777,47 @@ impl Worker {
             log::debug!(
                 "input: hand-back to {window:?}: focused {now:?}, agent's window {agent:?} main {agent_main}"
             );
-            match hand_back(
+            let step = hand_back(
                 window.window_id,
                 now,
                 now.is_some_and(on_agent_display),
                 agent_main,
-            ) {
-                // Still the user's, as when an action that will take it is
-                // still running: keep it for that action's hand-back. Or
-                // the app didn't answer in time, as under load: try again
-                // on the next hand-back rather than lose the user's window.
-                HandBack::Keep | HandBack::Retry => {
-                    self.restore.push(window);
-                    continue;
-                }
-                // A window the user picked since is left alone.
-                HandBack::Leave => continue,
-                HandBack::Restore => {}
-            }
-            // The agent's window is key here: a focus record would move
-            // nothing and only tell the app it became active (#273). Make
-            // the user's window main through accessibility, as their click
-            // would, so switching back to the app lands in it.
-            let main = super::ax::make_main(window);
-            log::debug!(
-                "input: focus back to {window:?} from {now:?}: made main through accessibility {main}, focused now {:?}",
-                super::ax::focused_window_id(window.pid)
             );
+            // Still the user's, as when an action that will take it is
+            // still running: keep it for that action's hand-back. Or the
+            // app didn't answer in time, as under load: try again on the
+            // next hand-back rather than lose the user's window. A window
+            // the user picked since is left alone.
+            //
+            // Otherwise the agent's window is key: a focus record would
+            // move nothing and only tell the app it became active (#273).
+            // Make the user's window main through accessibility, as their
+            // click would, so switching back to the app lands in it.
+            let written = step == HandBack::Restore
+                && {
+                    let main = super::ax::make_main(window);
+                    log::debug!(
+                        "input: focus back to {window:?} from {now:?}: made main through accessibility {main}, focused now {:?}",
+                        super::ax::focused_window_id(window.pid)
+                    );
+                    main
+                };
+            match after_hand_back(step, written, failures) {
+                Some(failures) => {
+                    if failures > 0 {
+                        log::debug!(
+                            "input: hand-back to {window:?} failed {failures} times; again in {HAND_BACK_RETRY_MS} ms"
+                        );
+                        self.retry_at =
+                            Some(Instant::now() + Duration::from_millis(HAND_BACK_RETRY_MS));
+                    }
+                    self.restore.push((window, failures));
+                }
+                None if step != HandBack::Leave && !written => {
+                    log::warn!("input: gave up handing focus back to {window:?}");
+                }
+                None => {}
+            }
         }
     }
 

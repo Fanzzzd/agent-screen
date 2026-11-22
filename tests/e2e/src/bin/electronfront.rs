@@ -7,7 +7,9 @@
 //! its page and types a key, then types another after another app came
 //! and went. Each wakes the agent's window, which must become the
 //! harness's key window and take the input, and hands key status back to
-//! the user's window after.
+//! the user's window after. Then the user's window closes, leaving the
+//! agent's window key, and the agent clicks and types after another app
+//! came and went: the focus record had gone to a window already key.
 //!
 //! The front app is sampled every 5 ms by four sources (probe
 //! frontsources): AppKit's activation notices, NSWorkspace, LaunchServices
@@ -18,7 +20,7 @@
 //!
 //! Needs an Electron.app: `target/e2e/Electron.app`, or E2E_ELECTRON.
 //! Puts the harness's user window and the stand-in on your main screen
-//! for about 40 seconds and takes the front for the stand-in; keep your
+//! for about 50 seconds and takes the front for the stand-in; keep your
 //! hands off the keyboard and mouse.
 //!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e electronfront
@@ -327,6 +329,7 @@ fn test(
     )?;
     let tree = tree["tree"].as_str().unwrap_or_default().to_string();
     let field = point_of(&tree, "agent field")?;
+    let first = point_of(&tree, "agent first")?;
 
     // 1. A click on the agent's field, then a key.
     let from = lines(log, 0).len();
@@ -349,13 +352,21 @@ fn test(
         log,
         from,
         &sources,
-        (pid, window_id, &key_window),
+        (pid, window_id),
+        ("user", &key_window),
         &holder_lines(&printed, said_from),
     );
     let seen = lines(log, from);
+    // The field's own events: the click focused it, then the key reached
+    // it. A dropped click would leave the key to the page, which logs
+    // "keydown-page".
+    let clicked_in = seen.iter().position(|l| l == "pair agent active field");
+    let typed_in = seen.iter().position(|l| l == "pair agent keydown \"q\"");
     check(
-        "the click and the key reach the agent's page",
-        clicked.is_ok() && keyed.is_ok() && has(&seen, "pair agent keydown"),
+        "the click focuses the agent's field and the key reaches it",
+        clicked.is_ok()
+            && keyed.is_ok()
+            && matches!((clicked_in, typed_in), (Some(c), Some(k)) if c < k),
         format!(
             "{} | {} | log {seen:?}",
             cut(&said(&clicked), 300),
@@ -394,14 +405,91 @@ fn test(
         log,
         from,
         &sources,
-        (pid, window_id, &key_window),
+        (pid, window_id),
+        ("user", &key_window),
         &holder_lines(&printed, said_from),
     );
     let seen = lines(log, from);
     check(
-        "the key reaches the agent's page",
-        keyed.is_ok() && has(&seen, "pair agent keydown"),
+        "the key reaches the agent's field",
+        keyed.is_ok() && seen.iter().any(|l| l == "pair agent keydown \"w\""),
         format!("{} | log {seen:?}", cut(&said(&keyed), 300)),
+    );
+
+    // 3. The agent's window is already the harness's key window when the
+    // front app changes: the user closed theirs, leaving the agent's the
+    // app's only window, and the agent typed into it since.
+    let closed = sh_lenient(tool("probe")?, &["close", pid, &key_window]);
+    sleep_ms(800);
+    let keyed = control.call(
+        "key",
+        json!({ "sessionKey": KEY, "displayId": id, "keys": "e" }),
+    );
+    sleep_ms(500);
+    let agent_key = focused(pid)?;
+    check(
+        "setup: with the user's window closed, the agent's window is the harness's key window",
+        closed.trim() == "closed" && keyed.is_ok() && agent_key == window_id.to_string(),
+        format!(
+            "close said {}, {}, focused window {agent_key}, the agent's {window_id}",
+            closed.trim(),
+            cut(&said(&keyed), 300)
+        ),
+    );
+    sh_lenient(
+        "/usr/bin/osascript",
+        &["-e", "tell application \"Finder\" to activate"],
+    );
+    sleep_ms(500);
+    sh_lenient(
+        "/usr/bin/osascript",
+        &[
+            "-e",
+            &format!(
+                "tell application \"System Events\" to set frontmost of (first process whose unix id is {holder_pid}) to true"
+            ),
+        ],
+    );
+    sleep_ms(1200);
+    let from = lines(log, 0).len();
+    let said_from = holder_lines(&printed, 0).len();
+    let ((clicked, keyed), sources) = sources_during(4, pid, || {
+        let clicked = control.call(
+            "click",
+            json!({ "sessionKey": KEY, "displayId": id, "x": first.0, "y": first.1 }),
+        );
+        sleep_ms(600);
+        let keyed = control.call(
+            "key",
+            json!({ "sessionKey": KEY, "displayId": id, "keys": "r" }),
+        );
+        (clicked, keyed)
+    })?;
+    sleep_ms(500);
+    report(
+        "a click and a key after the front app changed, the agent's window key before",
+        log,
+        from,
+        &sources,
+        (pid, window_id),
+        ("agent", &window_id.to_string()),
+        &holder_lines(&printed, said_from),
+    );
+    let seen = lines(log, from);
+    let clicked_in = seen.iter().position(|l| l == "pair agent active first");
+    let typed_in = seen
+        .iter()
+        .position(|l| l == "pair agent keydown first \"r\"");
+    check(
+        "the click focuses the agent's other field and the key reaches it, its window key before",
+        clicked.is_ok()
+            && keyed.is_ok()
+            && matches!((clicked_in, typed_in), (Some(c), Some(k)) if c < k),
+        format!(
+            "{} | {} | log {seen:?}",
+            cut(&said(&clicked), 300),
+            cut(&said(&keyed), 300)
+        ),
     );
     Ok(())
 }
@@ -414,7 +502,8 @@ fn report(
     log: &std::path::Path,
     from: usize,
     sources: &[String],
-    (pid, window_id, user_window): (&str, u64, &str),
+    (pid, window_id): (&str, u64),
+    (after, after_window): (&str, &str),
     holder: &[String],
 ) {
     let seen = timed(log, from);
@@ -457,9 +546,9 @@ fn report(
     );
     let key_window = focused(pid).unwrap_or_default();
     check(
-        &format!("{what}: the harness's user window is its key window again after"),
-        key_window == user_window,
-        format!("focused window {key_window}, the user's {user_window}"),
+        &format!("{what}: the harness's {after} window is its key window after"),
+        key_window == after_window,
+        format!("focused window {key_window}, the {after}'s {after_window}"),
     );
 }
 
