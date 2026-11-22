@@ -202,6 +202,31 @@ pub fn escape_html(input: &str) -> String {
 
 pub const PAGE_CSP: &str = "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'";
 
+/// The page every 404 returns, the same for any path.
+pub fn render_not_found(lang: &str, title: &str, text: &str) -> String {
+    let (lang, title, text) = (escape_html(lang), escape_html(title), escape_html(text));
+    format!(
+        "<!doctype html>\n\
+<html lang=\"{lang}\">\n\
+<head>\n\
+<meta charset=\"utf-8\">\n\
+<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
+<title>{title} - Agent Screen</title>\n\
+<style>\n\
+  html, body {{ height: 100%; margin: 0; }}\n\
+  body {{ display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; background: #212124; color: #f2f2f2; font: 13px -apple-system, BlinkMacSystemFont, sans-serif; text-align: center; padding: 24px; box-sizing: border-box; }}\n\
+  h1 {{ margin: 0; font-size: 15px; font-weight: 600; }}\n\
+  p {{ margin: 0; color: #8e8e95; font-size: 12.5px; }}\n\
+</style>\n\
+</head>\n\
+<body>\n\
+  <h1>{title}</h1>\n\
+  <p>{text}</p>\n\
+</body>\n\
+</html>\n"
+    )
+}
+
 pub fn render_page(token: PreviewToken, label: &str, lang: &str, badge: &str) -> String {
     let escaped = escape_html(label);
     let escaped_lang = escape_html(lang);
@@ -235,6 +260,14 @@ pub fn render_page(token: PreviewToken, label: &str, lang: &str, badge: &str) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_not_found_page_escapes_its_text_and_runs_no_script() {
+        let page = render_not_found("en", "Gone <b>", "Ask & retry");
+        assert!(page.contains("<h1>Gone &lt;b&gt;</h1>"));
+        assert!(page.contains("<p>Ask &amp; retry</p>"));
+        assert!(!page.contains("<script"));
+    }
 
     fn sample_bytes(seed: u8) -> [u8; 16] {
         let mut out = [0u8; 16];

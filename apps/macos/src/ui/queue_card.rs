@@ -86,15 +86,15 @@ impl HelpCard {
                 (0 | 1, _) => view.items.first().map(one_reason).unwrap_or_default(),
                 (n, Kind::Drags) => tf!(
                     "These {n} drags can’t run in the background.",
-                    "这 {n} 次拖拽后台做不了，要借用你的指针。"
+                    "这 {n} 次拖拽无法在后台完成。"
                 ),
                 (n, Kind::Clicks) => tf!(
                     "These {n} clicks had no effect in the background.",
-                    "这 {n} 次点击在后台没有生效，要借用你的指针。"
+                    "这 {n} 次点击在后台未生效。"
                 ),
                 (n, _) => tf!(
-                    "These {n} actions need your pointer.",
-                    "这 {n} 个操作要借用你的指针。"
+                    "These {n} actions need your mouse.",
+                    "这 {n} 个操作需要你的鼠标。"
                 ),
             };
             let several = view.agent.is_none();
@@ -129,7 +129,7 @@ impl HelpCard {
                     Some((strong, rest)),
                     t(
                         "Ends after 30 s idle. Mouse or keyboard stops it.",
-                        "空闲 30 秒自动结束，动鼠标或按键即可收回。",
+                        "空闲 30 秒后自动结束，动鼠标或按键即可停止。",
                     ),
                     zh,
                     theme,
@@ -139,7 +139,7 @@ impl HelpCard {
                     None,
                     t(
                         "You are using this display. Hand it back to allow.",
-                        "你正在操作这个显示器，交还后才能允许。",
+                        "你正在操作此显示器，交还后才能允许。",
                     ),
                     zh,
                     theme,
@@ -186,7 +186,17 @@ impl HelpCard {
                         .child(
                             card_button("input-allow", t("Allow", "允许"), Tone::Orange, theme)
                                 .flex_1()
-                                .when(!can_approve, |d| d.opacity(0.5))
+                                .when(!can_approve, |d| {
+                                    // Dimmed while the user holds the display: say why
+                                    // to VoiceOver and on hover.
+                                    let why = t(
+                                        "Unavailable. Hand control back first.",
+                                        "暂不可用。请先交还控制。",
+                                    );
+                                    d.opacity(0.5)
+                                        .aria_description(why)
+                                        .tooltip(move |_, cx| super::shell::hint(why, cx))
+                                })
                                 .on_click(move |_, _, cx| {
                                     if can_approve {
                                         tell(&allow, cx, move |shell, cx| {
@@ -224,7 +234,7 @@ impl HelpCard {
             Phase::Waiting { idle } => (
                 t(
                     "Nothing running. Ends after 30 seconds idle.",
-                    "当前没有操作，空闲 30 秒后自动结束。",
+                    "当前无操作，空闲 30 秒后自动结束。",
                 )
                 .to_string(),
                 Some(tf!(
@@ -251,16 +261,11 @@ impl HelpCard {
                         .mt(px(if zh { 3. } else { 2. }))
                         .flex()
                         .child(
-                            card_button(
-                                "input-revoke",
-                                t("Stop and Take Back", "停止并收回"),
-                                Tone::Stop,
-                                theme,
-                            )
-                            .flex_1()
-                            .on_click(move |_, _, cx| {
-                                tell(&revoke, cx, |shell, cx| shell.revoke_input(cx))
-                            }),
+                            card_button("input-revoke", t("Stop", "停止"), Tone::Stop, theme)
+                                .flex_1()
+                                .on_click(move |_, _, cx| {
+                                    tell(&revoke, cx, |shell, cx| shell.revoke_input(cx))
+                                }),
                         ),
                 ),
         )
@@ -271,7 +276,7 @@ impl HelpCard {
 fn stop_hint() -> &'static str {
     t(
         "Move the mouse or press a key to stop.",
-        "动鼠标或按任意键即可收回。",
+        "动鼠标或按任意键即可停止。",
     )
 }
 
@@ -366,7 +371,7 @@ fn plan_text(plan: &Plan) -> String {
         Plan::MenuItem(item) => {
             let label = agent_screen_model::menu_press::label(&item.titles());
             let app = &item.app;
-            tf!("Choose \"{label}\" in {app}", "在 {app} 中选择\"{label}\"")
+            tf!("Choose “{label}” in {app}", "在 {app} 中选择“{label}”")
         }
         Plan::Drag(drag) => {
             let at = |p: (f64, f64)| {
@@ -406,8 +411,8 @@ fn click_text(click: &crate::input_queue::Click) -> String {
         .and_then(|title| real_click::short_title(title, TITLE_CHARS));
     match title {
         Some(title) if &title != app => tf!(
-            "{verb} at ({x}, {y}) in {app}, \"{title}\"",
-            "在 {app}「{title}」中{verb} ({x}, {y})"
+            "{verb} at ({x}, {y}) in {app}, “{title}”",
+            "在 {app}“{title}”中{verb} ({x}, {y})"
         ),
         _ => tf!(
             "{verb} at ({x}, {y}) in {app}",
@@ -495,15 +500,15 @@ fn one_reason(item: &Item) -> String {
     match &item.plan {
         Some(Plan::Drag(_)) => tf!(
             "{text}. Can’t run in the background.",
-            "{text}，后台做不了。"
+            "{text}，无法在后台完成。"
         ),
         Some(Plan::Click(_)) => tf!(
             "{text}. A click in the background had no effect.",
-            "{text}，后台点击无效。"
+            "{text}，后台点击未生效。"
         ),
         Some(Plan::MenuItem(_)) => tf!(
             "{text}. Chosen in the background, it acts as a shortcut.",
-            "{text}，后台选择只会当作快捷键。"
+            "{text}，在后台选择只会被当作快捷键。"
         ),
         None => text.clone(),
     }
@@ -777,7 +782,7 @@ fn list_row(i: usize, item: &Item, several: bool, zh: bool, theme: &Theme) -> gp
                             .truncate()
                             .text_size(px(11.))
                             .text_color(theme.secondary)
-                            .child(t("You are using this display", "你正在操作这个显示器")),
+                            .child(t("You are using this display", "你正在操作此显示器")),
                     )
                 }),
         )
@@ -926,7 +931,7 @@ fn queue_picture(
         })
         .collect();
     let colors: Vec<_> = marks.iter().map(color).collect();
-    let picture = match frame {
+    let picture = match frame.filter(|_| crate::mac::permissions::last().screen) {
         Some(frame) => surface(frame)
             .object_fit(ObjectFit::Contain)
             .size_full()

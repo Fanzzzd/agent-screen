@@ -13,9 +13,10 @@ use crate::mac::native::{self, MenuAction, Native};
 use crate::mac::notify;
 use crate::mac::permissions::{Permission, Status};
 use gpui::{
-    AnyElement, App, Context, FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton,
-    ObjectFit, ParentElement, Render, Role, SharedString, StatefulInteractiveElement, Styled,
-    StyledImage, WeakEntity, Window, div, img, prelude::FluentBuilder, px, svg,
+    AnyElement, App, Context, FocusHandle, FontWeight, Hsla, InteractiveElement, IntoElement,
+    KeyDownEvent, MouseButton, ObjectFit, ParentElement, Render, Role, SharedString,
+    StatefulInteractiveElement, Styled, StyledImage, WeakEntity, Window, div, img,
+    prelude::FluentBuilder, px, svg,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -27,16 +28,27 @@ pub const HEIGHT: f32 = 640.;
 
 pub struct Setup {
     shell: WeakEntity<Shell>,
+    /// The window's keys: Tab moves between buttons, Escape closes it.
+    focus: FocusHandle,
+    focused: bool,
     /// Centered once its height fits the content.
     centered: std::rc::Rc<std::cell::Cell<bool>>,
     pub status: Status,
     /// The permission whose pane the user was sent to.
     pub waiting: Option<Permission>,
+    /// That permission is still off a while after, with Agent Screen in
+    /// its list.
+    pub still_off: bool,
     /// Screen Recording came on while running, and capture still fails:
     /// macOS applies it to a new process.
     pub restart: bool,
-    /// The last agent that loaded Agent Screen's tools, if any did.
+    /// The agents that loaded Agent Screen's tools since it started.
     pub agent: Option<String>,
+    /// The client that last loaded the tools, maybe before a restart, and
+    /// the day it did.
+    pub earlier: Option<(String, String)>,
+    /// The MCP command was just copied.
+    pub copied: bool,
     /// A Connect is running.
     pub connecting: bool,
     /// Clients whose config has Agent Screen's server.
@@ -64,18 +76,23 @@ pub struct Setup {
 const ICON: &[u8] = include_bytes!("../../assets/app-icon.png");
 
 impl Setup {
-    pub fn new(shell: WeakEntity<Shell>, status: Status) -> Setup {
+    pub fn new(shell: WeakEntity<Shell>, status: Status, cx: &mut Context<Setup>) -> Setup {
         let icon = Arc::new(gpui::Image::from_bytes(
             gpui::ImageFormat::Png,
             ICON.to_vec(),
         ));
         Setup {
             shell,
+            focus: cx.focus_handle(),
+            focused: false,
             centered: Default::default(),
             status,
             waiting: None,
+            still_off: false,
             restart: false,
             agent: None,
+            earlier: None,
+            copied: false,
             connecting: false,
             registered: Vec::new(),
             notifications: notify::Auth::Unknown,
@@ -97,23 +114,27 @@ impl Setup {
 }
 
 impl Render for Setup {
-    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme::theme(window);
+        if !self.focused {
+            window.focus(&self.focus, cx);
+            self.focused = true;
+        }
         let ready = self.status.complete() && !self.restart;
         let header = if ready {
             let status = match self.agent.clone() {
                 Some(agent) => tf!(
                     "{agent} loaded Agent Screen's tools. Ask your agent to create a display: its apps run there, off your screen.",
-                    "{agent} 已加载 Agent Screen 的工具。让 agent 创建显示器，它的 app 会在旁边运行，不占你的屏幕。"
+                    "{agent} 已加载 Agent Screen 的工具。让 agent 创建显示器，它的 app 将在其中运行，不占用你的屏幕。"
                 ),
                 None if !self.registered.is_empty() => t(
                     "Start a new agent session and ask it to create a display. Its apps run there, off your screen.",
-                    "开一个新的 agent 会话，让它创建显示器。它的 app 会在旁边运行，不占你的屏幕。",
+                    "新建一个 agent 会话，让它创建显示器。它的 app 将在其中运行，不占用你的屏幕。",
                 )
                 .to_string(),
                 None => t(
                     "Connect your agent below, then ask it to create a display.",
-                    "在下面接入 agent，再让它创建显示器。",
+                    "先在下方接入 agent，再让它创建显示器。",
                 )
                 .to_string(),
             };
@@ -163,7 +184,7 @@ impl Render for Setup {
                         .max_w(px(380.))
                         .child(t(
                             "Agents use apps on a display beside yours. Agent Screen needs to see that display and to click and type for the agent.",
-                            "Agent 在旁边的显示器上操作 app。Agent Screen 要看到那块显示器，也要替 agent 点击和输入。",
+                            "Agent 在独立的显示器上操作 app。Agent Screen 需要读取该显示器的画面，并代 agent 点击和输入。",
                         )),
                 )
         };
@@ -193,7 +214,7 @@ impl Render for Setup {
             .child(section(
                 t("Agents", "Agent"),
                 vec![
-                    self.agent_row(&theme).into_any_element(),
+                    self.agent_row(&theme, cx.weak_entity()).into_any_element(),
                     self.reports_row(&theme).into_any_element(),
                 ],
                 &theme,
@@ -218,15 +239,15 @@ impl Render for Setup {
                             .text_color(theme.secondary)
                             .child(t(
                                 "Used only on this Mac. Turn off anytime in System Settings.",
-                                "权限只用在这台 Mac 上，随时可以在系统设置里关掉。",
+                                "权限仅在本机使用，可随时在系统设置中关闭。",
                             )),
                     )
-                    .child(button(
+                    .child(key_button(
                         "setup-close",
                         if ready {
                             t("Done", "完成")
                         } else {
-                            t("Not Now", "稍后")
+                            t("Later", "稍后")
                         }
                         .into(),
                         // Connect is the next step until an agent loads the tools.
@@ -236,7 +257,18 @@ impl Render for Setup {
                         move |cx| tell(&shell, cx, |shell, cx| shell.close_setup(cx)),
                     )),
             );
+        let close = self.shell.clone();
         div()
+            .track_focus(&self.focus)
+            .on_key_down(move |e: &KeyDownEvent, window, cx| {
+                match e.keystroke.key.as_str() {
+                    "tab" if e.keystroke.modifiers.shift => window.focus_prev(cx),
+                    "tab" => window.focus_next(cx),
+                    "escape" => tell(&close, cx, |shell, cx| shell.close_setup(cx)),
+                    _ => return,
+                }
+                cx.stop_propagation();
+            })
             .size_full()
             .flex()
             .flex_col()
@@ -363,6 +395,19 @@ fn item(
     action: AnyElement,
     theme: &Theme,
 ) -> impl IntoElement {
+    item_with(lead, title, detail, note, None, action, theme)
+}
+
+/// A row with `extra` under its text, such as links.
+fn item_with(
+    lead: impl IntoElement,
+    title: SharedString,
+    detail: SharedString,
+    note: Option<(String, Hsla)>,
+    extra: Option<AnyElement>,
+    action: AnyElement,
+    theme: &Theme,
+) -> impl IntoElement {
     div()
         .flex()
         .items_center()
@@ -391,9 +436,51 @@ fn item(
                 )
                 .when_some(note, |d, (text, color)| {
                     d.child(div().text_size(px(11.)).text_color(color).child(text))
-                }),
+                })
+                .children(extra),
         )
         .child(action)
+}
+
+/// A text button under a row's detail.
+fn link(
+    id: &'static str,
+    label: &'static str,
+    theme: &Theme,
+    action: impl Fn(&mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .role(Role::Button)
+        .aria_label(label)
+        .text_size(px(11.5))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(theme.accent)
+        .hover(|s| s.opacity(0.75))
+        .active(|s| s.opacity(0.6))
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .keyboard(action, theme)
+        .child(label)
+}
+
+/// Agent Screen's server as an MCP client's JSON config takes it, with the
+/// command and its arguments apart.
+pub fn mcp_config() -> String {
+    let exe = std::env::current_exe().unwrap_or_default();
+    mcp_config_for(&exe.display().to_string())
+}
+
+fn mcp_config_for(exe: &str) -> String {
+    let server = serde_json::json!({ "command": exe, "args": ["mcp"] });
+    let body = serde_json::to_string_pretty(&server).unwrap_or_default();
+    format!("\"agent-screen\": {body}")
+}
+
+/// docs/clients.md: each client's config.
+pub fn open_client_guide() {
+    let _ = std::process::Command::new("/usr/bin/open")
+        .arg("https://github.com/Fanzzzd/agent-screen/blob/main/docs/clients.md")
+        .spawn();
 }
 
 impl Setup {
@@ -404,7 +491,7 @@ impl Setup {
         let action = match self.notifications {
             notify::Auth::Allowed => done(t("On", "已开启")),
             notify::Auth::Unknown => div().into_any_element(),
-            auth => button(
+            auth => key_button(
                 "setup-notifications",
                 if auth == notify::Auth::Denied {
                     t("Open Settings…", "打开设置…")
@@ -421,12 +508,12 @@ impl Setup {
         let detail = if self.notifications == notify::Auth::Denied {
             t(
                 "Off in System Settings. Turn on Allow Notifications for Agent Screen.",
-                "在系统设置里关着。打开 Agent Screen 的“允许通知”。",
+                "已在系统设置中关闭。请开启 Agent Screen 的“允许通知”。",
             )
         } else {
             t(
                 "When an agent needs your help or is done",
-                "agent 需要你帮忙或用完显示器时提醒你",
+                "Agent 需要协助或结束使用显示器时提醒你",
             )
         };
         let color = if on { green() } else { theme.accent };
@@ -448,9 +535,9 @@ impl Setup {
         let action = if on {
             done(t("On", "已开启"))
         } else if self.colorsync_busy {
-            busy(t("Waiting for your password…", "等你输入密码…"), theme)
+            busy(t("Waiting for your password…", "等待输入密码…"), theme)
         } else {
-            button(
+            key_button(
                 "setup-colorsync",
                 if self.colorsync == Some(Helper::Outdated) {
                     t("Update…", "更新…")
@@ -465,22 +552,22 @@ impl Setup {
             .into_any_element()
         };
         let detail = match &self.colorsync_error {
-            Some(error) => tf!("Didn't work: {error}", "没有成功：{error}"),
+            Some(error) => tf!("Didn't work: {error}", "未成功：{error}"),
             None if on => t(
                 "Keeps many displays from making your Mac stutter",
-                "屏幕多了 Mac 也不卡",
+                "多块显示器时保持系统流畅",
             )
             .to_string(),
             None => t(
-                "Keeps many displays from making your Mac stutter. Asks for your administrator password once",
-                "屏幕多了 Mac 也不卡。需要输入一次管理员密码",
+                "Prevents stutter. Needs admin password once",
+                "防止卡顿。需输入一次管理员密码",
             )
             .to_string(),
         };
         let color = if on { green() } else { theme.accent };
         item(
             badge("icons/display.svg", color, on),
-            t("Smooth Display Changes", "显示器切换不卡顿").into(),
+            t("Smooth Display Changes", "流畅切换显示器").into(),
             detail.into(),
             None,
             action,
@@ -502,16 +589,16 @@ impl Setup {
         };
         let detail = if self.wallpaper.is_some() {
             t(
-                "Your picture, in the Viewer and recordings. Agents' screenshots leave it out",
-                "你选的图片，出现在 Viewer 和录屏里，agent 截图不含它",
+                "Your picture. Not in agents' screenshots",
+                "你选的图片，agent 截图中不含",
             )
         } else {
             t(
-                "Agent Screen's, which names each display. Agents' screenshots leave it out",
-                "Agent Screen 自带的，标出每块显示器。agent 截图不含它",
+                "Names each display. Not in screenshots",
+                "标出每块显示器，截图中不含",
             )
         };
-        let choose = button(
+        let choose = key_button(
             "setup-wallpaper",
             t("Choose…", "选择…").into(),
             None,
@@ -522,7 +609,7 @@ impl Setup {
             .flex()
             .gap(px(8.))
             .when(self.wallpaper.is_some(), |d| {
-                d.child(button(
+                d.child(key_button(
                     "setup-wallpaper-default",
                     t("Use Default", "改回默认").into(),
                     None,
@@ -548,7 +635,7 @@ impl Setup {
         let (color, action) = if !self.pinned.is_empty() {
             (
                 theme.orange,
-                button(
+                key_button(
                     "setup-aerospace-config",
                     t("Open Config…", "打开配置…").into(),
                     None,
@@ -562,7 +649,7 @@ impl Setup {
         } else {
             (
                 theme.accent,
-                button(
+                key_button(
                     "setup-aerospace",
                     t("Set Up…", "配置…").into(),
                     None,
@@ -575,19 +662,19 @@ impl Setup {
         let detail = if ignoring {
             t(
                 "Leaves Agent Screen's displays alone",
-                "不管 Agent Screen 的显示器",
+                "忽略 Agent Screen 的显示器",
             )
         } else {
             t(
                 "Otherwise it puts your workspaces on agents' displays",
-                "不然它会把你的工作区放到 agent 的显示器上",
+                "否则会把你的工作区放到 agent 的显示器上",
             )
         };
         let note = (!self.pinned.is_empty()).then(|| {
             (
                 tf!(
-                    "Workspace {} is pinned to a monitor number an agent's display took",
-                    "工作区 {} 按编号固定到了一块显示器，这个编号被 agent 的显示器占了",
+                    "Workspace {} is pinned to a monitor number an agent uses",
+                    "工作区 {} 固定的显示器编号已被 agent 占用",
                     self.pinned.join(", ")
                 ),
                 theme.orange,
@@ -597,7 +684,7 @@ impl Setup {
             badge("icons/tiles.svg", color, ignoring && self.pinned.is_empty()),
             t(
                 "Keep AeroSpace Off Agent Displays",
-                "让 AeroSpace 不管 Agent 显示器",
+                "让 AeroSpace 忽略 Agent 显示器",
             )
             .into(),
             detail.into(),
@@ -607,8 +694,9 @@ impl Setup {
         )
     }
 
-    /// Connecting Claude Code and Codex, the step after the permissions.
-    fn agent_row(&self, theme: &Theme) -> impl IntoElement {
+    /// Connecting agents, the step after the permissions: Connect sets up
+    /// Claude Code and Codex, and any other MCP client takes the command.
+    fn agent_row(&self, theme: &Theme, this: WeakEntity<Setup>) -> impl IntoElement {
         let shell = self.shell.clone();
         let loaded = self.agent.is_some();
         let action = if loaded {
@@ -616,8 +704,8 @@ impl Setup {
         } else if self.connecting {
             busy(t("Connecting…", "正在接入…"), theme)
         } else {
-            let again = !self.registered.is_empty();
-            button(
+            let again = !self.registered.is_empty() || self.earlier.is_some();
+            key_button(
                 "setup-connect",
                 if again {
                     t("Connect Again…", "重新接入…")
@@ -631,25 +719,57 @@ impl Setup {
             )
             .into_any_element()
         };
-        let detail = match (&self.agent, self.registered.as_slice()) {
-            (Some(agent), _) => tf!("{agent} loaded the tools", "{agent} 已加载工具"),
-            (None, []) => t(
-                "Add Agent Screen to both, then start a new session",
-                "把 Agent Screen 加到这两个 agent，再开一个新会话",
+        let detail = match (&self.agent, &self.earlier, self.registered.as_slice()) {
+            (Some(agent), _, _) => tf!("{agent} loaded the tools", "{agent} 已加载工具"),
+            (None, Some((client, day)), _) => tf!(
+                "{client} last loaded the tools on {day}",
+                "{client} 上次于 {day}加载工具"
+            ),
+            (None, None, []) => t(
+                "Connect sets up Claude Code and Codex",
+                "“接入”会配置 Claude Code 和 Codex",
             )
             .to_string(),
-            (None, clients) => tf!(
+            (None, None, clients) => tf!(
                 "Added to {}. Start a new session to load the tools",
-                "已加到 {}。开一个新会话就能加载工具",
+                "已添加到 {}。新建会话即可加载工具",
                 clients.join(t(" and ", " 和 "))
             ),
         };
         let color = if loaded { green() } else { theme.accent };
-        item(
+        let copied = self.copied;
+        let others = div()
+            .flex()
+            .gap(px(12.))
+            .mt(px(2.))
+            .child(link(
+                "setup-copy-command",
+                if copied {
+                    t("Copied", "已复制")
+                } else {
+                    t("Copy MCP Config", "复制 MCP 配置")
+                },
+                theme,
+                move |cx| {
+                    native::copy(&mcp_config());
+                    let _ = this.update(cx, |setup, cx| {
+                        setup.copied = true;
+                        cx.notify();
+                    });
+                },
+            ))
+            .child(link(
+                "setup-client-guide",
+                t("Client Guide", "客户端说明"),
+                theme,
+                |_| open_client_guide(),
+            ));
+        item_with(
             badge("icons/plus.svg", color, loaded),
-            t("Claude Code and Codex", "Claude Code 和 Codex").into(),
+            t("MCP Clients", "MCP 客户端").into(),
             detail.into(),
             None,
+            Some(others.into_any_element()),
             action,
             theme,
         )
@@ -661,16 +781,16 @@ impl Setup {
         let on = self.reports_on;
         let detail = if on {
             t(
-                "Agents' bug reports wait on a card for you to review and open on GitHub",
-                "agent 的问题报告先在卡片上等你检查，再由你在 GitHub 打开",
+                "Agents' reports wait on a card for your review",
+                "Agent 的报告先显示在卡片上供你审阅",
             )
         } else {
             t(
                 "Off. Agents only show you their report",
-                "已关闭。agent 只把报告交给你",
+                "已关闭。Agent 仅向你展示报告",
             )
         };
-        let action = button(
+        let action = key_button(
             "setup-reports",
             if on {
                 t("Turn Off", "关闭")
@@ -704,14 +824,14 @@ impl Setup {
                 "icons/display.svg",
                 t(
                     "Show agent displays and take screenshots",
-                    "看到显示器上的画面，给你看，也给 agent 截图",
+                    "显示 Agent 显示器的画面并截图",
                 ),
             ),
             Permission::Accessibility => (
                 "icons/pointer.svg",
                 t(
                     "Click, type and place windows for agents",
-                    "替 agent 点击、输入，把窗口摆到显示器上",
+                    "代 agent 点击、输入和摆放窗口",
                 ),
             ),
         };
@@ -719,7 +839,7 @@ impl Setup {
         let restart_here = p == Permission::ScreenRecording && granted && self.restart;
         let waiting = self.waiting == Some(p) && !granted;
         let action = if restart_here {
-            button(
+            key_button(
                 "setup-restart",
                 t("Reopen Agent Screen", "重新打开 Agent Screen").into(),
                 Some(theme.accent),
@@ -731,7 +851,7 @@ impl Setup {
             done(t("On", "已开启"))
         } else {
             let next = self.next() == Some(p);
-            button(
+            key_button(
                 match p {
                     Permission::ScreenRecording => "setup-grant-screen",
                     Permission::Accessibility => "setup-grant-ax",
@@ -757,11 +877,20 @@ impl Setup {
                 .to_string(),
                 theme.orange,
             ))
+        } else if waiting && self.still_off {
+            Some((
+                t(
+                    "Already on? Remove with −, then re-add",
+                    "已开启仍无效？点 − 移除后重新添加",
+                )
+                .to_string(),
+                theme.orange,
+            ))
         } else if waiting {
             Some((
                 t(
                     "Turn on Agent Screen in System Settings. This row updates by itself.",
-                    "在系统设置里打开 Agent Screen 的开关，这里会自动更新",
+                    "在系统设置中打开 Agent Screen 的开关，此处会自动更新",
                 )
                 .to_string(),
                 theme.secondary,
@@ -788,6 +917,30 @@ pub(crate) fn button(
     theme: &Theme,
     action: impl Fn(&mut App) + 'static,
 ) -> impl IntoElement {
+    button_base(id, title.clone(), prominent, theme)
+        .on_click(move |_, _, cx| action(cx))
+        .child(title)
+}
+
+/// A Settings button: as `button`, and the keyboard reaches it.
+fn key_button(
+    id: &'static str,
+    title: SharedString,
+    prominent: Option<Hsla>,
+    theme: &Theme,
+    action: impl Fn(&mut App) + 'static,
+) -> impl IntoElement {
+    button_base(id, title.clone(), prominent, theme)
+        .keyboard(action, theme)
+        .child(title)
+}
+
+fn button_base(
+    id: &'static str,
+    title: SharedString,
+    prominent: Option<Hsla>,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
     let (bg, hover, fg) = match prominent {
         Some(color) => (color.opacity(0.9), color, gpui::white()),
         None => (theme.control, theme.control_hover, theme.label),
@@ -795,7 +948,7 @@ pub(crate) fn button(
     div()
         .id(id)
         .role(Role::Button)
-        .aria_label(title.clone())
+        .aria_label(title)
         .flex_none()
         .h(px(28.))
         .px(px(14.))
@@ -809,6 +962,54 @@ pub(crate) fn button(
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(fg)
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .on_click(move |_, _, cx| action(cx))
-        .child(title)
+}
+
+/// A button the keyboard reaches: Tab stops on it, Return or Space
+/// presses it, and a ring shows it has the keyboard.
+trait Keyboard: StatefulInteractiveElement + Styled + Sized {
+    fn keyboard(self, action: impl Fn(&mut App) + 'static, theme: &Theme) -> Self {
+        let action = std::rc::Rc::new(action);
+        let press = action.clone();
+        let ring = theme.accent;
+        self.tab_index(0)
+            // A ring outside the button, so the layout doesn't move.
+            .focus_visible(move |s| {
+                s.shadow(vec![gpui::BoxShadow {
+                    color: ring,
+                    offset: gpui::point(px(0.), px(0.)),
+                    blur_radius: px(0.),
+                    spread_radius: px(2.),
+                    inset: false,
+                }])
+            })
+            .on_click(move |_, _, cx| action(cx))
+            .on_key_down(move |e: &KeyDownEvent, _, cx| {
+                if matches!(e.keystroke.key.as_str(), "enter" | "space")
+                    && !e.keystroke.modifiers.modified()
+                {
+                    press(cx);
+                    cx.stop_propagation();
+                }
+            })
+    }
+}
+
+impl Keyboard for gpui::Stateful<gpui::Div> {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_mcp_config_keeps_command_and_args_apart() {
+        let config = mcp_config_for("/Applications/Agent Screen.app/Contents/MacOS/AgentScreen");
+        let value: serde_json::Value =
+            serde_json::from_str(&format!("{{{config}}}")).expect("valid JSON in braces");
+        let server = &value["agent-screen"];
+        assert_eq!(
+            server["command"],
+            "/Applications/Agent Screen.app/Contents/MacOS/AgentScreen"
+        );
+        assert_eq!(server["args"], serde_json::json!(["mcp"]));
+    }
 }

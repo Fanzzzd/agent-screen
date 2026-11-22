@@ -87,6 +87,19 @@ thread_local! {
 }
 
 /// The running shell, for debug control methods.
+/// The name kept for a client that didn't say its name. It is stored and
+/// logged as is; the UI shows it through `shown_client`.
+pub const UNNAMED_CLIENT: &str = "An agent";
+
+/// A client's name as the UI shows it, in the UI's language.
+pub fn shown_client(name: &str) -> String {
+    if name == UNNAMED_CLIENT {
+        t("An agent", "Agent").to_string()
+    } else {
+        name.to_string()
+    }
+}
+
 pub fn current() -> Option<WeakEntity<Shell>> {
     CURRENT.with(|c| c.borrow().as_ref().map(Entity::downgrade))
 }
@@ -301,8 +314,18 @@ pub struct Shell {
     recordings: Option<WindowHandle<Recordings>>,
     /// The agents whose MCP servers loaded the tools, first to last.
     agent_ready: Vec<String>,
+    /// The client that last loaded the tools, in this run or an earlier
+    /// one, and when.
+    tools_last: Option<(String, f64)>,
     /// The permission whose pane the user was sent to.
     waiting: Option<Permission>,
+    /// When the user was sent there.
+    waiting_since: Option<std::time::Instant>,
+    /// The pane has been open a while, Agent Screen is in its list, and
+    /// macOS still says no: the helper asks to add it again.
+    still_off: bool,
+    /// `debugShow setup-still-off`: the preview shows that note.
+    preview_still_off: bool,
     /// Screen Recording came on while running and capture still fails.
     restart: bool,
     /// A Connect is running.
@@ -811,12 +834,16 @@ impl Shell {
             setup: None,
             recordings: None,
             agent_ready: Vec::new(),
+            tools_last: native::tools_last_loaded(),
             report_card: None,
             report_shown: None,
             report_expanded: false,
             reports: crate::reports::load(),
             report_previews: HashSet::new(),
             waiting: None,
+            waiting_since: None,
+            still_off: false,
+            preview_still_off: false,
             restart: false,
             debug_menu_at: None,
             setup_shown_for: None,
@@ -2679,6 +2706,17 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         match surface {
+            "pretend-screen-off" | "pretend-ax-off" | "pretend-clear" => {
+                use std::sync::atomic::Ordering;
+                let bits = match surface {
+                    "pretend-screen-off" => 1,
+                    "pretend-ax-off" => 2,
+                    _ => 0,
+                };
+                permissions::PRETEND_OFF.store(bits, Ordering::Relaxed);
+                let now = permissions::status();
+                self.check_permissions(now, None, cx);
+            }
             // Held open, as a click holds it, so scripts can look at it.
             "peek" => {
                 let effect = self.peek_intent.pin();
@@ -2725,11 +2763,19 @@ impl Shell {
             }
             "setup" | "settings" => self.open_setup(cx),
             "setup-close" => self.close_setup(cx),
+            // Tab in Settings, as the user's key moves the keyboard to the
+            // next button and shows its ring.
+            "setup-tab" => {
+                if let Some(handle) = self.setup {
+                    let _ = handle.update(cx, |_, window, cx| window.focus_next(cx));
+                }
+            }
             // The open setup window as with both permissions missing, the
             // first row explaining what to do in System Settings: the
             // tallest it gets.
-            "setup-waiting" => {
+            "setup-waiting" | "setup-still-off" => {
                 self.setup_preview = true;
+                self.preview_still_off = surface == "setup-still-off";
                 self.push_setup(cx);
             }
             // The pane and its helper, without the system prompt.
@@ -2741,16 +2787,22 @@ impl Shell {
                 };
                 permissions::open_pane(p);
                 assist::show(p, permissions::listed(p).unwrap_or(true));
-                self.waiting = Some(p);
+                self.wait_for(p);
                 self.push_setup(cx);
             }
             // The helper alone at the top-left corner of the main screen.
-            "assist-preview" | "assist-preview-unlisted" => assist::preview(
-                Permission::Accessibility,
-                surface == "assist-preview",
-                40.0,
-                60.0,
-            ),
+            "assist-preview" | "assist-preview-unlisted" | "assist-preview-still-off" => {
+                assist::preview(
+                    Permission::Accessibility,
+                    match surface {
+                        "assist-preview" => assist::Step::Listed,
+                        "assist-preview-unlisted" => assist::Step::Unlisted,
+                        _ => assist::Step::StillOff,
+                    },
+                    40.0,
+                    60.0,
+                )
+            }
             "assist-hide" => assist::hide(),
             // The Help Card's buttons, as a click would press them.
             "card-later" => self.card_later(id, cx),
@@ -2898,7 +2950,7 @@ impl Shell {
         let display = core.displays.get(id)?;
         let menu = native::Menu::new(&display.label());
         menu.action(
-            t("Open Viewer", "打开查看器"),
+            t("Open Viewer", "打开 Viewer"),
             MenuAction::OpenDisplay { display: id },
         );
         if crate::web::preview_url(id).is_some() {
@@ -2980,10 +3032,20 @@ impl Shell {
                 "{agent} loaded Agent Screen's tools",
                 "{agent} 已加载 Agent Screen 的工具"
             )),
-            None => menu.disabled(t(
-                "No agent has loaded the tools yet",
-                "还没有 agent 加载工具",
-            )),
+            None => match &self.tools_last {
+                Some((client, at)) => {
+                    let client = shown_client(client);
+                    let day = crate::i18n::day(*at);
+                    menu.disabled(&tf!(
+                        "{client} last loaded the tools on {day}",
+                        "{client} 上次于 {day}加载工具"
+                    ))
+                }
+                None => menu.disabled(t(
+                    "No agent has loaded the tools yet",
+                    "尚无 agent 加载工具",
+                )),
+            },
         };
         menu.separator();
         let core = self.core.read(cx);
@@ -3013,7 +3075,7 @@ impl Shell {
         }
         let create = menu.action(t("New Display", "新建显示器"), MenuAction::CreateDisplay);
         native::set_key_equivalent(&create, "n", true, false, false, false);
-        menu.action(t("Recordings…", "录制回看…"), MenuAction::OpenRecordings);
+        menu.action(t("Recordings…", "录制列表…"), MenuAction::OpenRecordings);
         menu.separator();
         // Agents, wallpaper, AeroSpace and the optional helpers.
         let settings = menu.action(t("Settings…", "设置…"), MenuAction::OpenSettings);
@@ -3239,7 +3301,7 @@ impl Shell {
                     ),
                     &tf!(
                         "Your AeroSpace config assigns workspace {} to a monitor by number, in workspace-to-monitor-force-assignment. Agent displays count as monitors and take those numbers, so the workspace lands on an agent's display and Agent Screen can't move it. Use the monitor's name instead, like 2 = 'DELL', or install Agent Screen's AeroSpace and add ignored-monitors.",
-                        "你的 AeroSpace 配置在 workspace-to-monitor-force-assignment 里按编号把工作区 {} 分给了某块显示器。Agent 显示器也算显示器，会占用这些编号，所以这个工作区落到了 Agent 的显示器上，Agent Screen 挪不动它。改用显示器名称，例如 2 = 'DELL'；或者安装 Agent Screen 版 AeroSpace 并加上 ignored-monitors。",
+                        "你的 AeroSpace 配置在 workspace-to-monitor-force-assignment 中按编号把工作区 {} 分配给了某块显示器。Agent 显示器也计入编号，因此该工作区落到了 agent 的显示器上，Agent Screen 无法移动它。请改用显示器名称，例如 2 = 'DELL'；或安装 Agent Screen 版 AeroSpace 并添加 ignored-monitors。",
                         pinned.join(", ")
                     ),
                     t("Open Config", "打开配置"),
@@ -3526,23 +3588,23 @@ impl Shell {
                 (
                     tf!(
                         "{names} didn't come back to your screen",
-                        "{names} 没能回到你的屏幕"
+                        "{names} 未能回到你的屏幕"
                     ),
                     t(
                         "It is still on the agent's display. Take Back can try again.",
-                        "它还在 agent 的显示器上，可以再点“取回”试一次。",
+                        "它仍在 agent 的显示器上，可再点“取回”重试。",
                     ),
                 )
             } else {
                 (
                     tf!(
                         "{} windows didn't come back to your screen",
-                        "{} 个窗口没能回到你的屏幕",
+                        "{} 个窗口未能回到你的屏幕",
                         stuck.len()
                     ),
                     t(
                         "They are still on the agent's display. Take Back can try again.",
-                        "它们还在 agent 的显示器上，可以再点“取回”试一次。",
+                        "它们仍在 agent 的显示器上，可再点“取回”重试。",
                     ),
                 )
             };
@@ -4032,7 +4094,7 @@ impl Shell {
                 cx,
             ))),
             titlebar: Some(TitlebarOptions {
-                title: Some(t("Recordings", "录制回看").into()),
+                title: Some(t("Recordings", "录制列表").into()),
                 ..Default::default()
             }),
             window_min_size: Some(size(px(720.), px(440.))),
@@ -4079,7 +4141,7 @@ impl Shell {
             is_minimizable: false,
             ..Default::default()
         };
-        match cx.open_window(options, |_, cx| cx.new(|_| Setup::new(weak, status))) {
+        match cx.open_window(options, |_, cx| cx.new(|cx| Setup::new(weak, status, cx))) {
             Ok(handle) => {
                 self.setup = Some(handle);
                 self.push_setup(cx);
@@ -4230,7 +4292,7 @@ impl Shell {
         panel.setAllowsMultipleSelection(false);
         panel.setMessage(Some(&objc2_foundation::NSString::from_str(t(
             "Choose a picture for agents' displays. You see it in the Viewer and in recordings; agents' screenshots leave it out.",
-            "为 agent 的显示器选一张壁纸。它出现在 Viewer 和录屏里，agent 截图时不包含它。",
+            "为 agent 的显示器选择壁纸。它显示在 Viewer 和录制中，agent 截图中不含。",
         ))));
         let types: Vec<objc2::rc::Retained<objc2_foundation::NSString>> =
             ["png", "jpg", "jpeg", "heic", "tiff", "gif", "webp"]
@@ -4334,8 +4396,34 @@ impl Shell {
         // Asking puts Agent Screen in the list, switched off.
         let listed = permissions::listed(p).unwrap_or(true);
         assist::show(p, listed);
-        self.waiting = Some(p);
+        self.wait_for(p);
         self.push_setup(cx);
+    }
+
+    /// The user goes to `p`'s pane now.
+    fn wait_for(&mut self, p: Permission) {
+        self.waiting = Some(p);
+        self.waiting_since = Some(std::time::Instant::now());
+        self.still_off = false;
+    }
+
+    /// Thirty seconds after the pane opened, with Agent Screen in its list and
+    /// the permission still off, the switch may be on for an entry macOS
+    /// no longer matches to this copy of the app (#280). The helper and the
+    /// row then ask to remove the entry and add it again.
+    fn check_still_off(&mut self, now: permissions::Status) {
+        let Some(p) = self.waiting else { return };
+        if self.still_off || now.has(p) || !assist::is_shown() {
+            return;
+        }
+        let long = self
+            .waiting_since
+            .is_some_and(|since| since.elapsed() >= std::time::Duration::from_secs(30));
+        if long && permissions::listed(p) == Some(true) {
+            log::info!("{p:?} still off 30 s after its pane opened");
+            self.still_off = true;
+            assist::show_step(p, assist::Step::StillOff);
+        }
     }
 
     pub fn relaunch(&mut self, cx: &mut Context<Self>) {
@@ -4387,9 +4475,9 @@ impl Shell {
             let lines: Vec<String> = outcomes
                 .iter()
                 .map(|o| match &o.result {
-                    None => tf!("{}: not installed", "{}：没有安装", o.client),
+                    None => tf!("{}: not installed", "{}：未安装", o.client),
                     Some(Ok(Done::Already)) => {
-                        tf!("{}: already connected", "{}：已经接入", o.client)
+                        tf!("{}: already connected", "{}：已接入", o.client)
                     }
                     Some(Ok(Done::Connected)) => tf!(
                         "{}: connected for all projects",
@@ -4414,20 +4502,20 @@ impl Shell {
             let next = if none {
                 tf!(
                     "For another MCP client, add a stdio server with command\n{}\nand arguments [\"mcp\"]. If Claude Code is installed, run in Terminal:\n\"{}\" mcp install",
-                    "其他 MCP 客户端：添加一个 stdio 服务器，命令是\n{}\n参数是 [\"mcp\"]。装了 Claude Code 的话，在终端里运行：\n\"{}\" mcp install",
+                    "其他 MCP 客户端：添加一个 stdio 服务器，命令为\n{}\n参数为 [\"mcp\"]。若已安装 Claude Code，请在终端中运行：\n\"{}\" mcp install",
                     exe.display(),
                     exe.display()
                 )
             } else if failed {
                 tf!(
                     "To try in Terminal, where your agents' PATH is set:\n\"{}\" mcp install",
-                    "可以在终端里重试，那里有 agent 需要的 PATH：\n\"{}\" mcp install",
+                    "可在终端中重试，终端里有 agent 所需的 PATH：\n\"{}\" mcp install",
                     exe.display()
                 )
             } else {
                 t(
                     "Start a new agent session to load the tools.",
-                    "新开一个 agent 会话就能用上这些工具。",
+                    "新建 agent 会话即可加载这些工具。",
                 )
                 .to_string()
             };
@@ -4439,10 +4527,17 @@ impl Shell {
                 shell.registered = registered;
                 shell.push_setup(cx);
             });
-            native::alert(
-                t("Agent Screen and your agents", "Agent Screen 与 agent"),
-                &format!("{}\n\n{next}", lines.join("\n")),
-            );
+            let title = t("Agent Screen and your agents", "Agent Screen 与 agent");
+            let text = format!("{}\n\n{next}", lines.join("\n"));
+            // Without Claude Code or Codex the user sets up another client
+            // by hand: give them the command to paste.
+            if none {
+                if native::confirm(title, &text, t("Copy Config", "复制配置")) {
+                    native::copy(&super::setup::mcp_config());
+                }
+            } else {
+                native::alert(title, &text);
+            }
         })
         .detach();
     }
@@ -4453,7 +4548,8 @@ impl Shell {
 
     /// The agents that loaded the tools since Agent Screen started, by name.
     fn agents_ready(&self) -> Option<String> {
-        match self.agent_ready.as_slice() {
+        let names: Vec<String> = self.agent_ready.iter().map(|c| shown_client(c)).collect();
+        match names.as_slice() {
             [] => None,
             [one] => Some(one.clone()),
             [rest @ .., last] => Some(format!("{} {} {last}", rest.join(", "), t("and", "和"))),
@@ -4463,6 +4559,8 @@ impl Shell {
     /// An agent's MCP server listed the tools: setup worked on its side.
     pub fn agent_ready(&mut self, client: String, cx: &mut Context<Self>) {
         log::info!("{client} loaded the tools");
+        native::remember_tools_loaded(&client);
+        self.tools_last = native::tools_last_loaded();
         if !self.agent_ready.contains(&client) {
             self.agent_ready.push(client);
         }
@@ -4479,7 +4577,16 @@ impl Shell {
         } else {
             (self.permissions, self.waiting, self.restart)
         };
+        let still_off = if self.setup_preview {
+            self.preview_still_off
+        } else {
+            self.still_off
+        };
         let agent = self.agents_ready();
+        let earlier = self
+            .tools_last
+            .as_ref()
+            .map(|(client, at)| (shown_client(client), crate::i18n::day(*at)));
         let connecting = self.connecting;
         let Some(handle) = self.setup else { return };
         let registered = self.registered.clone();
@@ -4503,8 +4610,10 @@ impl Shell {
                 setup.notifications = notifications;
                 (setup.colorsync, setup.colorsync_busy, setup.colorsync_error) = colorsync;
                 setup.waiting = waiting;
+                setup.still_off = still_off;
                 setup.restart = restart;
                 setup.agent = agent;
+                setup.earlier = earlier;
                 setup.connecting = connecting;
                 setup.registered = registered;
                 cx.notify();
@@ -4536,6 +4645,7 @@ impl Shell {
             // The user may answer in System Settings.
             notify::check();
         }
+        self.check_still_off(now);
         if now == before {
             self.recheck_capture(cx);
             self.push_setup(cx);
@@ -5217,7 +5327,7 @@ impl Shell {
     fn ignore_in_aerospace(&mut self, cx: &mut Context<Self>) {
         let why = t(
             "AeroSpace manages every display, Agent Screen's too. It shows one of your workspaces on each new display, which takes those windows off your screen and into the agent's screenshots, and it files the agents' new windows in your workspace, so they pass over your screen first.",
-            "AeroSpace 会管理所有显示器，包括 Agent Screen 的。每建一块显示器，它就把你的一个工作区放上去，那些窗口会从你屏幕上消失，出现在 Agent 的截图里。Agent 打开的新窗口也会被它登记到你的工作区，先在你屏幕上闪一下。",
+            "AeroSpace 会管理所有显示器，包括 Agent Screen 的显示器。每新建一块显示器，它会把你的一个工作区放上去，其中的窗口会离开你的屏幕，出现在 agent 的截图中。它还会把 agent 新开的窗口归入你的工作区，使其先在你的屏幕上闪过。",
         );
         if self.aerospace == Some(aerospace::Ignoring::Unsupported) {
             let commands = "brew tap fanzzzd/agent-screen
@@ -5229,13 +5339,13 @@ open -a AeroSpace";
             let go = native::confirm(
                 t(
                     "This AeroSpace can't leave displays alone",
-                    "这个版本的 AeroSpace 还不能不管显示器",
+                    "此版本的 AeroSpace 无法忽略显示器",
                 ),
                 &format!(
                     "{why}\n\n{}",
                     t(
                         "Agent Screen's build of AeroSpace adds the option it needs and keeps your config. The guide shows the five Terminal commands; they're on your clipboard.",
-                        "Agent Screen 提供的 AeroSpace 加上了需要的选项，你的配置不变。说明页里有 5 条终端命令，已经复制到剪贴板。",
+                        "Agent Screen 版 AeroSpace 已加入所需选项，并保留你的配置。说明页列出了 5 条终端命令，已复制到剪贴板。",
                     ),
                 ),
                 t("Copy Commands and Open Guide", "复制命令并打开说明"),
@@ -5258,7 +5368,7 @@ open -a AeroSpace";
         let go = native::confirm(
             t(
                 "Let AeroSpace leave Agent Screen's displays alone?",
-                "让 AeroSpace 不管 Agent Screen 的显示器？",
+                "让 AeroSpace 忽略 Agent Screen 的显示器？",
             ),
             &format!(
                 "{why}
@@ -5296,14 +5406,14 @@ open -a AeroSpace";
                         ),
                         None => t(
                             "You had no config; this one is AeroSpace's default plus that line.",
-                            "你原来没有配置文件；新文件是 AeroSpace 的默认配置加上这一行。",
+                            "你原先没有配置文件；新文件为 AeroSpace 默认配置加上这一行。",
                         )
                         .to_string(),
                     };
                     native::alert(
                         t(
                             "AeroSpace now leaves Agent Screen's displays alone",
-                            "AeroSpace 不再管 Agent Screen 的显示器了",
+                            "AeroSpace 已忽略 Agent Screen 的显示器",
                         ),
                         &format!(
                             "{}\n\n{old}",
@@ -5318,15 +5428,15 @@ open -a AeroSpace";
                 Err(failed) => {
                     log::warn!("AeroSpace refused ignored-monitors: {}", failed.reason);
                     let state = if failed.unchanged {
-                        t("Your config is as it was.", "你的配置没有变。")
+                        t("Your config is as it was.", "配置未改动。")
                     } else {
                         t(
                             "Agent Screen couldn't put your old config back; it's in the .before-agent-screen file beside it.",
-                            "Agent Screen 没能把旧配置放回去；它在旁边的 .before-agent-screen 文件里。",
+                            "Agent Screen 未能恢复旧配置；旧配置保存在同目录的 .before-agent-screen 文件中。",
                         )
                     };
                     native::alert(
-                        t("AeroSpace didn't take the change", "AeroSpace 没有接受这个改动"),
+                        t("AeroSpace didn't take the change", "AeroSpace 未接受此改动"),
                         &format!("{state}\n\n{}", failed.reason),
                     );
                 }

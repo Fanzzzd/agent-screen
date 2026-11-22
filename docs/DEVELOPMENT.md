@@ -659,9 +659,10 @@ The control socket accepts these methods in debug builds. `AGENTSCREEN_DEBUG=1` 
 | `report-card`, `report-card-open`, `report-card-later`, `report-card-more` | Queue a bug report from no agent and show the Bug Report Card, or press its Open on GitHub, Not Now or Show Report for the report it shows. A previewed report opens nothing and gives no consent; a report an agent filed opens its form, and only that one. `debugCard` returns `report`: the report shown, whether it is expanded, how many wait, the setting and the consents. |
 | `report-card-off`, `report-card-on` | Turn agents' bug reports off, as the card's Turn Off does, or on again. |
 | `recordings`, `recordings-close` | Open or close the independent recording library/player. No display is required. A debug build can use `AGENTSCREEN_PLAYBACK_DIR` for owned synthetic MP4/sidecar fixtures instead of the user's recording directory. |
-| `settings`, `setup`, `setup-close`, `setup-waiting` | Open Settings, close it, or preview its waiting state with both permissions missing. `settings` and `setup` are aliases. |
+| `settings`, `setup`, `setup-close`, `setup-waiting`, `setup-still-off`, `setup-tab` | Open Settings, close it, or preview its waiting state with both permissions missing; `setup-still-off` adds the note for a switch that is on while macOS still says no; `setup-tab` moves the keyboard to the next button, as Tab does. `settings` and `setup` are aliases. |
 | `assist-screen`, `assist-ax` | Open the Screen Recording or Accessibility pane and its helper. |
-| `assist-preview`, `assist-preview-unlisted`, `assist-hide` | Show the helper preview, preview an app absent from the permission list, or hide the helper. |
+| `assist-preview`, `assist-preview-unlisted`, `assist-preview-still-off`, `assist-hide` | Show the helper preview, preview an app absent from the permission list or one whose switch is on while macOS still says no, or hide the helper. |
+| `pretend-screen-off`, `pretend-ax-off`, `pretend-clear` | Make the UI act as if Screen Recording or Accessibility were off, without changing the grant, or stop pretending. |
 | `connect`, `wallpaper`, `quit` | Run Connect Claude Code and Codex, open Settings' wallpaper picker, or quit. |
 | `stage` | Select the test display that stands in for the user's screen. `displayId` 0 clears the selection. |
 | `userStage` | Supply the selected stage's user-display role to window ownership rules. Only debug-assertion builds compile this surface. |

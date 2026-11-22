@@ -535,7 +535,7 @@ fn tile(
             .into_any_element(),
         None => status.line(&status.short, 10.5).into_any_element(),
     };
-    let picture = match frame {
+    let picture = match frame.filter(|_| crate::mac::permissions::last().screen) {
         Some(frame) => surface(frame)
             .object_fit(ObjectFit::Contain)
             .size_full()
@@ -565,7 +565,11 @@ fn tile(
         .id(gpui::ElementId::Integer(id as u64))
         .group(group.clone())
         .role(Role::Button)
-        .aria_label(tf!("{label}, {}", "{label}，{}", status.long))
+        .aria_label(if recording {
+            tf!("{label}, Recording, {}", "{label}，录制中，{}", status.long)
+        } else {
+            tf!("{label}, {}", "{label}，{}", status.long)
+        })
         .tooltip({
             let text = format!("{label}\n{}", status.long);
             move |_, cx| super::shell::hint(text.clone(), cx)
@@ -686,9 +690,20 @@ fn tile(
                         .flex()
                         .items_center()
                         .gap(px(4.))
-                        // Being recorded: a red dot, as in the Viewer.
+                        // Being recorded: a red dot, as in the Viewer, named
+                        // in its tooltip and the tile's label.
                         .when(recording, |d| {
-                            d.child(div().flex_none().size(px(6.)).rounded_full().bg(theme.red))
+                            d.child(
+                                div()
+                                    .id("recording-dot")
+                                    .flex_none()
+                                    .size(px(6.))
+                                    .rounded_full()
+                                    .bg(theme.red)
+                                    .tooltip(|_, cx| {
+                                        super::shell::hint(t("Recording", "录制中"), cx)
+                                    }),
+                            )
                         })
                         .child(
                             div()
@@ -802,7 +817,7 @@ fn access_pill(
             div()
                 .id(gpui::ElementId::Name(format!("revoke-{id}").into()))
                 .role(Role::Button)
-                .aria_label(t("Revoke Window Access", "收回窗口授权"))
+                .aria_label(t("Revoke Window Access", "撤销窗口授权"))
                 .flex_none()
                 .size(px(14.))
                 .flex()
@@ -985,12 +1000,15 @@ fn add_tile(
         )
 }
 
-/// What a screen shows before its first frame arrives.
-/// What stands where display `id`'s picture goes until a frame comes. A
-/// display that shares its unit number with another isn't captured
-/// (`cg::unit_twin`); say so rather than wait.
+/// What stands where display `id`'s picture goes until a frame comes, or
+/// while Screen Recording is off. A display that shares its unit number
+/// with another isn't captured (`cg::unit_twin`); say so rather than wait.
 pub fn waiting(id: DisplayId, size: f32) -> gpui::Div {
-    let text = if crate::mac::cg::unit_twin(id).is_some() {
+    let text = if !crate::mac::permissions::last().screen {
+        // A frame from before would only look live; the Viewer this
+        // opens offers the fix.
+        t("Screen Recording is off", "录屏权限已关闭")
+    } else if crate::mac::cg::unit_twin(id).is_some() {
         t(
             "macOS mixes this display up with another one, so its picture stays hidden",
             "macOS 把这块显示器和另一块混淆了，画面先隐藏",

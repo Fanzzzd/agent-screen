@@ -28,8 +28,8 @@ _Avoid_: agent, client, worker
 The `AgentScreen mcp` process an agent's client starts for one Agent Session. It tells the app who the client is and forwards the session's MCP messages; the tools run in the app, so an update reaches every session at its next call. It ends when its client closes it or exits (ADR 0021).
 _Avoid_: MCP server (the tools, in the app), proxy, bridge
 
-**Viewer**:
-The floating panel that shows one Agent Display live and lets the user operate it.
+**Viewer** (Viewer):
+The floating panel that shows one Agent Display live and lets the user operate it. Chinese copy keeps the English name.
 _Avoid_: control panel, popup, window
 
 **Peek**:
@@ -40,11 +40,11 @@ _Avoid_: preview, hover panel
 A read-only local browser page (`http://127.0.0.1:<port>/d/<token>`) that shows one live Agent Display over loopback without opening the Viewer. Each live Agent Display gets its own random token, which expires when the display ends; the page sends no input and never starts a Takeover (ADR 0019).
 _Avoid_: remote desktop, screen share, web viewer
 
-**Takeover**:
-A state of an Agent Display in which the user operates it and the owning Agent Session's input is refused. It begins with the user's first input in the Viewer, or 接手操作. It pauses any Window Authorization for that display. It ends only when the user hands control back, through the interface or an explicit instruction in the conversation that the Agent Session relays. Collapsing the Viewer, switching displays or waiting keeps it.
+**Takeover** (接手):
+A state of an Agent Display in which the user operates it and the owning Agent Session's input is refused. It begins with the user's first input in the Viewer, or Take Over (接手操作). It pauses any Window Authorization for that display. It ends only when the user hands control back, through the interface or an explicit instruction in the conversation that the Agent Session relays. Collapsing the Viewer, switching displays or waiting keeps it.
 _Avoid_: pause, lock, manual mode
 
-**Help Request**:
+**Help Request** (求助):
 An Agent Session asking the user to step in on its Agent Display, with a reason (a login, a captcha) and up to five steps. The user answers it in one of four ways: a Takeover, which answers it when they hand control back; Continue, which lets the session go on without a Takeover; a Handover of one of their windows to that display with Give; or a Reply. Only a session whose MCP server says it understands these answers is offered the last three. During a Takeover only the hand-back answers it. It also ends when the session withdraws it or the display ends (ADR 0015).
 _Avoid_: escalation, alert, ping
 
@@ -61,7 +61,7 @@ The card that drops from the menu bar icon, in the Help Card's family, when an a
 _Avoid_: report dialog, consent popup
 
 **Recording** (录制):
-A video of an Agent Display that its Agent Session asked for, with a timeline of the session's actions and the Takeovers. It ends when the session stops it, when the display ends, or after 30 minutes.
+A video of an Agent Display that its Agent Session asked for, with a timeline of the session's actions and the Takeovers. It ends when the session stops it, when the display ends, or after 30 minutes. The window that lists them is Recordings (录制列表).
 _Avoid_: capture, screencast
 
 **Keyboard Borrow** (借用键盘):
@@ -69,7 +69,7 @@ One `type` or `key` call that goes through the user's input method. For the call
 _Avoid_: focus steal, IME mode
 
 **Input Request** (申请指针和键盘):
-An Agent Session asking to use the user's own pointer and keyboard on its Agent Display, for an action that background input can't do, such as a drag in a web page of the user's browser, choosing an Electron app's menu item while a text field has focus, or a click an app took only partway in the background. It waits in the Input Queue until the user allows it, and is declined when the user answers Not Now.
+An Agent Session asking to use the user's own pointer and keyboard on its Agent Display, for an action that background input can't do, such as a drag in a web page of the user's browser, choosing an Electron app's menu item while a text field has focus, or a click an app took only partway in the background. It waits in the Input Queue until the user allows it, and is declined when the user answers Not Now. UI copy calls what it asks for "your mouse" (你的鼠标).
 _Avoid_: borrow, lease, takeover
 
 **Input Queue**:
@@ -77,7 +77,7 @@ The Input Requests of every Agent Session waiting their turn, one at a time, in 
 _Avoid_: pool, lock
 
 **Input Grant** (放行期):
-The user's permission for the Input Queue to run, including requests that arrive while it runs. It ends when the user touches the mouse or keyboard, when the queue has been idle for 30 seconds, or when no operation is waiting or running and every participating Agent Session has declared itself done. One session cannot end the others' permission.
+The user's permission for the Input Queue to run, including requests that arrive while it runs. The user ends it early with Stop (停止). It ends when the user touches the mouse or keyboard, when the queue has been idle for 30 seconds, or when no operation is waiting or running and every participating Agent Session has declared itself done. One session cannot end the others' permission.
 _Avoid_: blanket access, Takeover
 
 **Input Loan** (借出):
@@ -92,22 +92,30 @@ _Avoid_: agent cursor, ghost cursor
 Moving an app window onto or off an Agent Display. Either the Agent Session or the user can place a window. While a window sits on any virtual Agent Display, its active Placement or Handover record decides which Agent Display owns it across arrangement shifts (ADR 0018).
 _Avoid_: pull, move, send back
 
-**Handover**:
+**Handover** (交给):
 The user giving one of their own windows to an Agent Display so the Agent Session can work in it, through the interface or a conversation instruction. A Window Authorization can allow the Agent Session to do the Placement without asking again. A handed-over window keeps its return location and always returns to the user: when the Agent Session stops using its display, or when the display is dismissed. A Handover the user makes with Give, from the Viewer or the Help Card, to a display with an open Help Request answers it.
-_Avoid_: share, assign. The Viewer's button for it is labelled Give; the concept is still Handover.
+The user gets a window back with Take Back (取回); no other action is called Take Back or 取回.
+_Avoid_: share, assign. Its buttons are Give (交给) in the Viewer, Give a Window (交给它一个窗口) on the Help Card and Hand Over (交给它) on a Window Request card; the concept is still Handover.
 
 **Window Request**:
 The Agent Session asking the user for one of their windows, by app or window. The user answers Hand Over, which makes it a Handover, or Keep, and the window stays theirs. A window another Agent Session holds, on its display or a Review Display, takes the same request, and the card names the holder. Hand Over then moves it as a Placement, and the holding session is told on its next call; a Handover the holder had from the user stays one and still returns to the user (ADR 0017).
 _Avoid_: window permission, borrow
 
 **Control Request**:
-During a Takeover, the Agent Session asking the user to hand its display back, with a reason. The user answers Let … Continue, which ends the Takeover, or Keep Control, and the Takeover goes on. They can also explicitly hand control back in the conversation through the Agent Session. A request alone never ends the Takeover (ADR 0004).
+During a Takeover, the Agent Session asking the user to hand its display back, with a reason. The user answers Let … Continue, which ends the Takeover, or Keep Control (保持接手), and the Takeover goes on. They can also explicitly hand control back in the conversation through the Agent Session. A request alone never ends the Takeover (ADR 0004).
 _Avoid_: resume request, reclaim
 
-**Window Authorization**:
-The user's explicit instruction allowing an Agent Session to take a user window without another confirmation. It can cover one Placement or persist for that Agent Session, on each of its displays, for all apps or named apps. A Takeover pauses a continuing authorization; handing control back resumes it. Revoking it prevents future Placements without moving windows already handed over. It never covers a window another Agent Session holds: only the user's answer, or their words naming that window or app, move one (ADR 0017). Ending the session's last display or disconnecting the session clears it. A window the user takes back stays excluded until they explicitly authorize that window again.
+**Window Authorization** (窗口授权):
+The user's explicit instruction allowing an Agent Session to take a user window without another confirmation. It can cover one Placement or persist for that Agent Session, on each of its displays, for all apps or named apps. A Takeover pauses a continuing authorization; handing control back resumes it. Revoking it (Revoke, 撤销授权) prevents future Placements without moving windows already handed over. It never covers a window another Agent Session holds: only the user's answer, or their words naming that window or app, move one (ADR 0017). Ending the session's last display or disconnecting the session clears it. A window the user takes back stays excluded until they explicitly authorize that window again.
 _Avoid_: full access, unattended mode, blanket permission
 
 **Disposition**:
 The Agent Session's standing verdict on one of its windows: keep it for the user to review, or close it. The agent can revise it at any time; the user has the final say when dismissing the display.
 _Avoid_: cleanup flag, keep/delete mark
+
+## Copy conventions
+
+- One name per concept, in both languages, as the entries above give it.
+- In Chinese copy, "agent" follows the English casing: lowercase inside a sentence, "Agent" at its start and in the term Agent 显示器. Apps are "app".
+- Not Now (暂不) declines: the Input Request or bug report doesn't come back. Later (稍后) only puts something off: the Help Card, or Settings before setup is done.
+- Chinese quotes are “” only.

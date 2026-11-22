@@ -410,7 +410,7 @@ impl Recordings {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .child(t("Recordings", "录制回看"))
+                    .child(t("Recordings", "录制列表"))
                     .child(refresh),
             )
             .child(div().text_size(px(11.)).text_color(theme.secondary).child(
@@ -623,7 +623,7 @@ impl Recordings {
             ),
             Support::Missing => t(
                 "No pointer timeline. Video playback is available.",
-                "没有指针时间线。视频仍可播放。",
+                "无指针时间线。视频仍可播放。",
             ),
             Support::Invalid | Support::TooLarge => t(
                 "The pointer timeline is incomplete, damaged, unsupported or too large. Video playback is available.",
