@@ -18,6 +18,7 @@
 //   probe close PID ID        press the close button of PID's window ID through accessibility: "closed", "refused" or "no window"
 //   probe openmenus PID       each title of PID's menu bar whose menu is open, "title x y w h" per line
 //   probe fronts SECONDS      the front app now and at each change for SECONDS, notified or polled every 10 ms, "epoch-ms pid name" per line
+//   probe frontsources S [PID] the front app as AppKit notices, NSWorkspace, LaunchServices and WindowServer name it, polled every 5 ms for S seconds: "epoch-ms note|ns|ls|ws pid name" at each change of each; with PID, also "epoch-ms key window" as PID's focused window changes
 //   probe above PID SECONDS   every 10 ms for SECONDS, whether PID's top window on the main screen is above the front app's there: "epoch-ms above|below|apart" at each change
 //   probe main                the main display's size in points, "w h"
 //   probe tap SECONDS OUT     record scroll events at the HID level, listen only
@@ -298,6 +299,69 @@ case "fronts":
     say(note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)
   }
   Timer.scheduledTimer(withTimeInterval: 0.01, repeats: true) { _ in say(NSWorkspace.shared.frontmostApplication) }
+  RunLoop.main.run(until: Date(timeIntervalSinceNow: Double(args[2])!))
+case "frontsources":
+  // The front app as four sources name it, each at its own changes:
+  // "note" AppKit's activation notices, "ns" NSWorkspace polled, "ls"
+  // LaunchServices asked directly (as `lsappinfo front`), "ws"
+  // WindowServer's front process. Polled every 5 ms.
+  typealias FrontFn = @convention(c) (Int32) -> Unmanaged<CFTypeRef>?
+  typealias InfoFn = @convention(c) (Int32, CFTypeRef, CFString) -> Unmanaged<CFTypeRef>?
+  typealias PSNFn = @convention(c) (UnsafeMutablePointer<UInt32>) -> Int32
+  typealias PIDFn = @convention(c) (UnsafePointer<UInt32>, UnsafeMutablePointer<pid_t>) -> Int32
+  let ls = dlopen("/System/Library/Frameworks/CoreServices.framework/CoreServices", RTLD_LAZY)
+  let sky = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_LAZY)
+  let lsFront = dlsym(ls, "_LSCopyFrontApplication").map { unsafeBitCast($0, to: FrontFn.self) }
+  let lsInfo = dlsym(ls, "_LSCopyApplicationInformationItem").map { unsafeBitCast($0, to: InfoFn.self) }
+  let pidKey = dlsym(ls, "_kLSPIDKey").map { $0.assumingMemoryBound(to: CFString.self).pointee }
+  let wsFront = dlsym(sky, "_SLPSGetFrontProcess").map { unsafeBitCast($0, to: PSNFn.self) }
+  let psnPid = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "GetProcessPID").map { unsafeBitCast($0, to: PIDFn.self) }
+  // With a PID, also "key": the window number of its focused window, as
+  // Accessibility names it, in place of the name.
+  let watched = args.count > 3 ? AXUIElementCreateApplication(pid_t(args[3])!) : nil
+  if let watched { AXUIElementSetMessagingTimeout(watched, 0.1) }
+  var lastKey: CGWindowID? = nil
+  let keyWindow = { (number: CGWindowID) in
+    if number == lastKey { return }
+    lastKey = number
+    print(Int(Date().timeIntervalSince1970 * 1000), "key", number)
+    fflush(stdout)
+  }
+  var lastBy: [String: pid_t] = [:]
+  let note = { (source: String, pid: pid_t) in
+    if lastBy[source] == pid { return }
+    lastBy[source] = pid
+    let name = NSRunningApplication(processIdentifier: pid)?.localizedName ?? ""
+    print(Int(Date().timeIntervalSince1970 * 1000), source, pid, name)
+    fflush(stdout)
+  }
+  let sample = {
+    note("ns", NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0)
+    if let lsFront, let lsInfo, let pidKey, let asn = lsFront(-2)?.takeRetainedValue(),
+       let n = lsInfo(-2, asn, pidKey)?.takeRetainedValue() as? NSNumber {
+      note("ls", n.int32Value)
+    }
+    if let wsFront, let psnPid {
+      var psn: [UInt32] = [0, 0]
+      var pid: pid_t = 0
+      if wsFront(&psn) == 0, psnPid(psn, &pid) == 0 { note("ws", pid) }
+    }
+    if let watched {
+      var focused: CFTypeRef?
+      var number: CGWindowID = 0
+      if AXUIElementCopyAttributeValue(watched, "AXFocusedWindow" as CFString, &focused) == .success,
+        let window = focused
+      {
+        _ = _AXUIElementGetWindow(window as! AXUIElement, &number)
+      }
+      keyWindow(number)
+    }
+  }
+  sample()
+  NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { n in
+    note("note", (n.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.processIdentifier ?? 0)
+  }
+  Timer.scheduledTimer(withTimeInterval: 0.005, repeats: true) { _ in sample() }
   RunLoop.main.run(until: Date(timeIntervalSinceNow: Double(args[2])!))
 case "above":
   // Window order on the main screen, front to back: PID's topmost normal

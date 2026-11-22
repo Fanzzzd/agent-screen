@@ -1681,6 +1681,9 @@ impl Worker {
         } else if self.focused == Some(target) && self.focused_at == activations() {
             return;
         }
+        // Nor does it go there: AppKit in the app would take it for its
+        // app's activation (#273).
+        let record = agent_screen_model::shared_app::focus_record_needed(before, target.window_id);
         // A window of an app in the background becomes key on a click and
         // drops that click: a new window, or any once the front app has
         // changed. Spend one where nothing is pressed, unless it had one
@@ -1692,13 +1695,17 @@ impl Worker {
                 title_bar_point(target, bounds).or_else(|| beside(target, bounds))
             });
             if let Some(at) = at {
-                log::debug!("input: waking {target:?} at {at:?}");
-                self.wake_at(target, at);
+                log::debug!("input: waking {target:?} at {at:?}, focus record {record}");
+                self.wake_at(target, at, record);
                 return;
             }
             log::debug!("input: no empty title bar to wake {target:?}");
         }
-        self.send_focus(target);
+        if record {
+            self.send_focus(target);
+        } else {
+            self.mark_focused(target);
+        }
     }
 
     fn send_focus(&mut self, target: WindowTarget) {
@@ -1709,6 +1716,11 @@ impl Worker {
         if accepted {
             thread::sleep(Duration::from_millis(50));
         }
+        self.mark_focused(target);
+    }
+
+    /// `target` is the window keys go to from now on.
+    fn mark_focused(&mut self, target: WindowTarget) {
         self.focused = Some(target);
         self.focused_at = activations();
     }
@@ -1757,29 +1769,15 @@ impl Worker {
                 HandBack::Leave => continue,
                 HandBack::Restore => {}
             }
-            // A focus record, which doesn't bring the app forward. Electron
-            // may take it and still keep the agent's window key, as after
-            // a wake click it asked to be activated by: then make the
-            // user's window main through accessibility, as their click
+            // The agent's window is key here: a focus record would move
+            // nothing and only tell the app it became active (#273). Make
+            // the user's window main through accessibility, as their click
             // would, so switching back to the app lands in it.
-            let recorded = unsafe { SSFocusWithoutRaise(window.pid, window.window_id) };
-            if recorded {
-                thread::sleep(Duration::from_millis(50));
-            }
-            let after = super::ax::focused_window_id(window.pid);
-            // A Chromium app names the user's window as focused either way:
-            // there the agent's window must also have stopped being main.
-            let agent_still_main = agent_main && agent.and_then(super::ax::is_main).unwrap_or(true);
+            let main = super::ax::make_main(window);
             log::debug!(
-                "input: focus back to {window:?} from {now:?}: focus record {recorded}, focused now {after:?}, agent's window still main {agent_still_main}"
+                "input: focus back to {window:?} from {now:?}: made main through accessibility {main}, focused now {:?}",
+                super::ax::focused_window_id(window.pid)
             );
-            if after != Some(window.window_id) || agent_still_main {
-                let main = super::ax::make_main(window);
-                log::debug!(
-                    "input: {window:?} made main through accessibility: {main}, focused now {:?}",
-                    super::ax::focused_window_id(window.pid)
-                );
-            }
         }
     }
 
@@ -2174,11 +2172,20 @@ impl Worker {
     /// on a click, and drops that click.
     fn wake(&mut self, target: WindowTarget, bounds: Rect) {
         let middle = (bounds.x + bounds.width / 2.0, bounds.y + 6.0);
-        self.wake_at(target, title_bar_point(target, bounds).unwrap_or(middle));
+        self.wake_at(
+            target,
+            title_bar_point(target, bounds).unwrap_or(middle),
+            true,
+        );
     }
 
-    fn wake_at(&mut self, target: WindowTarget, at: (f64, f64)) {
-        self.send_focus(target);
+    /// The click, after a focus record when `record`.
+    fn wake_at(&mut self, target: WindowTarget, at: (f64, f64), record: bool) {
+        if record {
+            self.send_focus(target);
+        } else {
+            self.mark_focused(target);
+        }
         self.woken = Some((target.window_id, activations()));
         let group = self.next_group();
         let none = CGEventFlags::empty();

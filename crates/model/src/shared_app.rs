@@ -397,6 +397,20 @@ pub fn user_window_to_remember(focused: Option<u32>, on_agent_display: bool) -> 
     focused.filter(|_| !on_agent_display)
 }
 
+/// Whether a focus record may go to `target`, a window of an app in the
+/// background whose key window is `key`, as far as anyone can tell.
+///
+/// The record is AppKit's "application activated" event. AppKit in the
+/// app takes it for its app becoming active, posts that to the app, and
+/// Electron apps report it as `did-become-active`, though WindowServer
+/// keeps the user's app in front (#273). It only makes a window key that
+/// is its app's key window already, or may be: when another window of the
+/// app is key, a click or accessibility moves key status, and the record
+/// would be only an activation the app hears about.
+pub fn focus_record_needed(key: Option<u32>, target: u32) -> bool {
+    key.is_none_or(|key| key == target)
+}
+
 /// What to do with a remembered user window once the agent's input is
 /// done, by the app's focused window now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -791,5 +805,21 @@ mod tests {
         // A window the user picked since stays theirs.
         assert_eq!(hand_back(7, Some(8), false, true), HandBack::Leave);
         assert_eq!(hand_back(7, None, false, true), HandBack::Retry);
+    }
+
+    #[test]
+    fn no_focus_record_while_another_window_of_the_app_is_key() {
+        // The user's window 7 is key in the background app: waking the
+        // agent's window 9, or handing focus back to 7 while 9 is key.
+        assert!(!focus_record_needed(Some(7), 9));
+        assert!(!focus_record_needed(Some(9), 7));
+    }
+
+    #[test]
+    fn a_focus_record_still_goes_to_the_key_window_or_when_none_is_known() {
+        // Key already, as before the front app changed since.
+        assert!(focus_record_needed(Some(9), 9));
+        // The app didn't say, as a new window or a hung app.
+        assert!(focus_record_needed(None, 9));
     }
 }
