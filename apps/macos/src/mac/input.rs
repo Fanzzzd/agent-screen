@@ -2262,10 +2262,7 @@ impl Worker {
             .iter()
             .filter(|h| within.contains(h.bounds.mid()))
             .collect();
-        let cached = self
-            .focused
-            .and_then(|t| list.iter().find(|h| h.host == t || h.target == t))
-            .filter(|h| within.intersects(&h.bounds));
+        let cached = focused_hit(&list, self.focused).filter(|h| within.intersects(&h.bounds));
         // Documents only: a suggestions popup or panel is no new window.
         let opened = cached.and_then(|c| {
             on.iter()
@@ -2276,7 +2273,6 @@ impl Worker {
                 })
                 .map(|h| **h)
         });
-        let cached = cached.copied();
         self.known = on
             .iter()
             .filter(|h| h.layer == 0)
@@ -2370,6 +2366,24 @@ impl Worker {
         }
         topmost_hit_in(&self.cache.as_ref()?.0, at)
     }
+}
+
+/// The hit of the window keys last went to, as it takes keys: a popover
+/// whose arrow was clicked is the app's window, not the view that draws
+/// its content (#306). A file panel takes them by its app's window.
+fn focused_hit(hits: &[Hit], focused: Option<WindowTarget>) -> Option<Hit> {
+    let focused = focused?;
+    let hit = hits
+        .iter()
+        .find(|h| h.host == focused || h.target == focused)?;
+    Some(match hit.content {
+        Some(_) if hit.target != focused => Hit {
+            target: hit.host,
+            content: None,
+            ..*hit
+        },
+        _ => *hit,
+    })
 }
 
 fn topmost_hit_in(hits: &[Hit], at: (f64, f64)) -> Option<Hit> {
@@ -2863,29 +2877,32 @@ fn mark_panels_using(
     popup_menu: i64,
     is_remote: impl Fn(i32) -> bool,
 ) {
-    use agent_screen_model::remote_view;
-    for hit in list {
-        if is_remote(hit.target.pid) {
-            continue;
-        }
-        let (index, views): (Vec<usize>, Vec<(Rect, i64)>) = panels
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| p.target.pid != hit.target.pid)
-            .map(|(i, p)| (i, (p.bounds, p.layer)))
-            .unzip();
-        // An open menu keeps its own routing (#207).
-        let allow_inset = hit.layer != popup_menu;
-        let Some((i, fit)) = remote_view::pick(hit.bounds, hit.layer, &views, allow_inset) else {
+    use agent_screen_model::remote_view::{self, Host};
+    let remote: Vec<bool> = list.iter().map(|h| is_remote(h.target.pid)).collect();
+    let hosts: Vec<Host> = list
+        .iter()
+        .map(|h| Host {
+            frame: h.bounds,
+            layer: h.layer,
+            // An open menu keeps its own routing (#207).
+            allow_inset: h.layer != popup_menu,
+        })
+        .collect();
+    let views: Vec<(Rect, i64)> = panels.iter().map(|p| (p.bounds, p.layer)).collect();
+    let fits = remote_view::assign(&hosts, &views, |h, v| {
+        !remote[h] && panels[v].target.pid != list[h].target.pid
+    });
+    for (hit, fit) in list.iter_mut().zip(fits) {
+        let Some((v, fit)) = fit else {
             continue;
         };
-        let target = panels[index[i]].target;
+        let target = panels[v].target;
         if fit == remote_view::Fit::Inset {
             log::debug!(
                 "input: popover {:?} drawn by remote view {target:?}",
                 hit.host
             );
-            hit.content = Some(views[i].0);
+            hit.content = Some(views[v].0);
         }
         hit.target = target;
     }
@@ -3574,6 +3591,83 @@ mod popover_routing_tests {
                 .content
                 .is_none()
         );
+    }
+
+    #[test]
+    fn a_click_on_a_window_covering_the_popover_stays_on_that_window() {
+        const COVER: WindowTarget = WindowTarget {
+            pid: 300,
+            window_id: 70,
+        };
+        // Slightly larger than the popover, above it, and inside the inset
+        // rule's 40 pt of the Share content.
+        let cover = Rect::new(990.0, 190.0, 340.0, 400.0);
+        let list = hit_list(
+            vec![window(COVER, cover, 0), window(FINDER, POPOVER, 0)],
+            vec![window(SHARING, CONTENT, 3)],
+            24,
+            25,
+            101,
+            |p| p == SHARING.pid,
+        );
+        assert_eq!(list[0].target, COVER);
+        assert_eq!(list[0].content, None);
+        assert_eq!(list[1].target, SHARING);
+        assert_eq!(list[1].content, Some(CONTENT));
+        assert_eq!(
+            topmost_hit_in(&list, (1100.0, 300.0)).map(|h| h.target),
+            Some(COVER)
+        );
+        // A file panel's exact window still gets its panel.
+        let list = hit_list(
+            vec![window(COVER, cover, 0), window(FINDER, POPOVER, 0)],
+            vec![window(SHARING, POPOVER, 0)],
+            24,
+            25,
+            101,
+            |p| p == SHARING.pid,
+        );
+        assert_eq!(list[0].target, COVER);
+        assert_eq!(list[1].target, SHARING);
+        assert_eq!(list[1].content, None);
+    }
+
+    #[test]
+    fn keys_after_a_click_on_the_arrow_go_to_finder() {
+        let list = [popover_hit(0, |p| p == SHARING.pid)];
+        // The click focuses what it hit, and the popover stays open.
+        let clicked = topmost_hit_in(&list, (1100.0, 205.0)).unwrap().target;
+        assert_eq!(clicked, FINDER);
+        let keys = focused_hit(&list, Some(clicked)).unwrap();
+        assert_eq!(keys.target, FINDER);
+        assert_eq!(keys.host, FINDER);
+        assert!(!keys.needs_wake(&[]));
+    }
+
+    #[test]
+    fn keys_after_a_click_on_the_content_go_to_sharing() {
+        let list = [popover_hit(0, |p| p == SHARING.pid)];
+        let clicked = topmost_hit_in(&list, (1100.0, 300.0)).unwrap().target;
+        assert_eq!(clicked, SHARING);
+        let keys = focused_hit(&list, Some(clicked)).unwrap();
+        assert_eq!(keys.target, SHARING);
+        assert_eq!(keys.host, FINDER);
+        assert_eq!(keys.content, Some(CONTENT));
+        assert!(!keys.needs_wake(&[]));
+    }
+
+    #[test]
+    fn keys_after_focusing_a_file_panels_app_window_go_to_the_panel() {
+        let list = hit_list(
+            vec![window(FINDER, POPOVER, 0)],
+            vec![window(SHARING, POPOVER, 0)],
+            24,
+            25,
+            101,
+            |p| p == SHARING.pid,
+        );
+        assert_eq!(focused_hit(&list, Some(FINDER)).unwrap().target, SHARING);
+        assert!(focused_hit(&list, None).is_none());
     }
 
     #[test]

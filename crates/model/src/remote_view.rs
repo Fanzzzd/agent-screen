@@ -84,6 +84,67 @@ pub fn pick(
     best.map(|(i, _)| (i, Fit::Inset))
 }
 
+/// A window that may host another process's view: its frame, layer, and
+/// whether an Inset fit counts (not for an open menu, #207).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Host {
+    pub frame: Rect,
+    pub layer: i64,
+    pub allow_inset: bool,
+}
+
+/// Which view draws each of `hosts`, listed front to back: `pick` among
+/// the views `eligible(host, view)` allows, then each view kept by one
+/// claim. Every Exact claim keeps its view, and a view with one gives no
+/// Inset. Of several Inset claims on one view, the tightest fit keeps it,
+/// and on a tie the host lowest in the list: a slightly larger window
+/// above a popover covers it, and is not its host (#306). A host that
+/// loses keeps its own input.
+pub fn assign(
+    hosts: &[Host],
+    views: &[(Rect, i64)],
+    eligible: impl Fn(usize, usize) -> bool,
+) -> Vec<Option<(usize, Fit)>> {
+    let claims: Vec<Option<(usize, Fit)>> = hosts
+        .iter()
+        .enumerate()
+        .map(|(h, host)| {
+            let (index, own): (Vec<usize>, Vec<(Rect, i64)>) = views
+                .iter()
+                .enumerate()
+                .filter(|&(v, _)| eligible(h, v))
+                .map(|(v, &view)| (v, view))
+                .unzip();
+            pick(host.frame, host.layer, &own, host.allow_inset).map(|(i, fit)| (index[i], fit))
+        })
+        .collect();
+    let gap = |h: usize, v: usize| -> f64 {
+        gaps(hosts[h].frame, views[v].0)
+            .iter()
+            .map(|g| g.max(0.0))
+            .sum()
+    };
+    let mut owner: Vec<Option<usize>> = vec![None; views.len()];
+    for (h, claim) in claims.iter().enumerate() {
+        let Some((v, Fit::Inset)) = *claim else {
+            continue;
+        };
+        let exact = claims.contains(&Some((v, Fit::Exact)));
+        // `<=`: a later host is lower, and wins a tie.
+        if !exact && owner[v].is_none_or(|o| gap(h, v) <= gap(o, v)) {
+            owner[v] = Some(h);
+        }
+    }
+    claims
+        .iter()
+        .enumerate()
+        .map(|(h, claim)| match *claim {
+            Some((v, Fit::Inset)) if owner[v] != Some(h) => None,
+            other => other,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,6 +201,44 @@ mod tests {
         );
         assert_eq!(pick(HOST, 0, &[gap30, gap10], true), Some((1, Fit::Inset)));
         assert_eq!(pick(HOST, 0, &[gap30, gap10], false), None);
+    }
+
+    fn host(frame: Rect) -> Host {
+        Host {
+            frame,
+            layer: 0,
+            allow_inset: true,
+        }
+    }
+
+    #[test]
+    fn covering_window_above_a_popover_does_not_take_its_view() {
+        let view = (Rect::new(1000.0, 213.0, 320.0, 367.0), 3);
+        let cover = host(Rect::new(990.0, 195.0, 340.0, 395.0));
+        let popover = host(HOST);
+        assert_eq!(
+            assign(&[cover, popover], &[view], |_, _| true),
+            vec![None, Some((0, Fit::Inset))]
+        );
+        // Same frame: the window above covers the popover.
+        assert_eq!(
+            assign(&[popover, popover], &[view], |_, _| true),
+            vec![None, Some((0, Fit::Inset))]
+        );
+    }
+
+    #[test]
+    fn exact_claim_keeps_its_view_from_inset_claims() {
+        let panel = (HOST, 0);
+        let around = host(Rect::new(995.0, 195.0, 330.0, 390.0));
+        assert_eq!(
+            assign(&[around, host(HOST)], &[panel], |_, _| true),
+            vec![None, Some((0, Fit::Exact))]
+        );
+        assert_eq!(
+            assign(&[around, host(HOST)], &[panel], |h, _| h == 0),
+            vec![Some((0, Fit::Inset)), None]
+        );
     }
 
     #[test]
