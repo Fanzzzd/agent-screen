@@ -274,6 +274,9 @@ pub const SCRIPTS: &[Script] = &[
     script("diaqueue", &[AgentInput, Browser, InputQueue], Full, Agent, 1)
         .hands_off()
         .manual("it drives your own Dia: run it with E2E_DIA=1 from another app; it brings Dia forward twice for a few seconds"),
+    script("diarealclick", &[InputQueue, AgentInput, Browser], Full, Real, 1)
+        .hands_off()
+        .manual("it drives your own Dia: run it with E2E_DIA=1; it moves your pointer twice and brings Dia forward twice"),
     script("diashared", &[AgentInput, Browser], Full, Agent, 1)
         .user_acts("Keep typing in your Dia window / 请在你的 Dia 窗口里继续打字")
         .manual(
@@ -321,6 +324,7 @@ pub const SCRIPTS: &[Script] = &[
     script("placesize", &[Windows], Core, Agent, 1),
     script("pointer", &[Viewer], Full, Hook, 2)
         .manual("it records the Agent Pointer to judge by eye and checks nothing"),
+    script("realfront", &[InputQueue, AgentInput, Browser], Full, Real, 1).hands_off(),
     script("realclick", &[InputQueue, AgentInput], Core, Real, 1).hands_off(),
     script("realdrag", &[InputQueue], Full, Real, 1).hands_off(),
     script("recording", &[Recording], Core, Hook, 1),
