@@ -442,8 +442,13 @@ pub async fn configure<T: Send + 'static>(job: impl FnOnce() -> T + Send + 'stat
         std::thread::Builder::new()
             .name("agent-screen-displays".into())
             .spawn(move || {
+                // A job that panics loses only its own answer: the jobs
+                // after it still run (#288). Its caller hears the panic as
+                // the job ending without one.
                 for job in receive {
-                    job();
+                    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)).is_err() {
+                        log::error!("display job panicked; the display thread goes on");
+                    }
                 }
             })
             .expect("display thread");
@@ -454,7 +459,7 @@ pub async fn configure<T: Send + 'static>(job: impl FnOnce() -> T + Send + 'stat
         let _ = done.send(job());
     });
     let _ = worker.lock().unwrap_or_else(|e| e.into_inner()).send(job);
-    result.await.expect("display thread ended")
+    result.await.expect("display job panicked")
 }
 
 /// Why no display came of a creation.
@@ -650,8 +655,17 @@ pub fn extend_new_displays() -> Extending {
         *holds += 1;
         return Extending(true);
     }
+    let held = hold_extend();
+    if held {
+        *holds = 1;
+    }
+    Extending(held)
+}
+
+/// Set the extend policy and record this process as its holder.
+fn hold_extend() -> bool {
     let Some(me) = this_holder() else {
-        return Extending(false);
+        return false;
     };
     let extended = with_policy(true, |hold, system| {
         connect_policy::extend(hold, &me, system)
@@ -666,11 +680,17 @@ pub fn extend_new_displays() -> Extending {
         Some(Extend::Unsaved) => log::warn!("couldn't record the TV connect policy; left as it is"),
         _ => {}
     }
-    let held = extended.is_some_and(Extend::held);
-    if held {
-        *holds = 1;
+    extended.is_some_and(Extend::held)
+}
+
+/// After a panic the app lived through: the hook set the policy back while
+/// another thread's `Extending` still holds it, and later displays would
+/// only count on it (#288). Hold it again while any does.
+pub fn hold_again_after_panic() {
+    let holds = HOLDS.lock().unwrap_or_else(|e| e.into_inner());
+    if *holds > 0 && !hold_extend() {
+        log::warn!("couldn't hold the extend policy again after a panic");
     }
-    Extending(held)
 }
 
 impl Drop for Extending {

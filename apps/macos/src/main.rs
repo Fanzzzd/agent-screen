@@ -448,9 +448,24 @@ fn main() {
         mac::claims::delete();
         web::delete_state();
         log::logger().flush();
+        // A panic off the main thread may unwind and leave the app running,
+        // as one on a thread of ours or in a tokio task does. The main
+        // thread then puts back what this cleanup took (#288); after an
+        // abort it never runs.
+        // SAFETY: pthread_main_np has no preconditions.
+        if unsafe { libc::pthread_main_np() } == 0 {
+            mac::native::main_async(|| {
+                log::warn!("the app lives on after a panic: claims and state written again");
+                mac::claims::republish();
+                web::restore_state();
+                mac::display::hold_again_after_panic();
+            });
+        }
     }));
     // An app that died making a display left new displays extending.
     mac::display::restore_connect_policy();
+    // One killed, or crashed past the panic hook, left its claim file.
+    mac::claims::sweep_dead();
     log::debug!("language: {:?}", i18n::lang());
     // An update brings a newer skill: the copies `mcp install` wrote follow.
     std::thread::spawn(|| {

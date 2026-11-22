@@ -8,6 +8,7 @@ pub mod endpoint;
 pub mod host;
 pub mod install;
 pub mod ledger;
+pub mod line;
 pub mod pipe;
 pub mod process;
 pub mod report;
