@@ -31,8 +31,9 @@
 //!
 //! The script clicks each control through the agent's `click`, presses and
 //! clicks them through `elementAction`, clicks the field and types, opens
-//! the select by click and picks an item by click, then by focus and
-//! type-ahead, then opens it and types, which only moves the menu's
+//! the select by click and picks an item by click, then by set_value,
+//! which types the title into the closed select with no pipe and no menu,
+//! then by focus and type-ahead, then opens it and types, which only moves the menu's
 //! highlight and says so, and picks with Return. A click right after each
 //! choice must go out, as the chosen menu fades out rather than being
 //! closed by the user. It records which events each route delivered. The
@@ -600,6 +601,29 @@ fn test(port: u16, log: &Log) -> Result<()> {
                 let r = act(n, action, None);
                 let ev = wait_for(log, from, |ev| has(ev, wanted));
                 report(&format!("elementAction {action} {label}"), &r, &ev);
+                // A press is truthful (#219): it fails, or the page got
+                // it. One that went in as a background click, on an element
+                // that lists no AXPress, reached the page as a trusted
+                // click.
+                if action == "press" {
+                    let posted = r
+                        .as_ref()
+                        .ok()
+                        .and_then(|v| v["note"].as_str())
+                        .is_some_and(|n| n.contains("background click"));
+                    check(
+                        &format!("a press on the {label} control that succeeds reached the page"),
+                        r.is_err() || has(&ev, wanted),
+                        format!("{} | {ev:?}", said(&r)),
+                    );
+                    check(
+                        &format!(
+                            "a press on the {label} control that says it went in as a click is one"
+                        ),
+                        !posted || has(&ev, &format!("click {label} trusted=true")),
+                        format!("{} | {ev:?}", said(&r)),
+                    );
+                }
                 if action == "click" {
                     check(
                         &format!(
@@ -664,30 +688,38 @@ fn test(port: u16, log: &Log) -> Result<()> {
             next.is_ok() && has(&ev, "plain acted"),
             format!("{} | {ev:?}", said(&next)),
         );
+        // With no pipe to this Chrome, set_value types the title into the
+        // closed select: no menu opens (#219).
         let from = mark(log);
         let set = act(sel_n, "set_value", Some("Development"));
-        let ev = since(log, from);
+        let ev = wait_for(log, from, |ev| {
+            ev.iter().any(|e| e.ends_with("|Development"))
+        });
+        let menus = probe(&["windows", &pid.to_string()])
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| l.contains("\"layer\":101"))
+            .count();
         report("select set_value", &set, &ev);
         check(
-            "set_value, with no pipe to this Chrome, fails and says to open the menu with a click",
-            set.as_ref()
-                .err()
-                .is_some_and(|e| e.to_string().contains("click the select")),
-            said(&set),
+            "set_value, with no pipe to this Chrome, chooses by type-ahead into the closed select, with no menu",
+            set.is_ok()
+                && ev.iter().any(|e| e.ends_with("|Development"))
+                && has(&ev, "change sel trusted=true")
+                && menus == 0,
+            format!("{} | {menus} menu windows | {ev:?}", said(&set)),
         );
         let from = mark(log);
         let focused = act(sel_n, "focus", None);
         let typed = control.call(
             "type",
-            json!({ "sessionKey": KEY, "displayId": id, "text": "Dev" }),
+            json!({ "sessionKey": KEY, "displayId": id, "text": "Pre" }),
         );
-        let ev = wait_for(log, from, |ev| {
-            ev.iter().any(|e| e.ends_with("|Development"))
-        });
+        let ev = wait_for(log, from, |ev| ev.iter().any(|e| e.ends_with("|Preview")));
         report("select focus + type", &typed, &ev);
         check(
             "focus and type-ahead choose a select item",
-            ev.iter().any(|e| e.ends_with("|Development")),
+            ev.iter().any(|e| e.ends_with("|Preview")),
             format!("focus {} | type {} | {ev:?}", said(&focused), said(&typed)),
         );
         // With its menu open, typed text moves the menu's highlight and

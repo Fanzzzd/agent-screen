@@ -629,6 +629,28 @@ fn a_click_refused_for_changing_content_counts_its_repeats() {
 }
 
 #[test]
+fn a_retried_element_action_finds_its_queued_click_even_past_the_operation_cut() {
+    let mut input = InputQueue::default();
+    input.register(1, &owner(1));
+    let a = input.owner(1, 1).unwrap();
+    let front = Front {
+        method: "click".into(),
+        params: serde_json::json!({ "displayId": 1, "x": 10, "y": 20 }),
+        pid: 42,
+        app: "Dia".into(),
+        look: None,
+    };
+    // A set_value-sized call, longer than the queue keeps of an operation.
+    let operation = format!("elementAction {}", "x".repeat(4000));
+    assert_eq!(input.retry_front(&a, &operation), None);
+    let id = input
+        .submit_front(a.clone(), operation.clone(), "Press in Dia".into(), front)
+        .unwrap();
+    assert_eq!(input.retry_front(&a, &operation), Some(id));
+    assert_eq!(input.retry_front(&a, "elementAction {}"), None);
+}
+
+#[test]
 fn a_front_request_runs_when_its_app_leaves_the_front_without_asking() {
     let mut input = InputQueue::default();
     input.register(1, &owner(1));

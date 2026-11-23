@@ -10,7 +10,7 @@
 //! route, while the agent's call waits. A call that waits too long answers
 //! `input_pending`; the same call again, or `input_queue wait`, waits on.
 
-use super::agent::{Args, display, replay, target};
+use super::agent::{Args, display, own_windows, replay, target};
 use super::off;
 use super::server::{ControlError, Reply};
 use crate::core::Core;
@@ -18,6 +18,7 @@ use crate::input_queue::{Front, Look};
 use crate::model::DisplayId;
 use agent_screen_model::input_queue::{RequestId, Status, Stop};
 use agent_screen_model::real_click;
+use agent_screen_model::shared_app::bound_click_reaches;
 use gpui::{AsyncApp, Entity};
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -49,13 +50,16 @@ fn wait_limit() -> Duration {
 
 /// `first`, the reply of a click, key or type call: unless the user's
 /// front app refused it before anything was sent, as it is. Else the
-/// action is queued, and this waits for it to run.
+/// action is queued, and this waits for it to run. `operation` names the
+/// call a retry repeats, when it isn't `method` with `p`, as for an
+/// element action that waits as a click (`rejoin`).
 pub async fn queue_if_blocked(
     core: &Entity<Core>,
     connection: u64,
     method: &str,
     p: &Args<'_>,
     first: Reply,
+    operation: Option<String>,
     cx: &mut AsyncApp,
 ) -> Reply {
     let why = match &first {
@@ -83,7 +87,7 @@ pub async fn queue_if_blocked(
             Some(look) => Some(look),
             None => {
                 return Err(ControlError::failed(format!(
-                    "{}. The click can't wait for the user to leave {app}: Agent Screen couldn't capture what is under its point to compare before it runs. Take a screenshot and try again.",
+                    "{}. The click can't wait for the user to leave {app}: Agent Screen couldn't capture what is under its point to compare before it runs, or the window there isn't the element's own. Take a screenshot and try again.",
                     why.trim_end_matches('.')
                 )));
             }
@@ -91,7 +95,7 @@ pub async fn queue_if_blocked(
         _ => None,
     };
     let params = Value::Object(p.0.clone());
-    let operation = format!("{method} {params}");
+    let operation = operation.unwrap_or_else(|| format!("{method} {params}"));
     let reason = format!(
         "{} in {app} once the user's window there no longer has focus",
         verb(method)
@@ -113,6 +117,35 @@ pub async fn queue_if_blocked(
     run(core, connection, id, request, &why, cx).await
 }
 
+/// The same call as one that waits in the Input Queue, or ran from it
+/// after the call answered `input_pending`: wait on that request or read
+/// what came of it, so the action never goes out twice. None when no such
+/// request is kept: the call runs as new.
+pub async fn rejoin(
+    core: &Entity<Core>,
+    connection: u64,
+    id: DisplayId,
+    operation: &str,
+    cx: &mut AsyncApp,
+) -> Option<Reply> {
+    let request = core.read_with(cx, |c, _| {
+        let owner = c.input_queue.owner(id, connection).ok()?;
+        c.input_queue.retry_front(&owner, operation)
+    })?;
+    core.update(cx, |c, _| c.input_queue.attach(request));
+    Some(
+        run(
+            core,
+            connection,
+            id,
+            request,
+            "The action waits for the user's window of its app to lose focus",
+            cx,
+        )
+        .await,
+    )
+}
+
 /// The agent acted on display `id` another way: its waiting front request
 /// no longer applies.
 pub fn replaced_by(core: &Entity<Core>, connection: u64, id: DisplayId, cx: &mut AsyncApp) {
@@ -128,8 +161,17 @@ pub fn replaced_by(core: &Entity<Core>, connection: u64, id: DisplayId, cx: &mut
 /// region around the point and its pixels, to compare before it runs.
 async fn look_at(core: &Entity<Core>, p: &Args<'_>, cx: &mut AsyncApp) -> Option<Look> {
     let (id, at) = target(core, p, cx).await.ok()?;
+    let own = own_windows(p);
     off(cx, move || {
-        let (window, frame) = crate::mac::input::window_at(at)?;
+        // An element action's click: the window kept, and later compared,
+        // is the one that hosts what is at the point, by the rule the
+        // click's mouse-down checks, and must be the element's own, or the
+        // click doesn't wait.
+        let (window, frame) = match &own {
+            Some(own) => crate::mac::input::host_at(at)
+                .filter(|(w, _)| bound_click_reaches(Some(w.window_id), own))?,
+            None => crate::mac::input::window_at(at)?,
+        };
         let area = crate::mac::cg::display_bounds(id);
         let region = real_click::look_region(at, area, frame, None);
         let samples = crate::mac::screenshot::samples(id, region).ok()?;
@@ -137,6 +179,7 @@ async fn look_at(core: &Entity<Core>, p: &Args<'_>, cx: &mut AsyncApp) -> Option
             display: id,
             at,
             window,
+            by_host: own.is_some(),
             region,
             samples,
         })
@@ -149,7 +192,12 @@ async fn look_at(core: &Entity<Core>, p: &Args<'_>, cx: &mut AsyncApp) -> Option
 async fn look_kept(look: &Look, cx: &mut AsyncApp) -> bool {
     let look = look.clone();
     off(cx, move || {
-        crate::mac::input::window_at(look.at).is_some_and(|(window, _)| window == look.window)
+        let now = if look.by_host {
+            crate::mac::input::host_at(look.at)
+        } else {
+            crate::mac::input::window_at(look.at)
+        };
+        now.is_some_and(|(window, _)| window == look.window)
             && crate::mac::screenshot::samples(look.display, look.region)
                 .is_ok_and(|now| real_click::looks_same(&look.samples, &now))
     })

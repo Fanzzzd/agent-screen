@@ -5,9 +5,10 @@
 //! Titles with a space, a repeated key and CJK are chosen; the title the
 //! select shows already sends nothing; a title no option has fails and says
 //! so. Selects in a frame from another site, out of the pipe's reach, are
-//! refused before any key, as typing into a web select could open its
-//! menu. The page writes what it holds and its event counts into its title:
-//! tests/e2e/fixtures/web/selects.html.
+//! chosen by type-ahead into the closed select (#219): a title with a space
+//! is refused before any key, and a change handler that moves focus stops
+//! the keys. The page writes what it holds and its event counts into its
+//! title: tests/e2e/fixtures/web/selects.html.
 //!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e selectvalue
 //!
@@ -165,9 +166,11 @@ fn test(browser: &str) -> Result<()> {
             format!("{missing:?}; {shown}"),
         );
         // The selects in the other site's frame are out of the pipe's
-        // reach, and typing into a web select could open its menu: each is
-        // refused before any key, and the zip field the country's change
-        // handler would focus stays empty.
+        // reach: set_value types the title into the closed select, as
+        // type-ahead, with no menu (#219). A title with a space is refused
+        // before any key, since a space opens the menu. The country's
+        // change handler focuses the zip field, which stops the keys, so
+        // the field stays empty.
         let framed = |name: &str| -> Result<i64> {
             let tree = call("windowState", json!({}))?["tree"]
                 .as_str()
@@ -178,31 +181,49 @@ fn test(browser: &str) -> Result<()> {
                 .with_context(|| format!("no {name} select in\n{tree}"))?;
             Ok(found[1].parse()?)
         };
-        for (name, value) in [
-            ("Town", "United States"),
-            ("Town", "11"),
-            ("Country", "Blueberry"),
-        ] {
-            let before = title()?;
-            let refused = call(
+        let in_frame = |name: &str, value: &str| -> Result<Result<Value>> {
+            let result = call(
                 "elementAction",
                 json!({ "element": framed(name)?, "action": "set_value", "value": value }),
             );
             sleep_ms(300);
-            let after = title()?;
-            let open = menus();
-            check(
-                &format!("{name} {value:?} in another site's frame is refused before any key"),
-                refused.as_ref().err().is_some_and(|e| {
-                    let e = format!("{e:#}");
-                    e.contains("out of its reach") && e.contains("nothing was sent")
-                }) && after == before
-                    // The browser trims the title's trailing space.
-                    && after.trim_end().ends_with(" zip=")
-                    && open == 0,
-                format!("{refused:?}; {before} -> {after}; menus open {open}"),
-            );
-        }
+            Ok(result)
+        };
+        let before = title()?;
+        let spaced = in_frame("Town", "United States")?;
+        let after = title()?;
+        let open = menus();
+        check(
+            "a title with a space in another site's frame is refused before any key",
+            spaced.as_ref().err().is_some_and(|e| {
+                let e = format!("{e:#}");
+                e.contains("never types one") && e.contains("Nothing was sent")
+            }) && after == before
+                && open == 0,
+            format!("{spaced:?}; {before} -> {after}; menus open {open}"),
+        );
+        let typed = in_frame("Town", "Uruguay")?;
+        let after = title()?;
+        let open = menus();
+        check(
+            "a select in another site's frame is chosen by type-ahead with no menu",
+            typed.is_ok() && after.contains("| Uruguay ") && open == 0,
+            format!("{typed:?}; {after}; menus open {open}"),
+        );
+        let jumped = in_frame("Country", "Blueberry")?;
+        let after = title()?;
+        let open = menus();
+        check(
+            "focus moving to the zip field mid-title stops the keys, and the field gets none",
+            jumped
+                .as_ref()
+                .err()
+                .is_some_and(|e| format!("{e:#}").contains("took key focus"))
+                // The browser trims the title's trailing space.
+                && after.trim_end().ends_with(" zip=")
+                && open == 0,
+            format!("{jumped:?}; {after}; menus open {open}"),
+        );
         Ok(())
     })();
     // Close the browser before its display ends.

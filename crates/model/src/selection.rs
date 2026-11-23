@@ -38,15 +38,66 @@ pub fn popup_title_is_safe(title: &str) -> bool {
             .any(|c| c.is_control() || ('\u{f700}'..='\u{f747}').contains(&c))
 }
 
-/// Which closed pop-ups Agent Screen types into: only an AppKit app's
-/// pop-up button, where a typed letter can't open the menu. A web page's
-/// select is chosen through a Chromium app's DevTools pipe or not at all,
-/// and another toolkit's pop-up gets no key: an open menu takes the user's
-/// keyboard (ADR 0001).
+/// Which closed pop-ups Agent Screen types into: an AppKit app's pop-up
+/// button and a Chromium page's select, where a typed letter can't open
+/// the menu. Another toolkit's pop-up gets no key: an open menu takes the
+/// user's keyboard (ADR 0001).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PopupKind {
     AppKit,
+    /// A select in a Chromium app's page, without the DevTools pipe
+    /// (`web_select`). Letters search its options while it stays closed;
+    /// space and the arrow keys open it.
+    ChromiumSelect,
     Other,
+}
+
+/// How set_value reaches a select in a web page (ADR 0010).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WebSelect {
+    /// Through the app's private DevTools pipe, with no key.
+    Pipe,
+    /// Focus the closed select, confirm it took focus, and type the
+    /// option's title as type-ahead, with no space (`keys_for`).
+    TypeAhead,
+    /// Keys can't be posted: the user's window of the app may have focus,
+    /// and the keys would reach it.
+    WaitForFront,
+    /// A Chromium pop-up button that holds no menu: a page's button with
+    /// aria-haspopup, which takes keys as the page's shortcuts, not a
+    /// select.
+    NotSelect,
+    Refuse,
+}
+
+/// The route to a web page's select. `engine`: the app's page engine.
+/// `piped`: the pipe reached the select. `holds_menu`: the pop-up button
+/// lists a menu or menu items among its children, as Chromium lists a
+/// select's options. `posts`: posted keys reach the agent's window only
+/// (`Front::posts`). `shared`: the user may be working in another window
+/// of the app (`Front::shared`). Only Chromium is known to search a closed
+/// select by its typed letters without opening it, as focus and type chose
+/// an option in Dia (#219); a WebKit or unknown page's select gets no key.
+pub fn web_select(
+    engine: Option<Engine>,
+    piped: bool,
+    holds_menu: bool,
+    posts: bool,
+    shared: bool,
+) -> WebSelect {
+    if engine != Some(Engine::Chromium) {
+        WebSelect::Refuse
+    } else if piped {
+        WebSelect::Pipe
+    } else if !holds_menu {
+        WebSelect::NotSelect
+    } else if posts {
+        WebSelect::TypeAhead
+    } else if shared {
+        WebSelect::WaitForFront
+    } else {
+        WebSelect::Refuse
+    }
 }
 
 /// The kind of a pop-up button: in a web page or not, the engine of the
@@ -185,6 +236,84 @@ mod tests {
             assert_eq!(popup_kind(web, engine, cocoa), PopupKind::Other);
         }
         assert_eq!(keys_for("Apple", PopupKind::Other), Err(Refusal::Kind));
+    }
+
+    #[test]
+    fn a_chromium_select_without_a_pipe_types_ahead_when_keys_reach_it() {
+        use Engine::Chromium;
+        assert_eq!(
+            web_select(Some(Chromium), true, true, false, true),
+            WebSelect::Pipe
+        );
+        assert_eq!(
+            web_select(Some(Chromium), true, true, true, false),
+            WebSelect::Pipe
+        );
+        assert_eq!(
+            web_select(Some(Chromium), false, true, true, false),
+            WebSelect::TypeAhead
+        );
+    }
+
+    #[test]
+    fn a_chromium_select_beside_the_users_window_waits() {
+        assert_eq!(
+            web_select(Some(Engine::Chromium), false, true, false, true),
+            WebSelect::WaitForFront
+        );
+        // Focus unknown with no window of the user's: keys are refused
+        // there as everywhere else.
+        assert_eq!(
+            web_select(Some(Engine::Chromium), false, true, false, false),
+            WebSelect::Refuse
+        );
+    }
+
+    #[test]
+    fn a_webkit_or_unknown_select_is_refused() {
+        for engine in [Some(Engine::WebKit), Some(Engine::Gecko), None] {
+            for (piped, posts, shared) in [
+                (false, true, false),
+                (true, true, false),
+                (false, false, true),
+            ] {
+                assert_eq!(
+                    web_select(engine, piped, true, posts, shared),
+                    WebSelect::Refuse,
+                    "{engine:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_chromium_pop_up_button_without_a_menu_is_no_select_and_gets_no_key() {
+        // A page's aria-haspopup button: whatever the front, no key. The
+        // pipe tells a select itself, by the element at the point.
+        for (posts, shared) in [(true, false), (false, true), (false, false)] {
+            assert_eq!(
+                web_select(Some(Engine::Chromium), false, false, posts, shared),
+                WebSelect::NotSelect
+            );
+        }
+        assert_eq!(
+            web_select(Some(Engine::Chromium), true, false, true, false),
+            WebSelect::Pipe
+        );
+    }
+
+    #[test]
+    fn a_chromium_select_never_gets_a_space() {
+        assert_eq!(
+            keys_for("Preview", PopupKind::ChromiumSelect),
+            Ok("Preview".into())
+        );
+        for title in ["Dragon fruit", "United States", "A\u{a0}B"] {
+            assert!(matches!(
+                keys_for(title, PopupKind::ChromiumSelect),
+                Err(Refusal::Space { .. })
+            ));
+        }
     }
 
     #[test]

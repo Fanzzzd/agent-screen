@@ -12,6 +12,7 @@ use super::windows::Grab;
 use crate::keychord::{KeyChord, Modifiers};
 use crate::model::{Rect, WindowTarget};
 use agent_screen_model::key_window::{AppWindow, KeyWindow, key_window};
+use agent_screen_model::shared_app::{ClickEnd, bound_click_reaches, click_end, press_still_bound};
 use agent_screen_model::viewer_keys::{Focus, Look, Secrecy, look_again_unanswered, settled};
 use futures::channel::oneshot;
 use objc2_core_foundation::{CFRetained, CGPoint};
@@ -134,6 +135,29 @@ pub struct Refused {
 }
 
 pub use agent_screen_model::typing::typed_text;
+
+/// What came of `Forwarder::click_in`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Clicked {
+    /// The window clicked; None when nothing was sent.
+    pub hit: Option<WindowTarget>,
+    /// A takeover stopped clicks still to go.
+    pub stopped: bool,
+    /// A click checked for the user's focus sent nothing: the user's
+    /// window of the app of this window, the one hosting the point, had
+    /// focus as it was about to go out.
+    pub front_took: Option<WindowTarget>,
+    /// A press of a click bound to an element's window was held back: the
+    /// window there was no longer the element's.
+    pub moved: bool,
+}
+
+impl Clicked {
+    /// How the click ended (`click_end`), once a takeover is ruled out.
+    pub fn end(&self) -> ClickEnd {
+        click_end(self.hit.is_some(), self.front_took.is_some(), self.moved)
+    }
+}
 
 /// How far typing a closed pop-up button's item title went.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -806,23 +830,37 @@ impl Forwarder {
     // is posted, so a tool call can take a screenshot straight after.
 
     /// The window clicked, or None when no window is at `at`, and whether
-    /// a takeover stopped clicks still to go.
-    pub async fn click(
+    /// a takeover stopped clicks still to go. When `own` names an element's
+    /// own windows, each press goes out only if the window at `at`, by the
+    /// window that hosts it, is one of them (`bound_click_reaches`). With
+    /// `check_front`, each goes out only if posted input reaches no window
+    /// of the user's then (`posts_to`), checked after the wait for another
+    /// display's input, just before it goes out. Else nothing is sent and
+    /// the hit is None.
+    pub async fn click_in(
         &self,
         at: (f64, f64),
         button: Button,
         count: i64,
         m: Modifiers,
-    ) -> (Option<WindowTarget>, bool) {
+        own: Option<Vec<u32>>,
+        check_front: bool,
+    ) -> Clicked {
         let stopped = self.stopped.clone();
         self.run(move |w| {
+            w.expect = own;
+            w.check_front = check_front;
+            w.front_took = None;
+            w.moved = false;
             let count = count.max(1);
             let mut hit = None;
+            let mut stopped_now = false;
             for index in 1..=count {
                 // A takeover since the agent asked: no press of its lands on
                 // the display the user now operates (#287).
                 if stopped.load(std::sync::atomic::Ordering::Relaxed) {
-                    return (hit, true);
+                    stopped_now = true;
+                    break;
                 }
                 // A double click on Close takes the window away after the
                 // first click; the first hit is the answer.
@@ -836,10 +874,17 @@ impl Forwarder {
                     thread::sleep(Duration::from_millis(80));
                 }
             }
-            (hit, false)
+            w.expect = None;
+            w.check_front = false;
+            Clicked {
+                hit,
+                stopped: stopped_now,
+                front_took: std::mem::take(&mut w.front_took),
+                moved: std::mem::take(&mut w.moved),
+            }
         })
         .await
-        .unwrap_or((None, false))
+        .unwrap_or_default()
     }
 
     /// A press-move-release that apps take as a drag: a hold before moving,
@@ -1100,20 +1145,6 @@ impl Forwarder {
                 if is_stopped() {
                     return PopupTyped::Stopped(typed);
                 }
-                // The app sends every key to its key window and focused
-                // element: another one now would get the rest, as a window
-                // the user clicked, or a field the page's change handler or
-                // the pop-up's action focused. A Take Back moves the window
-                // off the display.
-                if (!front_at_start && is_front(target.pid))
-                    || !placed()
-                    || !(super::ax::is_window_or_sheet_focused(target)
-                        || (key_pid != target.pid
-                            && super::ax::focused_window_id(target.pid).is_none()))
-                    || !focused_button()
-                {
-                    return PopupTyped::Interrupted(typed);
-                }
                 shown = super::ax::string_attribute(element.get(), "AXValue");
                 let mut units = [0u16; 2];
                 let units = character.encode_utf16(&mut units);
@@ -1138,6 +1169,23 @@ impl Forwarder {
                 let input = gate.read().unwrap_or_else(|e| e.into_inner());
                 if is_stopped() {
                     return PopupTyped::Stopped(typed);
+                }
+                // The app sends every key to its key window and focused
+                // element: another one now would get the rest, as a window
+                // the user clicked, or a field the page's change handler or
+                // the pop-up's action focused. A Take Back moves the window
+                // off the display. Checked once per key, with the gate held
+                // just before the key, so nothing comes between the check
+                // and the key; a second check would push the key past
+                // KEY_GAP.
+                let reaches_button = !(!front_at_start && is_front(target.pid))
+                    && placed()
+                    && (super::ax::is_window_or_sheet_focused(target)
+                        || (key_pid != target.pid
+                            && super::ax::focused_window_id(target.pid).is_none()))
+                    && focused_button();
+                if !reaches_button {
+                    return PopupTyped::Interrupted(typed);
                 }
                 if last.is_some_and(|at| at.elapsed() >= KEY_GAP) {
                     return PopupTyped::Slow(typed);
@@ -1599,6 +1647,19 @@ struct Worker {
     cache: Option<(Vec<Hit>, Instant)>,
     /// Whether the press being handled is the user's, in the Viewer.
     user_press: bool,
+    /// For a click that stands for an element's press: the element's own
+    /// windows. A press whose window there, by the window its panels
+    /// belong to, is another goes nowhere (`Center::of`).
+    expect: Option<Vec<u32>>,
+    /// For an agent's click on an element (`Forwarder::click_in`): check
+    /// the user's focus again as the press goes out.
+    check_front: bool,
+    /// The window whose app's user window took focus as a click checked for
+    /// it was about to go out, so nothing was sent.
+    front_took: Option<WindowTarget>,
+    /// Set when a bound click's press was held back because the element's
+    /// window was no longer at the point.
+    moved: bool,
     seed: u64,
 }
 
@@ -1649,6 +1710,10 @@ impl Worker {
             drag_guard: None,
             cache: None,
             user_press: false,
+            expect: None,
+            check_front: false,
+            front_took: None,
+            moved: false,
             seed: std::process::id() as u64 ^ 0x9e37_79b9_7f4a_7c15,
         }
     }
@@ -1833,6 +1898,19 @@ impl Worker {
         self.release_agent_button();
         let hit = self.hit(at, true).or_else(|| self.edge_hit(at));
         record_hit(hit);
+        // A click for an element's press goes only to the element's own
+        // window, checked here, as the press goes out: another window that
+        // covers it since, or none, gets nothing.
+        if let Some(own) = &self.expect
+            && !bound_click_reaches(hit.map(|h| h.host.window_id), own)
+        {
+            log::info!(
+                "input: press at {at:?} found {:?} there, not the element's window {own:?}; nothing sent",
+                hit.map(|h| h.host.window_id)
+            );
+            self.moved = true;
+            return None;
+        }
         let popup_menu = CGWindowLevelForKey(CGWindowLevelKey::PopUpMenuWindowLevelKey) as i64;
         let Some(hit) = hit else {
             // Clicking empty space on a display where an NSMenu (`layer == 101`)
@@ -1911,7 +1989,21 @@ impl Worker {
             log::debug!("input: press on a list of the front app at {at:?}, focus kept");
         } else {
             let _held = AppKeys::hold(target.pid);
+            // The hold can wait up to 2 s for another display's keys:
+            // check an element's click again before the focus goes out.
+            if !self.still_goes(at, hit) {
+                return None;
+            }
             self.focus(target);
+        }
+        // The focus can wait 50 ms to settle, or click to wake the window,
+        // and the process's input gate waits out a real-input loan: an
+        // element's click checks once more with the gate held, so nothing
+        // comes between the check and the press.
+        let gate = super::real_input::process_gate(target.pid);
+        let _input = gate.read().unwrap_or_else(|e| e.into_inner());
+        if !self.still_goes(at, hit) {
+            return None;
         }
         // Keys go to the window clicked, not to one that opened earlier.
         if let Some(within) = within_display {
@@ -1929,11 +2021,42 @@ impl Worker {
             at,
             moved: false,
         });
-        self.post(CGEventType::MouseMoved, at, target, button, 0, group, flags);
-        self.post(button.down(), at, target, button, clicks, group, flags);
+        for (kind, state) in [(CGEventType::MouseMoved, 0), (button.down(), clicks)] {
+            if let Some(event) = self.mouse_event(kind, at, target, button, state, group, flags) {
+                post_now(&event, target.pid, false);
+            }
+        }
         // Dropped or not, the press made the window key.
         self.woken = Some((target.window_id, activations()));
         Some(target)
+    }
+
+    /// Whether an element's click (`Forwarder::click_in`) may still press
+    /// `hit` at `at`, after a wait: hit-tested again, the point shows the
+    /// same window, one of the element's own (`press_still_bound`), and
+    /// posted input reaches no window of the user's (`posts_to`). On a miss
+    /// it records why, and nothing is sent. Any other click goes on.
+    fn still_goes(&mut self, at: (f64, f64), hit: Hit) -> bool {
+        if let Some(own) = &self.expect {
+            let ids = |h: &Hit| (h.target.window_id, h.host.window_id);
+            let now = topmost_hit_in(&hits(), at).map(|h| ids(&h));
+            if !press_still_bound(ids(&hit), now, own) {
+                log::info!(
+                    "input: press at {at:?} now finds {now:?} there, not {:?} of the element's windows {own:?}; nothing sent",
+                    ids(&hit)
+                );
+                self.moved = true;
+                return false;
+            }
+        }
+        if self.check_front && !super::shared_app::posts_to(hit.host) {
+            log::info!(
+                "input: press at {at:?}: the user's window of its app has focus now; nothing sent"
+            );
+            self.front_took = Some(hit.host);
+            return false;
+        }
+        true
     }
 
     /// Hold the window whose title bar the user pressed in the Viewer, to
@@ -2341,14 +2464,31 @@ impl Worker {
         group: i64,
         flags: CGEventFlags,
     ) {
-        let Some(event) = CGEvent::new_mouse_event(
+        if let Some(event) = self.mouse_event(kind, at, target, button, click_state, group, flags) {
+            // One route only: posting through SkyLight and the public API
+            // both delivers every event twice to AppKit targets.
+            deliver(&event, target.pid, false);
+        }
+    }
+
+    /// The mouse event `post` sends, stamped for `target`, not sent.
+    #[allow(clippy::too_many_arguments)]
+    fn mouse_event(
+        &self,
+        kind: CGEventType,
+        at: (f64, f64),
+        target: WindowTarget,
+        button: Button,
+        click_state: i64,
+        group: i64,
+        flags: CGEventFlags,
+    ) -> Option<CFRetained<CGEvent>> {
+        let event = CGEvent::new_mouse_event(
             self.source.as_deref(),
             kind,
             CGPoint::new(at.0, at.1),
             button.cg(),
-        ) else {
-            return;
-        };
+        )?;
         CGEvent::set_flags(Some(&event), flags);
         unsafe {
             SSEventSetIntegerField(&event, 1, click_state); // kCGMouseEventClickState
@@ -2376,9 +2516,7 @@ impl Worker {
                 local,
             });
         }
-        // One route only: posting through SkyLight and the public API both
-        // delivers every event twice to AppKit targets.
-        deliver(&event, target.pid, false);
+        Some(event)
     }
 
     /// The topmost resizable window whose edge is just outside a point:
@@ -2957,6 +3095,13 @@ fn mark_panels_using(
 
 /// The app window at a global point, as a press there would hit it, and
 /// its frame. None for a menu, a pop-up, or a panel another process draws.
+/// The window at `at` by the window that hosts it, and the frame of what is
+/// there: the window a press at `at` goes to belongs to it. The rule for a
+/// click bound to an element's windows (`bound_click_reaches`).
+pub fn host_at(at: (f64, f64)) -> Option<(WindowTarget, Rect)> {
+    topmost_hit_in(&hits(), at).map(|h| (h.host, h.bounds))
+}
+
 pub fn window_at(at: (f64, f64)) -> Option<(WindowTarget, Rect)> {
     topmost_hit_in(&hits(), at)
         .filter(|h| h.layer == 0 && h.target == h.host)

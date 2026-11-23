@@ -54,11 +54,16 @@ pub fn opens_menu(element: &ax::Element) -> bool {
     if !rules::may_open_menu(&role) {
         return false;
     }
-    // Chromium lists a select's options as menu items right under it.
-    let holds_menu = ax::elements_attribute(element, "AXChildren")
+    rules::opens_menu(&role, ax::in_web_area(element), holds_menu(element))
+}
+
+/// Whether `element` holds a menu among its children: Chromium lists a
+/// select's options as menu items right under it, and a page's button with
+/// aria-haspopup, also a pop-up button, holds none.
+pub fn holds_menu(element: &ax::Element) -> bool {
+    ax::elements_attribute(element, "AXChildren")
         .iter()
-        .any(|c| matches!(self::role(c).as_str(), "AXMenu" | "AXMenuItem"));
-    rules::opens_menu(&role, ax::in_web_area(element), holds_menu)
+        .any(|c| matches!(self::role(c).as_str(), "AXMenu" | "AXMenuItem"))
 }
 
 /// Where a press's effect is read: the agent's window, its page, or the
@@ -167,6 +172,39 @@ pub fn user_window(pid: i32) -> bool {
     super::windows::all()
         .iter()
         .any(|w| w.target.pid == pid && !super::input::on_agent_display_at(w.bounds))
+}
+
+/// Test hook (`debugFocusUnknown`): the front app's focused window reads
+/// as unknown, as when the app doesn't answer in time.
+static FOCUS_UNKNOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn force_focus_unknown(on: bool) {
+    FOCUS_UNKNOWN.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn focus_forced_unknown() -> bool {
+    FOCUS_UNKNOWN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Whether posted input reaches `target` and no window of the user's, read
+/// now: its app isn't the front app, or its focused window is `target` or
+/// another of the agent's on the same display, or focus is unknown and the
+/// app has no window on the user's screens (`Front::shared`), as
+/// `control::shared_app::posted_press_allowed` decides before a click.
+pub fn posts_to(target: WindowTarget) -> bool {
+    let pid = target.pid;
+    let in_front = super::input::front() == Some(pid);
+    let focused = (in_front && !focus_forced_unknown())
+        .then(|| ax::focused_window_id(pid))
+        .flatten()
+        .map(|window| rules::Focused {
+            window,
+            on_target_display: window != target.window_id
+                && on_display_of(target.window_id, window),
+            user_window: user_window(pid),
+        });
+    let front = rules::Front::of(in_front, focused, target.window_id);
+    !front.shared(front == rules::Front::FocusUnknown && user_window(pid))
 }
 
 /// A string or URL attribute as text; empty when it is neither.
