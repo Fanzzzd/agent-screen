@@ -123,6 +123,15 @@ fn test() -> Result<()> {
     call("click", json!({ "x": at.0, "y": at.1 }))?;
     call("key", json!({ "keys": "cmd+a" }))?;
     call("key", json!({ "keys": "Delete" }))?;
+    // The field drops a key within 10 ms of the last, Delete's too: the
+    // first character waits until the field shows it empty, up to 2 s.
+    for _ in 0..20 {
+        let field = line(&tree()?, "Street lossy").to_string();
+        if !field.contains("value=\"") || field.contains("value=\"\"") {
+            break;
+        }
+        sleep_ms(100);
+    }
     for c in STREET.chars() {
         call("type", json!({ "text": c.to_string() }))?;
     }

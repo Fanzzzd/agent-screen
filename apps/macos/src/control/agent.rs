@@ -112,6 +112,10 @@ pub async fn handle(
     if matches!(method, "click" | "mouseDown" | "key" | "type")
         && let Some(id) = shown
     {
+        // A menu the last input closed, as Return choosing its item, may
+        // still be fading out, and a click then gets lost.
+        let closed = CLOSED.with(|m| m.borrow_mut().remove(&id).unwrap_or_default());
+        until_faded(&core, id, closed, cx).await;
         menu_still_open(id, method, cx).await?;
     }
     // The menus open at the agent's last call, for this input.
@@ -181,6 +185,10 @@ pub async fn handle(
             };
             object.insert("note".into(), json!(note));
         }
+        if chooses {
+            let closed = agent_screen_model::open_menu::closed_by(&seen, &menus);
+            CLOSED.with(|m| m.borrow_mut().insert(id, closed));
+        }
         MENUS.with(|m| m.borrow_mut().insert(id, menus));
     }
     if let Some((id, event)) = timeline
@@ -200,6 +208,40 @@ thread_local! {
     /// The pop-up menus open on each display after the agent's last call.
     static MENUS: std::cell::RefCell<std::collections::HashMap<DisplayId, Vec<u32>>> =
         std::cell::RefCell::new(std::collections::HashMap::new());
+    /// The pop-up menus the agent's last input on each display closed,
+    /// which may still be fading out.
+    static CLOSED: std::cell::RefCell<std::collections::HashMap<DisplayId, Vec<u32>>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Wait until no menu the agent's last input closed (`closed`) is still
+/// fading out on display `id`: a click in that time gets lost
+/// (`agent_screen_model::open_menu::closing`). 400 ms at most, and not
+/// in a Takeover, where the input is refused at once: control is checked
+/// after every look.
+async fn until_faded(core: &Entity<Core>, id: DisplayId, closed: Vec<u32>, cx: &mut AsyncApp) {
+    use agent_screen_model::open_menu::{FADED_WAIT_MS, LOOK_EVERY_MS, closing};
+    if closed.is_empty() {
+        return;
+    }
+    let closed = std::sync::Arc::new(closed);
+    // One deadline for all of it, slow WindowServer queries too.
+    let deadline = cx
+        .background_executor()
+        .timer(Duration::from_millis(FADED_WAIT_MS));
+    let wait = async {
+        while !takeover(core, id, cx) {
+            let closed = closed.clone();
+            let fading = off(cx, move || closing(&closed, &windows::menus_on(id))).await;
+            if !fading || takeover(core, id, cx) {
+                return;
+            }
+            cx.background_executor()
+                .timer(Duration::from_millis(LOOK_EVERY_MS))
+                .await;
+        }
+    };
+    futures::future::select(std::pin::pin!(wait), deadline).await;
 }
 
 /// `type`'s note when its text went to a menu open before and after it.
