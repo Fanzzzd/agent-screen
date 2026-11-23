@@ -6936,6 +6936,35 @@ async fn launch_now(
                 core.update(cx, |c, _| c.forwarder(id)).keys_done().await;
                 finish_key_hold(&mut hold, agent_screen_model::key_hold::End::HandedBack, cx).await;
             }
+            // A window the agents' instance opens through its pipe shows
+            // behind the windows already on the display, such as another
+            // Chrome's, which then takes the agent's clicks. Raise it until
+            // it is in front at its middle; a raise activates nothing
+            // (ADR 0022).
+            if windowless || agents.is_some() {
+                let target = placed.target;
+                let front = off(cx, move || {
+                    // `placed.bounds` is relative to the display.
+                    let mid = cg::window_bounds(target.window_id)?.mid();
+                    let mut front = crate::mac::input::window_at(mid).map(|(w, _)| w);
+                    let before = front;
+                    for _ in 0..5 {
+                        if front == Some(target) {
+                            break;
+                        }
+                        if let Some(w) = ax::window_element(target) {
+                            ax::perform(&w, "AXRaise");
+                        }
+                        std::thread::sleep(Duration::from_millis(100));
+                        front = crate::mac::input::window_at(mid).map(|(w, _)| w);
+                    }
+                    Some((before, front))
+                })
+                .await;
+                log::debug!(
+                    "launch: the agents' window {target:?}; in front of it before and after raising: {front:?}"
+                );
+            }
             // An app started in the background drops the first click on its
             // window, which only makes the window key: spend it here.
             if !was_running {
