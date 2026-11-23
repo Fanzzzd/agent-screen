@@ -84,6 +84,51 @@ pub fn agent_acted_for(display: DisplayId, pid: i32, span: std::time::Duration) 
     drive(display, Some(pid), span);
 }
 
+/// A launch of the running app `pid` on a display, which marks the display
+/// as driving the app while it lives, up to `new_window::LAUNCH_MARK_MAX`
+/// (`new_window::Other::for_app`). Dropped as the launch call ends, it puts
+/// back the span the display had for the app before, as a cold start's.
+pub struct Launching {
+    display: DisplayId,
+    pid: i32,
+    before: Option<std::time::Instant>,
+}
+
+/// Mark `display` as launching the running app `pid` until the returned
+/// guard drops.
+pub fn launching(display: DisplayId, pid: i32) -> Launching {
+    let now = std::time::Instant::now();
+    let before = ACTED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find(|(d, p, _)| *d == display && *p == Some(pid))
+        .map(|(_, _, until)| *until);
+    let until = new_window::launch_mark_until(now, None);
+    drive(display, Some(pid), until.duration_since(now));
+    Launching {
+        display,
+        pid,
+        before,
+    }
+}
+
+impl Drop for Launching {
+    fn drop(&mut self) {
+        let now = std::time::Instant::now();
+        let mut acted = ACTED.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = (self.display, Some(self.pid));
+        match new_window::mark_after_launch(self.before, now) {
+            Some(until) => {
+                if let Some(at) = acted.iter_mut().find(|(d, p, _)| (*d, *p) == entry) {
+                    at.2 = until;
+                }
+            }
+            None => acted.retain(|(d, p, _)| (*d, *p) != entry),
+        }
+    }
+}
+
 /// End the cold start's span for `pid` on the display, once the user uses
 /// the app too (`Seen::ends_cold_start`) or takes it back.
 pub fn end_cold_start(display: DisplayId, pid: i32) {
@@ -203,27 +248,35 @@ pub fn agent_drove(pid: i32) -> bool {
     })
 }
 
-/// Whether another Agent Display that shows a window of `pid` was driven
-/// just now: that session may have made the new window as well.
+/// Whether another Agent Display was driven just now in a way that may
+/// have made the new window: it shows a window of `pid`, or it is
+/// launching `pid` (`new_window::another_may_have_made`).
 fn others_acted_recently(display: DisplayId, pid: i32) -> bool {
     let now = std::time::Instant::now();
-    let others: Vec<DisplayId> = ACTED
+    let others: Vec<(DisplayId, bool)> = ACTED
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .iter()
         .filter(|(d, p, until)| *d != display && p.is_none_or(|p| p == pid) && now < *until)
-        .map(|(d, _, _)| *d)
+        .map(|(d, p, _)| (*d, p.is_some()))
         .collect();
     if others.is_empty() {
         return false;
     }
     let shown = windows::all();
-    others.into_iter().any(|d| {
-        let area = super::cg::display_bounds(d);
-        shown
-            .iter()
-            .any(|w| w.target.pid == pid && area.contains(w.bounds.mid()))
-    })
+    let others: Vec<new_window::Other> = others
+        .into_iter()
+        .map(|(d, for_app)| {
+            let area = super::cg::display_bounds(d);
+            new_window::Other {
+                for_app,
+                shows_app: shown
+                    .iter()
+                    .any(|w| w.target.pid == pid && area.contains(w.bounds.mid())),
+            }
+        })
+        .collect();
+    new_window::another_may_have_made(&others)
 }
 
 /// Whether the user just pressed something that could make `pid` open a
@@ -297,14 +350,12 @@ fn user_acted_where(pid: i32, when: impl Fn(std::time::Instant) -> bool, openers
 pub fn seen(display: DisplayId, pid: i32, bounds: Rect, new: Option<u32>) -> Seen {
     // Another session with a window of this app, driving its display just
     // now, may have made it: then it's nobody's for sure.
-    let agent = acted_recently(display, pid) && !others_acted_recently(display, pid);
-    let user = user_acted_recently(pid);
-    let only_here = !agent && !user && only_on(pid, bounds, new);
-    Seen {
-        agent,
-        user,
-        only_here,
-    }
+    Seen::from(
+        acted_recently(display, pid),
+        others_acted_recently(display, pid),
+        user_acted_recently(pid),
+        || only_on(pid, bounds, new),
+    )
 }
 
 /// What Accessibility says the window is, as the catch reads it. Blocking:

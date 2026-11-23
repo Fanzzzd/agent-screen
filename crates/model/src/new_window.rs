@@ -49,6 +49,22 @@ pub enum Owner {
 }
 
 impl Seen {
+    /// The facts from what the catch reads. `driven`: this display was
+    /// driven in the last `ACTION_WINDOW`, or started the app cold in the
+    /// last `COLD_START`. `others`: another display's session may have
+    /// made the window (`another_may_have_made`), so neither this
+    /// display's action nor the app being on it alone makes it this
+    /// display's. `only_on`: every other window of the app is on this
+    /// display.
+    pub fn from(driven: bool, others: bool, user: bool, only_on: impl FnOnce() -> bool) -> Seen {
+        let agent = driven && !others;
+        Seen {
+            agent,
+            user,
+            only_here: !agent && !user && !others && only_on(),
+        }
+    }
+
     pub fn owner(self) -> Owner {
         match (self.agent, self.user) {
             (true, false) => Owner::Agent,
@@ -79,6 +95,49 @@ impl Seen {
             ..self
         }
     }
+}
+
+/// Another Agent Display driven in the last `ACTION_WINDOW`, as a new
+/// window of the app appears.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Other {
+    /// It drove this app itself: it is launching it, or started it cold.
+    pub for_app: bool,
+    /// It shows a window of the app.
+    pub shows_app: bool,
+}
+
+/// Whether another display's session may have made the new window, so it
+/// isn't this display's for sure. A display launching the app counts
+/// before its window shows: the window it asked for opens on the user's
+/// screen, where this display's watch can see it before that launch's
+/// catch moves it.
+pub fn another_may_have_made(others: &[Other]) -> bool {
+    others.iter().any(|o| o.for_app || o.shows_app)
+}
+
+/// How long, at most, a launch of a running app marks its display as
+/// driving the app (`Other::for_app`): the mark lasts while the launch
+/// runs, as a large document may open late, but no longer than another
+/// display's cold-start watch, which it guards against.
+pub const LAUNCH_MARK_MAX: Duration = COLD_START;
+
+/// When the launch's mark for its display and app ends, from when it began
+/// and the launch's own end, if it ended: when the launch ends, or at
+/// `LAUNCH_MARK_MAX` from the start for one that runs longer.
+pub fn launch_mark_until<T>(began: T, ended: Option<T>) -> T
+where
+    T: Copy + Ord + std::ops::Add<Duration, Output = T>,
+{
+    let max = began + LAUNCH_MARK_MAX;
+    ended.map_or(max, |end| end.min(max))
+}
+
+/// What the display's mark for the app goes back to as the launch ends:
+/// the span it had before, as a cold start's, while that still runs, or
+/// none.
+pub fn mark_after_launch<T: Copy + Ord>(before: Option<T>, now: T) -> Option<T> {
+    before.filter(|b| *b > now)
 }
 
 /// Where a new window is when the launch's watch finds it.
@@ -279,6 +338,94 @@ mod tests {
             Owner::Agent,
             "an app on the display alone makes a window by itself"
         );
+    }
+
+    #[test]
+    fn another_display_launching_the_app_may_have_made_the_window() {
+        let other = |for_app, shows_app| Other { for_app, shows_app };
+        assert!(!another_may_have_made(&[]));
+        assert!(
+            !another_may_have_made(&[other(false, false)]),
+            "a display driven in another app made no window of this one"
+        );
+        assert!(another_may_have_made(&[other(false, true)]));
+        assert!(
+            another_may_have_made(&[other(false, false), other(true, false)]),
+            "two sessions launch the running app at once: the second's window shows on the user's screen before its display has any"
+        );
+        // The first display's cold start counts it as driven, and all the
+        // app's windows are on it, yet the window is the other launch's.
+        let racing = Seen::from(true, true, false, || true);
+        assert_eq!(racing.owner(), Owner::Unknown);
+        assert_eq!(
+            watch(On::Elsewhere, false, Role::Window, racing),
+            Watch::Undecided,
+            "the watch leaves it for the other launch's catch"
+        );
+        assert_eq!(
+            Seen::from(true, false, false, || true),
+            seen(true, false, false)
+        );
+        assert_eq!(
+            Seen::from(false, false, false, || true).owner(),
+            Owner::Agent,
+            "nobody acted and the app is on the display alone (#46)"
+        );
+    }
+
+    #[test]
+    fn a_document_another_display_opens_in_the_running_app_is_left_to_it() {
+        // The first display started TextEdit cold and holds all its
+        // windows; the second, with no TextEdit window yet, opens a file in
+        // it. The document's window shows on the user's screen first.
+        let opening = [Other {
+            for_app: true,
+            shows_app: false,
+        }];
+        let first = Seen::from(true, another_may_have_made(&opening), false, || true);
+        assert_eq!(
+            first.owner(),
+            Owner::Unknown,
+            "the first display's kept catch leaves it where it opened"
+        );
+        assert_eq!(
+            watch(On::Elsewhere, false, Role::Window, first),
+            Watch::Undecided,
+            "and its cold-start watch doesn't place it"
+        );
+        // Without the second display's launch noted, the first display
+        // took it.
+        let unnoted = [Other {
+            for_app: false,
+            shows_app: false,
+        }];
+        assert_eq!(
+            Seen::from(true, another_may_have_made(&unnoted), false, || true).owner(),
+            Owner::Agent
+        );
+    }
+
+    #[test]
+    fn a_launch_marks_its_display_while_it_runs_up_to_the_cold_start() {
+        let s = Duration::from_secs;
+        let began = s(100);
+        assert_eq!(
+            launch_mark_until(began, None),
+            began + COLD_START,
+            "a document still opening keeps the mark, up to another display's cold-start watch"
+        );
+        assert_eq!(
+            launch_mark_until(began, Some(s(112))),
+            s(112),
+            "a large file that took 12 s, past ACTION_WINDOW, stays marked until the launch ends"
+        );
+        assert_eq!(launch_mark_until(began, Some(s(200))), began + COLD_START);
+        assert!(LAUNCH_MARK_MAX > ACTION_WINDOW);
+        // As the launch ends, the display's own cold start of the app
+        // keeps its span; an expired or absent one leaves no mark.
+        assert_eq!(mark_after_launch(Some(s(130)), s(112)), Some(s(130)));
+        assert_eq!(mark_after_launch(Some(s(105)), s(112)), None);
+        assert_eq!(mark_after_launch(None, s(112)), None);
     }
 
     #[test]
