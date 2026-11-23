@@ -11,6 +11,11 @@
 //! next input was refused as if the user had closed it. A menu is open
 //! only while opaque, and after an input a menu that was open at the
 //! agent's last call gets a moment to show it is closing.
+//!
+//! Chrome drops a click that comes while the menu a Return closed is
+//! still fading: AppKit has not ended the menu's session yet. So the
+//! agent's next click or key waits until a menu its last input closed
+//! is gone, 400 ms at most.
 
 /// A pop-up menu window on the display, as WindowServer lists it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -26,6 +31,10 @@ pub const CLOSING_WAIT_MS: u64 = 300;
 
 /// How often to look again during that wait, in ms.
 pub const LOOK_EVERY_MS: u64 = 15;
+
+/// How long the agent's next input waits at most for a menu its last
+/// input closed to fade out, in ms: the fade and some margin.
+pub const FADED_WAIT_MS: u64 = 400;
 
 /// Whether `menu` is open: a menu fading out, after a choice or Escape,
 /// is closing.
@@ -53,6 +62,22 @@ pub fn after_input(seen: &[u32], listed: &[Menu], waited: bool) -> Option<Vec<u3
         return None;
     }
     Some(now)
+}
+
+/// The menus an input closed: open before it (`seen`) and not after.
+pub fn closed_by(seen: &[u32], after: &[u32]) -> Vec<u32> {
+    seen.iter()
+        .filter(|w| !after.contains(w))
+        .copied()
+        .collect()
+}
+
+/// Whether a menu the agent's last input closed (`closed`) is still
+/// fading out, so its next input should wait: a click then gets lost.
+pub fn closing(closed: &[u32], listed: &[Menu]) -> bool {
+    listed
+        .iter()
+        .any(|m| closed.contains(&m.window) && !is_open(m))
 }
 
 /// Whether the agent's input may go out: no menu was open at its last
@@ -119,6 +144,27 @@ mod tests {
         assert!(!input_may_go(&[7], &[menu(7, 0.3)]));
         // Another menu opened in its place.
         assert!(!input_may_go(&[7], &[menu(8, 1.0)]));
+    }
+
+    #[test]
+    fn a_menu_the_input_closed_is_the_one_open_before_and_not_after() {
+        assert_eq!(closed_by(&[7], &[]), vec![7]);
+        assert_eq!(closed_by(&[7], &[7]), Vec::<u32>::new());
+        assert_eq!(closed_by(&[7], &[9]), vec![7]);
+        assert_eq!(closed_by(&[], &[9]), Vec::<u32>::new());
+    }
+
+    #[test]
+    fn the_next_input_waits_while_the_menu_it_closed_fades() {
+        // Return chose an item; the menu is still fading out.
+        assert!(closing(&[7], &[menu(7, 0.96)]));
+        // Gone: the input goes out.
+        assert!(!closing(&[7], &[]));
+        // Opaque again, or never closed: nothing to wait for.
+        assert!(!closing(&[7], &[menu(7, 1.0)]));
+        // A menu the last input did not close, fading or not.
+        assert!(!closing(&[7], &[menu(8, 0.5)]));
+        assert!(!closing(&[], &[menu(8, 0.5)]));
     }
 
     #[test]
