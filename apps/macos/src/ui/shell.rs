@@ -5603,6 +5603,71 @@ open -a AeroSpace";
         .detach();
     }
 
+    /// The user handed display `id` back (#319). The agents' Chrome window
+    /// was seen to leave its display during a Takeover for a spot above the
+    /// user's screen, on no display, where neither the user nor the agent
+    /// sees it. Each window still recorded there that shows too little on
+    /// the online displays to use goes back (`regather::stranded`); one the
+    /// user dragged onto any display, or parked at an edge with a good part
+    /// showing, stays where they put it. A few looks, since the move may
+    /// come late.
+    pub fn put_back_stranded(&mut self, id: DisplayId, cx: &mut Context<Self>) {
+        use agent_screen_model::regather::{HAND_BACK_PASSES_MS, stranded};
+        cx.spawn(async move |this, cx| {
+            for wait in HAND_BACK_PASSES_MS {
+                cx.background_executor()
+                    .timer(Duration::from_millis(wait))
+                    .await;
+                // Live and handed back still; with the times each window
+                // went home so far, read here as the move is decided: a
+                // Take Back meanwhile cancels the move.
+                let Ok(Some(windows)) = this.update(cx, |shell, cx| {
+                    let display = shell
+                        .core
+                        .read(cx)
+                        .displays
+                        .get(id)
+                        .filter(|d| !d.is_ended() && !d.takeover)?;
+                    Some(
+                        display
+                            .records
+                            .values()
+                            .map(|r| (r.target, windows::times_returned(r.target.window_id)))
+                            .collect::<Vec<_>>(),
+                    )
+                }) else {
+                    return;
+                };
+                for (target, seen) in windows {
+                    let moved = cx
+                        .background_executor()
+                        .spawn(async move {
+                            let screens: Vec<Rect> = cg::active_displays()
+                                .into_iter()
+                                .map(cg::display_bounds)
+                                .collect();
+                            let frame = cg::routing_window_bounds(target)
+                                .filter(|f| stranded(*f, &screens))?;
+                            let moved = windows::put_back_unless_returned(
+                                target,
+                                cg::display_bounds(id),
+                                seen,
+                            );
+                            Some((frame, moved))
+                        })
+                        .await;
+                    if let Some((frame, moved)) = moved {
+                        log::info!(
+                            "window {} of display {id} showed too little on any display after the hand-back, at {frame:?}; put back: {moved:?}",
+                            target.window_id
+                        );
+                    }
+                }
+            }
+        })
+        .detach();
+    }
+
     /// The windows recorded on live Agent Displays.
     fn recorded_live(&self, cx: &App) -> Vec<(DisplayId, WindowTarget)> {
         self.core

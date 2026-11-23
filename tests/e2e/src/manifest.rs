@@ -256,6 +256,7 @@ pub const SCRIPTS: &[Script] = &[
     script("browsers", &[Browser, AgentInput], Full, Agent, 1).hands_off(),
     script("changecost", &[Performance, Displays], Full, Agent, 1).manual(MEASURES),
     script("chrome", &[Browser, AgentInput], Full, Agent, 2).hands_off(),
+    script("chrometakeover", &[Browser, Takeover], Full, Hook, 2).hands_off(),
     script("claims", &[Windows], Full, Hook, 1).hands_off(),
     script("closetwindow", &[WindowAccess, Windows], Full, Hook, 1).hands_off(),
     script("coldflash", &[Windows, Browser], Full, Agent, 1).hands_off(),
