@@ -6150,6 +6150,16 @@ async fn request_running_window(
     }
 }
 
+/// Note that display `id` is launching the running app `pid`, before the
+/// window the launch opens, a new one or a document's, shows on the
+/// user's screen: another display's catch or cold-start watch that sees it
+/// there leaves it to this launch (`new_window::another_may_have_made`).
+/// The mark holds until the launch call ends and drops the guard, as a
+/// large document may open late, at most `new_window::LAUNCH_MARK_MAX`.
+fn note_launching(id: DisplayId, pid: i32) -> crate::mac::catch::Launching {
+    crate::mac::catch::launching(id, pid)
+}
+
 /// Send a URL to a running app's newly opened window before placing it,
 /// trying its address field first and falling back to `open_in_background`.
 async fn open_url_in_new_window(
@@ -6237,7 +6247,10 @@ fn spawn_url_handback(
 
 /// Check whether `document` is already shown in a pre-existing window; if not,
 /// watch for a late window showing it so it does not stay on the user's screen.
+/// `launching`, the launch's mark (`note_launching`), lasts as long as the
+/// watch, still ending at its own 30 s deadline.
 /// Returns `(shown_already, watching_started)`.
+#[allow(clippy::too_many_arguments)]
 async fn watch_late_document(
     core: &Entity<Core>,
     id: DisplayId,
@@ -6245,6 +6258,7 @@ async fn watch_late_document(
     before: &std::collections::HashSet<u32>,
     document: Option<std::path::PathBuf>,
     document_catch: Option<crate::mac::catch::Catch>,
+    launching: Option<crate::mac::catch::Launching>,
     cx: &mut AsyncApp,
 ) -> (bool, bool) {
     let shown_already = match document.clone() {
@@ -6300,6 +6314,7 @@ async fn watch_late_document(
             }
         }
         drop(document_catch);
+        drop(launching);
         core.update(cx, |c, _| c.watching.remove(&(pid, document)));
     })
     .detach();
@@ -6427,6 +6442,11 @@ async fn launch_now(
     } else {
         None
     };
+    // The running app's document window opens on the user's screen too.
+    // The mark lasts until this launch returns.
+    let mut launching = running
+        .filter(|_| !fresh && document.is_some())
+        .map(|pid| note_launching(id, pid));
     let opening = match opening {
         Some(o) => Some(o),
         None if !was_running || first.is_some() => Some(
@@ -6619,6 +6639,7 @@ async fn launch_now(
     // whether it went into a window on the display that was open already.
     let mut pipe_page: Option<(String, PageWindow)> = None;
     if asked_for_window {
+        launching = Some(note_launching(id, pid));
         match request_running_window(
             core,
             id,
@@ -7026,8 +7047,17 @@ async fn launch_now(
     // A slow launch can open its window after we stop waiting. Keep watching
     // so it does not stay on the user's screen: for an app Agent Screen
     // started, any new window; for a running app, the one showing the file.
-    let (shown_already, watching) =
-        watch_late_document(core, id, pid, &before, document, document_catch.take(), cx).await;
+    let (shown_already, watching) = watch_late_document(
+        core,
+        id,
+        pid,
+        &before,
+        document,
+        document_catch.take(),
+        launching.take(),
+        cx,
+    )
+    .await;
     if !watching && !was_running {
         // The kept catch takes the first window the moment it opens, unless
         // the user is clicking or typing then; the watch is for an app that

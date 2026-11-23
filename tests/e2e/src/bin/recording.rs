@@ -88,9 +88,12 @@ fn test(made: &mut Vec<String>) -> Result<()> {
         stopped.to_string(),
     );
 
+    // The sidecar also has a header, pointer lines and an end line; the
+    // action lines are the ones checked here.
     let lines: Vec<Value> = std::fs::read_to_string(&timeline)?
         .lines()
-        .filter_map(|l| serde_json::from_str(l).ok())
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|l| l["action"].is_string())
         .collect();
     let actions: Vec<&str> = lines.iter().filter_map(|l| l["action"].as_str()).collect();
     check(

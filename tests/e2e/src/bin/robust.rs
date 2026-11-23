@@ -12,9 +12,9 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use agent_screen_tests::{
-    Control, McpClient, ToolResult, Value, Window, check, cut, in_test_app, instance, json, now_ms,
-    quit_app, quit_discarding, quoted, run, running, sh, sh_lenient, skip, sleep_ms, tool, try_osa,
-    wait_for_idle, watch_flash,
+    Control, McpClient, ToolResult, Value, Window, allow_on_your_screen, check, cut, in_test_app,
+    instance, json, now_ms, quit_app, quit_discarding, quoted, run, running, sh, sh_lenient, skip,
+    sleep_ms, tool, try_osa, wait_for_idle, watch_flash,
 };
 use anyhow::{Context, Result};
 use regex::Regex;
@@ -219,6 +219,13 @@ fn body(r: &Robust, temporary: &mut Vec<String>) -> Result<()> {
         "TextEdit's first window shows on the user's screen 34 ms at most",
         first_flash.ms <= FLASH_LIMIT,
         format!("{} windows for {} ms", first_flash.windows, first_flash.ms),
+    );
+    // From here TextEdit runs, and the script measures its new windows'
+    // flashes itself.
+    allow_on_your_screen(
+        "TextEdit",
+        RUNNING_FLASH_LIMIT as u64,
+        "a running app's new window shows where the app puts it until the catch moves it",
     );
     let window = launched.window();
     check(
@@ -587,6 +594,15 @@ fn body(r: &Robust, temporary: &mut Vec<String>) -> Result<()> {
         );
         sleep_ms(3500);
         let main_before = r.on_main_display("TextEdit")?;
+        // From here the script puts windows on the user's screen on
+        // purpose, until TextEdit quits at the end: this late one, the one
+        // taken back and the one the user makes after. The agent's Command-N
+        // window above had only the running-app allowance.
+        allow_on_your_screen(
+            "TextEdit",
+            600_000,
+            "the script opens windows there that must stay put",
+        );
         try_osa("tell application \"TextEdit\" to make new document")?;
         sleep_ms(1500);
         check(
