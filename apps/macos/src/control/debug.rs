@@ -131,6 +131,41 @@ pub(super) async fn handle(
             }),
             None => json!({ "events": null }),
         }),
+        // Test hook (#222): an app's AXManualAccessibility and
+        // AXEnhancedUserInterface, with `on` set to turn the latter on or
+        // off first; with `windowId`, each element of that window's page
+        // with the actions it lists.
+        "debugEnhancedUi" => {
+            if agent_screen_mcp::endpoint::instance().as_deref() != Some("e2e") {
+                return Some(Err(ControlError::invalid(
+                    "debugEnhancedUi requires the isolated e2e instance",
+                )));
+            }
+            let pid = p.int("pid").unwrap_or(0) as i32;
+            let on = p.bool("on");
+            let window = p.int("windowId").map(|w| WindowTarget {
+                pid,
+                window_id: w as u32,
+            });
+            Ok(off(cx, move || {
+                let answered = on.map(|on| ax::set_enhanced_ui(pid, on));
+                let elements: Vec<Value> = window
+                    .map(|w| ax::web_actions(w, 400))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(role, label, actions)| {
+                        json!({ "role": role, "label": label, "actions": actions })
+                    })
+                    .collect();
+                json!({
+                    "answered": answered,
+                    "manual": ax::app_flag(pid, "AXManualAccessibility"),
+                    "enhanced": ax::app_flag(pid, "AXEnhancedUserInterface"),
+                    "elements": elements,
+                })
+            })
+            .await)
+        }
         // Test hook: turn the check for a press's effect beside the user's
         // window off or on, to time what it costs.
         "debugPressCheck" => {
