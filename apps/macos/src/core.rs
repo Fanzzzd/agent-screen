@@ -1218,6 +1218,15 @@ impl Core {
                 Effect::Takeover { display, on } => {
                     self.input_queue.takeover(display, on);
                     self.stop_agent_input(display, on);
+                    // A window that left the display meanwhile for no
+                    // display at all goes back (#319). The Shell moves
+                    // windows; it may be the caller, so after this update.
+                    if !on && let Some(shell) = crate::ui::shell::current() {
+                        cx.defer(move |cx| {
+                            let _ =
+                                shell.update(cx, |shell, cx| shell.put_back_stranded(display, cx));
+                        });
+                    }
                 }
                 // The Shell moves windows; it may be the caller, so after
                 // this update.

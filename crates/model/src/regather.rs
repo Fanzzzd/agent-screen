@@ -64,6 +64,46 @@ pub fn place(frame: Option<Rect>, own: Rect) -> Place {
     }
 }
 
+/// When a hand-back looks for stranded windows (#319), in milliseconds
+/// after the one before; the first counts from the hand-back.
+pub const HAND_BACK_PASSES_MS: [u64; 3] = [300, 1000, 2500];
+
+/// A window shows too little to use when what of it is on the online
+/// displays together is narrower than this, in points,
+pub const MIN_VISIBLE_WIDTH: f64 = 100.0;
+/// or lower than this,
+pub const MIN_VISIBLE_HEIGHT: f64 = 40.0;
+/// or this share of its frame or less.
+pub const MIN_VISIBLE_SHARE: f64 = 0.1;
+
+/// Whether a window at `frame` is stranded: so little of it is on the
+/// online `displays`, all of them together, that neither the user nor the
+/// agent can use it. The agents' Chrome window left its Agent Display
+/// during a Takeover for a spot above the user's screen with 30 points
+/// showing (#319). A window the user parked at a screen's edge with a
+/// good part showing is not, nor one split across two displays.
+pub fn stranded(frame: Rect, displays: &[Rect]) -> bool {
+    let pieces: Vec<Rect> = displays
+        .iter()
+        .filter_map(|d| intersection(frame, *d))
+        .collect();
+    let Some(first) = pieces.first() else {
+        return true;
+    };
+    let span = pieces.iter().fold(*first, |all, p| all.union(p));
+    let area: f64 = pieces.iter().map(|p| p.width * p.height).sum();
+    span.width < MIN_VISIBLE_WIDTH
+        || span.height < MIN_VISIBLE_HEIGHT
+        || area <= frame.width * frame.height * MIN_VISIBLE_SHARE
+}
+
+/// The part of `a` inside `b`, if any.
+fn intersection(a: Rect, b: Rect) -> Option<Rect> {
+    let (x, y) = (a.x.max(b.x), a.y.max(b.y));
+    let (max_x, max_y) = (a.max_x().min(b.max_x()), a.max_y().min(b.max_y()));
+    (max_x > x && max_y > y).then(|| Rect::new(x, y, max_x - x, max_y - y))
+}
+
 /// What a pass does with one window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
@@ -189,6 +229,78 @@ mod tests {
 
     fn at(x: f64, y: f64) -> Option<Rect> {
         Some(Rect::new(x, y, 600.0, 400.0))
+    }
+
+    const MAIN: Rect = Rect::new(0.0, 0.0, 2560.0, 1440.0);
+
+    /// A display left of the main one and one above it.
+    const LEFT: Rect = Rect::new(-1280.0, 200.0, 1280.0, 800.0);
+    const ABOVE: Rect = Rect::new(-500.0, -1117.0, 1728.0, 1117.0);
+
+    #[test]
+    fn a_window_with_30_points_showing_is_stranded() {
+        // The report: 1200 by 720 at y=-690, its bottom 30 points over
+        // the main display's top edge.
+        let frame = Rect::new(681.0, -690.0, 1200.0, 720.0);
+        assert!(stranded(frame, &[MAIN, OWN]));
+    }
+
+    #[test]
+    fn a_window_half_showing_at_a_right_edge_is_not_stranded() {
+        // Parked by the user: 500 of 1200 points still on the screen.
+        let frame = Rect::new(2060.0, 300.0, 1200.0, 720.0);
+        assert!(!stranded(frame, &[MAIN, OWN]));
+        // On its own display, and wholly on the user's screen.
+        assert!(!stranded(
+            Rect::new(8168.0, -2200.0, 1200.0, 720.0),
+            &[MAIN, OWN]
+        ));
+        assert!(!stranded(
+            Rect::new(400.0, 300.0, 1200.0, 720.0),
+            &[MAIN, OWN]
+        ));
+    }
+
+    #[test]
+    fn a_window_off_every_display_is_stranded() {
+        assert!(stranded(
+            Rect::new(3000.0, -900.0, 1200.0, 720.0),
+            &[MAIN, OWN]
+        ));
+        // Touching an edge shows nothing.
+        assert!(stranded(Rect::new(2560.0, 0.0, 1200.0, 720.0), &[MAIN]));
+    }
+
+    #[test]
+    fn what_shows_on_two_displays_counts_together() {
+        // 60 points on each side of the edge between the left display and
+        // the main one: 120 wide in all.
+        let frame = Rect::new(-60.0, 300.0, 120.0, 400.0);
+        assert!(!stranded(frame, &[LEFT, MAIN]));
+        assert!(stranded(frame, &[MAIN]));
+    }
+
+    #[test]
+    fn displays_left_of_and_above_the_main_one_count() {
+        // Wholly on the display above, at negative coordinates.
+        assert!(!stranded(
+            Rect::new(-400.0, -1000.0, 1200.0, 720.0),
+            &[MAIN, ABOVE]
+        ));
+        // Past the left display's left edge with 30 points showing.
+        assert!(stranded(
+            Rect::new(-2450.0, 300.0, 1200.0, 720.0),
+            &[MAIN, LEFT]
+        ));
+        // The display above shows a good part of a window over the main
+        // display's top edge, which alone shows 30 points.
+        let frame = Rect::new(681.0, -690.0, 1200.0, 720.0);
+        assert!(!stranded(frame, &[MAIN, ABOVE]));
+    }
+
+    #[test]
+    fn with_no_display_online_every_window_is_stranded() {
+        assert!(stranded(Rect::new(0.0, 0.0, 100.0, 100.0), &[]));
     }
 
     #[test]
