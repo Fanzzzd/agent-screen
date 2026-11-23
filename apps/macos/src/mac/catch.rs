@@ -84,54 +84,50 @@ pub fn agent_acted_for(display: DisplayId, pid: i32, span: std::time::Duration) 
     drive(display, Some(pid), span);
 }
 
+/// The launches of running apps, which mark their display as driving the
+/// app (`new_window::Other::for_app`) while they last, one entry each.
+static LAUNCHES: Mutex<new_window::LaunchMarks<(DisplayId, i32), std::time::Instant>> =
+    Mutex::new(new_window::LaunchMarks::new());
+
 /// A launch of the running app `pid` on a display, which marks the display
 /// as driving the app while it lives, up to `new_window::LAUNCH_MARK_MAX`
-/// (`new_window::Other::for_app`). Dropped as the launch call ends, it puts
-/// back the span the display had for the app before, as a cold start's.
+/// from when it was last held anew (`new_window::Other::for_app`). Each
+/// launch holds its own mark: dropped as the launch ends, it leaves the
+/// display's other launches of the app and its cold start's span.
 pub struct Launching {
-    display: DisplayId,
-    pid: i32,
-    before: Option<std::time::Instant>,
+    id: u64,
 }
 
 /// Mark `display` as launching the running app `pid` until the returned
 /// guard drops.
 pub fn launching(display: DisplayId, pid: i32) -> Launching {
     let now = std::time::Instant::now();
-    let before = ACTED
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .iter()
-        .find(|(d, p, _)| *d == display && *p == Some(pid))
-        .map(|(_, _, until)| *until);
-    let until = new_window::launch_mark_until(now, None);
-    drive(display, Some(pid), until.duration_since(now));
     Launching {
-        display,
-        pid,
-        before,
+        id: lock(&LAUNCHES).hold((display, pid), now),
+    }
+}
+
+impl Launching {
+    /// Hold the mark `new_window::LAUNCH_MARK_MAX` from now, as the watch
+    /// for the launch's late document begins, even if it lapsed during the
+    /// launch call's wait. Returns when the mark ends, or None once the
+    /// user's use of the app ended it.
+    pub fn renew(&self) -> Option<std::time::Instant> {
+        lock(&LAUNCHES).renew(self.id, std::time::Instant::now())
     }
 }
 
 impl Drop for Launching {
     fn drop(&mut self) {
-        let now = std::time::Instant::now();
-        let mut acted = ACTED.lock().unwrap_or_else(|e| e.into_inner());
-        let entry = (self.display, Some(self.pid));
-        match new_window::mark_after_launch(self.before, now) {
-            Some(until) => {
-                if let Some(at) = acted.iter_mut().find(|(d, p, _)| (*d, *p) == entry) {
-                    at.2 = until;
-                }
-            }
-            None => acted.retain(|(d, p, _)| (*d, *p) != entry),
-        }
+        lock(&LAUNCHES).release(self.id);
     }
 }
 
-/// End the cold start's span for `pid` on the display, once the user uses
-/// the app too (`Seen::ends_cold_start`) or takes it back.
+/// End the cold start's span for `pid` on the display, and its launches'
+/// marks, once the user uses the app too (`Seen::ends_cold_start`) or
+/// takes it back.
 pub fn end_cold_start(display: DisplayId, pid: i32) {
+    lock(&LAUNCHES).end((display, pid));
     ACTED
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -210,6 +206,7 @@ fn acted_recently(display: DisplayId, pid: i32) -> bool {
         .unwrap_or_else(|e| e.into_inner())
         .iter()
         .any(|(d, p, until)| *d == display && p.is_none_or(|p| p == pid) && now < *until)
+        || lock(&LAUNCHES).marks((display, pid), now)
 }
 
 /// Whether the user clicked or pressed a key outside Agent Screen within
@@ -253,13 +250,20 @@ pub fn agent_drove(pid: i32) -> bool {
 /// launching `pid` (`new_window::another_may_have_made`).
 fn others_acted_recently(display: DisplayId, pid: i32) -> bool {
     let now = std::time::Instant::now();
-    let others: Vec<(DisplayId, bool)> = ACTED
+    let mut others: Vec<(DisplayId, bool)> = ACTED
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .iter()
         .filter(|(d, p, until)| *d != display && p.is_none_or(|p| p == pid) && now < *until)
         .map(|(d, p, _)| (*d, p.is_some()))
         .collect();
+    others.extend(
+        lock(&LAUNCHES)
+            .marked(now)
+            .into_iter()
+            .filter(|(d, p)| *d != display && *p == pid)
+            .map(|(d, _)| (d, true)),
+    );
     if others.is_empty() {
         return false;
     }

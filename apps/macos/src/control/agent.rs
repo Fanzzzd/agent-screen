@@ -6154,8 +6154,9 @@ async fn request_running_window(
 /// window the launch opens, a new one or a document's, shows on the
 /// user's screen: another display's catch or cold-start watch that sees it
 /// there leaves it to this launch (`new_window::another_may_have_made`).
-/// The mark holds until the launch call ends and drops the guard, as a
-/// large document may open late, at most `new_window::LAUNCH_MARK_MAX`.
+/// The mark holds until the launch, with its watch for a late document,
+/// ends and drops the guard, at most `new_window::LAUNCH_MARK_MAX` from
+/// the launch call or the watch's start.
 fn note_launching(id: DisplayId, pid: i32) -> crate::mac::catch::Launching {
     crate::mac::catch::launching(id, pid)
 }
@@ -6248,7 +6249,7 @@ fn spawn_url_handback(
 /// Check whether `document` is already shown in a pre-existing window; if not,
 /// watch for a late window showing it so it does not stay on the user's screen.
 /// `launching`, the launch's mark (`note_launching`), lasts as long as the
-/// watch, still ending at its own 30 s deadline.
+/// watch, up to 30 s from the watch's start.
 /// Returns `(shown_already, watching_started)`.
 #[allow(clippy::too_many_arguments)]
 async fn watch_late_document(
@@ -6287,10 +6288,16 @@ async fn watch_late_document(
     let core = core.clone();
     let before = before.clone();
     cx.spawn(async move |cx: &mut AsyncApp| {
+        // The mark counts from here, past the launch call's own wait, and
+        // the watch ends with it.
+        let marked_until = launching.as_ref().and_then(|l| l.renew());
         for _ in 0..200 {
             cx.background_executor()
                 .timer(Duration::from_millis(150))
                 .await;
+            if marked_until.is_some_and(|until| Instant::now() >= until) {
+                break;
+            }
             let taken = document_catch.as_ref().and_then(|c| c.taken());
             let (seen, file) = (before.clone(), document.clone());
             let late = cx

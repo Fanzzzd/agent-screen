@@ -117,27 +117,91 @@ pub fn another_may_have_made(others: &[Other]) -> bool {
 }
 
 /// How long, at most, a launch of a running app marks its display as
-/// driving the app (`Other::for_app`): the mark lasts while the launch
-/// runs, as a large document may open late, but no longer than another
-/// display's cold-start watch, which it guards against.
+/// driving the app (`Other::for_app`), counted from when the mark was last
+/// held anew: from the launch call, then from the start of its watch for
+/// a late document. The mark lasts while either runs, as a large document
+/// may open late, but no longer than another display's cold-start watch,
+/// which it guards against.
 pub const LAUNCH_MARK_MAX: Duration = COLD_START;
 
-/// When the launch's mark for its display and app ends, from when it began
-/// and the launch's own end, if it ended: when the launch ends, or at
-/// `LAUNCH_MARK_MAX` from the start for one that runs longer.
-pub fn launch_mark_until<T>(began: T, ended: Option<T>) -> T
-where
-    T: Copy + Ord + std::ops::Add<Duration, Output = T>,
-{
-    let max = began + LAUNCH_MARK_MAX;
-    ended.map_or(max, |end| end.min(max))
+/// The launches of running apps that mark their display as driving the
+/// app, one entry per launch. `K` names the display and app. A key stays
+/// marked while any of its launches holds a mark: two launches from one
+/// display of the same app each hold their own, and the first to end
+/// leaves the other's.
+#[derive(Clone, Debug)]
+pub struct LaunchMarks<K, T> {
+    held: Vec<(u64, K, T)>,
+    next: u64,
 }
 
-/// What the display's mark for the app goes back to as the launch ends:
-/// the span it had before, as a cold start's, while that still runs, or
-/// none.
-pub fn mark_after_launch<T: Copy + Ord>(before: Option<T>, now: T) -> Option<T> {
-    before.filter(|b| *b > now)
+impl<K, T> Default for LaunchMarks<K, T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<K, T> LaunchMarks<K, T> {
+    pub const fn new() -> Self {
+        LaunchMarks {
+            held: Vec::new(),
+            next: 0,
+        }
+    }
+
+    /// End the launch's mark, if it still holds one.
+    pub fn release(&mut self, launch: u64) {
+        self.held.retain(|(id, _, _)| *id != launch);
+    }
+}
+
+impl<K, T> LaunchMarks<K, T>
+where
+    K: Copy + PartialEq,
+    T: Copy + Ord + std::ops::Add<Duration, Output = T>,
+{
+    /// Mark `key` for a launch beginning at `now`, until it is released or
+    /// `LAUNCH_MARK_MAX` passes. Returns the launch's id.
+    pub fn hold(&mut self, key: K, now: T) -> u64 {
+        let id = self.next;
+        self.next += 1;
+        self.held.push((id, key, now + LAUNCH_MARK_MAX));
+        id
+    }
+
+    /// Hold the launch's mark `LAUNCH_MARK_MAX` from `now`, as its watch
+    /// for a late document begins, after the launch call's own wait, which
+    /// a busy app can stretch past the mark's first span. Returns when the
+    /// mark now ends, or None for a mark the launch no longer holds: one
+    /// released, or ended as the user used the app.
+    pub fn renew(&mut self, launch: u64, now: T) -> Option<T> {
+        let at = self.held.iter_mut().find(|(id, _, _)| *id == launch)?;
+        at.2 = at.2.max(now + LAUNCH_MARK_MAX);
+        Some(at.2)
+    }
+
+    /// Whether `key` is marked at `now`.
+    pub fn marks(&self, key: K, now: T) -> bool {
+        self.held
+            .iter()
+            .any(|(_, k, until)| *k == key && *until > now)
+    }
+
+    /// The keys marked at `now`, each once.
+    pub fn marked(&self, now: T) -> Vec<K> {
+        let mut keys: Vec<K> = Vec::new();
+        for (_, k, until) in &self.held {
+            if *until > now && !keys.contains(k) {
+                keys.push(*k);
+            }
+        }
+        keys
+    }
+
+    /// End every launch's mark for `key`, as the user uses the app too.
+    pub fn end(&mut self, key: K) {
+        self.held.retain(|(_, k, _)| *k != key);
+    }
 }
 
 /// Where a new window is when the launch's watch finds it.
@@ -408,24 +472,84 @@ mod tests {
     #[test]
     fn a_launch_marks_its_display_while_it_runs_up_to_the_cold_start() {
         let s = Duration::from_secs;
-        let began = s(100);
-        assert_eq!(
-            launch_mark_until(began, None),
-            began + COLD_START,
-            "a document still opening keeps the mark, up to another display's cold-start watch"
+        let key = (1, 42);
+        let mut marks = LaunchMarks::new();
+        marks.hold(key, s(100));
+        assert!(
+            marks.marks(key, s(112)),
+            "a large file that took 12 s, past ACTION_WINDOW, is still marked"
         );
-        assert_eq!(
-            launch_mark_until(began, Some(s(112))),
-            s(112),
-            "a large file that took 12 s, past ACTION_WINDOW, stays marked until the launch ends"
+        assert!(
+            !marks.marks((2, 42), s(112)),
+            "another display isn't marked"
         );
-        assert_eq!(launch_mark_until(began, Some(s(200))), began + COLD_START);
+        assert!(!marks.marks((1, 7), s(112)), "nor another app");
+        assert!(
+            !marks.marks(key, s(100) + COLD_START),
+            "a launch that never ends loses its mark at the cold start's end"
+        );
+        let launch = marks.hold(key, s(200));
+        marks.release(launch);
+        assert!(
+            !marks.marks(key, s(201)),
+            "the mark ends as the launch ends"
+        );
         assert!(LAUNCH_MARK_MAX > ACTION_WINDOW);
-        // As the launch ends, the display's own cold start of the app
-        // keeps its span; an expired or absent one leaves no mark.
-        assert_eq!(mark_after_launch(Some(s(130)), s(112)), Some(s(130)));
-        assert_eq!(mark_after_launch(Some(s(105)), s(112)), None);
-        assert_eq!(mark_after_launch(None, s(112)), None);
+    }
+
+    #[test]
+    fn two_launches_of_one_app_from_one_display_each_hold_the_mark() {
+        let s = Duration::from_secs;
+        let key = (1, 42);
+        let mut marks = LaunchMarks::new();
+        let older = marks.hold(key, s(100));
+        let newer = marks.hold(key, s(105));
+        assert_eq!(marks.marked(s(106)), vec![key], "one key, listed once");
+        marks.release(older);
+        assert!(
+            marks.marks(key, s(110)),
+            "the older watch ending leaves the newer one's document marked"
+        );
+        marks.release(newer);
+        assert!(
+            !marks.marks(key, s(110)),
+            "the last one ending ends the mark"
+        );
+        assert!(marks.marked(s(110)).is_empty());
+    }
+
+    #[test]
+    fn a_late_document_watch_holds_the_mark_from_its_own_start() {
+        let s = Duration::from_secs;
+        let key = (1, 42);
+        let mut marks = LaunchMarks::new();
+        let launch = marks.hold(key, s(100));
+        // The launch call waited 10 s for the document before handing it
+        // to the watch, which then waits up to its own 30 s.
+        marks.renew(launch, s(110));
+        assert!(
+            marks.marks(key, s(100) + COLD_START + s(5)),
+            "a document showing late in the watch is still this display's launch"
+        );
+        assert!(!marks.marks(key, s(110) + COLD_START));
+        // A busy app took 40 s to answer before the watch began: the mark
+        // lapsed meanwhile, and the watch holds it again.
+        let slow = marks.hold(key, s(300));
+        assert!(!marks.marks(key, s(340)));
+        assert_eq!(marks.renew(slow, s(340)), Some(s(340) + COLD_START));
+        assert!(marks.marks(key, s(365)), "the watch is protected again");
+        marks.release(slow);
+        assert_eq!(
+            marks.renew(slow, s(366)),
+            None,
+            "a released mark stays ended"
+        );
+        // The user using the app ends its launches' marks for good.
+        let launch = marks.hold(key, s(400));
+        marks.end(key);
+        assert!(!marks.marks(key, s(401)));
+        assert_eq!(marks.renew(launch, s(402)), None);
+        assert!(!marks.marks(key, s(402)));
     }
 
     #[test]
