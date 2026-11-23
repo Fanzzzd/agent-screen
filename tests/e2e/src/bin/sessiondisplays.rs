@@ -79,7 +79,13 @@ fn on(pid: u32, window: u64, display: u64) -> bool {
 
 fn test(tag: &str) -> Result<()> {
     let session = format!("sessiondisplays-{}", std::process::id());
-    let env = [("CLAUDE_CODE_SESSION_ID", session.as_str())];
+    // The host trusts CLAUDE_CODE_SESSION_ID only from a client that says
+    // it is Claude Code (ADR 0021, Sessions). Without the name, each
+    // McpClient below would be its own pipe session and never rejoin B.
+    let env = [
+        ("CLAUDE_CODE_SESSION_ID", session.as_str()),
+        ("E2E_CLIENT_NAME", "claude-code"),
+    ];
     let client = McpClient::start(&env)?;
     let create = |args: serde_json::Value| client.call("create_display", args);
 
@@ -202,7 +208,10 @@ fn test(tag: &str) -> Result<()> {
     let _ = control.call("debugShow", json!({ "surface": "dismiss", "displayId": a }));
     sleep_ms(750);
     let other_session = format!("{session}-other");
-    let other = McpClient::start(&[("CLAUDE_CODE_SESSION_ID", other_session.as_str())])?;
+    let other = McpClient::start(&[
+        ("CLAUDE_CODE_SESSION_ID", other_session.as_str()),
+        ("E2E_CLIENT_NAME", "claude-code"),
+    ])?;
     let c_reply = other.call("create_display", json!({ "title": "Other session" }))?;
     let c = c_reply
         .display_id()
