@@ -4,7 +4,10 @@
 //! terminal focused, Edit > Find opens the terminal's find box, not the
 //! editor's. Agent Screen can't change that (AppKit runs the press with no
 //! current event), so the press answers with a note that says so and
-//! points to the Command Palette. Cursor starts on a
+//! points to the Command Palette. The script asks for that press with
+//! `realInput: false`: by default an item pressed while a text field has
+//! focus waits in the Input Queue as a real click (menupress covers it).
+//! Cursor starts on a
 //! throwaway profile and extensions folder with
 //! tests/e2e/fixtures/workspace/notes.txt open.
 //!
@@ -12,6 +15,7 @@
 //!
 //! Skips when Cursor runs. 1 display.
 
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use agent_screen_tests::{
@@ -36,10 +40,18 @@ fn main() -> ExitCode {
         );
         start_test_app(&[("AGENTSCREEN_LANG", "en")])?;
         let result = test();
-        quit_profile(&out().join("cursor-profile"));
+        quit_profile(&profile());
         stop_test_app();
         result
     })
+}
+
+/// Cursor's throwaway profile. Cursor listens on
+/// `<profile>/<version>-main.sock`, and quits before its first window when
+/// that path is longer than a socket's 103 characters, as under a
+/// worktree's target/e2e.
+fn profile() -> PathBuf {
+    std::env::temp_dir().join("agent-screen-cursormenu")
 }
 
 /// An element's number in a tree.
@@ -52,7 +64,7 @@ fn number(tree: &str, pattern: &str) -> Result<i64> {
 
 fn test() -> Result<()> {
     let control = Control::connect()?;
-    let profile = out().join("cursor-profile");
+    let profile = profile();
     let extensions = out().join("cursor-extensions");
     let _ = std::fs::remove_dir_all(&profile);
     let display = control.call(
@@ -84,7 +96,9 @@ fn test() -> Result<()> {
             .unwrap_or_default()
             .to_string())
     };
-    // Menu > item, both through accessibility, as act_on_element does.
+    // Menu > item, both through accessibility. With a text field focused,
+    // act_on_element sends an Electron app's menu item as a real click
+    // through the Input Queue (#127); realInput false keeps the press.
     let choose = |menu: &str, item: &str| -> Result<String> {
         let bar = number(&tree()?, &format!(r#"menubaritem "{menu}""#))?;
         let listed = control.call(
@@ -95,7 +109,7 @@ fn test() -> Result<()> {
         let n = number(&listed, &format!(r#"menuitem "{item}"#))?;
         let pressed = control.call(
             "elementAction",
-            with(json!({ "element": n, "action": "press" })),
+            with(json!({ "element": n, "action": "press", "realInput": false })),
         )?;
         Ok(pressed["note"].as_str().unwrap_or_default().to_string())
     };

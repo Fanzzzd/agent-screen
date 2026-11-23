@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use agent_screen_tests::{
     Control, McpClient, ToolResult, Value, Window, allow_on_your_screen, check, cut, in_test_app,
@@ -214,6 +214,9 @@ fn body(r: &Robust, temporary: &mut Vec<String>) -> Result<()> {
     );
 
     // TextEdit from not running: a document window on the agent's display.
+    // Every window TextEdit makes in the cold start's 30 s from here is the
+    // agent's (ADR 0007).
+    let cold_start = Instant::now();
     let (first_flash, launched) = watch_flash("TextEdit", || r.launch("TextEdit"))?;
     check(
         "TextEdit's first window shows on the user's screen 34 ms at most",
@@ -593,6 +596,11 @@ fn body(r: &Robust, temporary: &mut Vec<String>) -> Result<()> {
             ),
         );
         sleep_ms(3500);
+        // Past the cold start too, or the late window is the agent's.
+        let past_cold_start = agent_screen_model::new_window::COLD_START + Duration::from_secs(1);
+        if let Some(left) = past_cold_start.checked_sub(cold_start.elapsed()) {
+            std::thread::sleep(left);
+        }
         let main_before = r.on_main_display("TextEdit")?;
         // From here the script puts windows on the user's screen on
         // purpose, until TextEdit quits at the end: this late one, the one
@@ -603,12 +611,13 @@ fn body(r: &Robust, temporary: &mut Vec<String>) -> Result<()> {
             600_000,
             "the script opens windows there that must stay put",
         );
+        let made_at = cold_start.elapsed().as_secs_f64();
         try_osa("tell application \"TextEdit\" to make new document")?;
         sleep_ms(1500);
         check(
             "a window that opens long after the agent's last action stays put",
             r.on_main_display("TextEdit")? == main_before + 1,
-            "",
+            format!("made {made_at:.1} s after TextEdit's cold start began"),
         );
         let moved = r.computer(json!({ "action": "mouse_move", "coordinate": [1270, 790] }))?;
         check(
@@ -674,14 +683,30 @@ fn body(r: &Robust, temporary: &mut Vec<String>) -> Result<()> {
         after.get("windows").as_array().is_some_and(Vec::is_empty),
         cut(&after.structured_content.to_string(), 160),
     );
+    // A window taken back is the user's: place_window asks them with a
+    // Window Request (ADR 0007), and they answer Keep, as the card's
+    // button would.
+    let keep = std::thread::spawn(move || {
+        sleep_ms(800);
+        Control::connect()?.call(
+            "debugAnswerWindow",
+            json!({ "displayId": display_id, "give": false }),
+        )
+    });
     let back = client.tool(
         "place_window",
         json!({ "display_id": display_id, "window_id": mine.window_id }),
     )?;
+    let kept = keep.join().expect("answer thread");
     check(
-        "place_window refuses the window taken back",
-        back.is_error && back.text().contains("took that window back"),
-        cut(back.text(), 120),
+        "place_window asks for the window taken back, and Keep leaves it with the user",
+        back.is_error
+            && back.text().contains("declined")
+            && !r
+                .windows_of("TextEdit")?
+                .iter()
+                .any(|w| w.window_id == mine.window_id),
+        format!("{}; answer: {kept:?}", cut(back.text(), 120)),
     );
     Ok(())
 }
