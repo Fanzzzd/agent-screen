@@ -1027,20 +1027,24 @@ impl Forwarder {
             // Chromium's accessibility shows nothing new until the page's
             // script is idle: judge once the text has changed and then held
             // still for 1.5 s, within 5 s.
+            // A field that never changes, as a word typed over the same
+            // word, is given up on sooner. A Takeover ends the wait.
             if let Some((field, before)) = field {
+                use agent_screen_model::typing::{READ_EVERY_MS, Readback, readback};
                 let mut shown = before.clone();
                 let mut still = 0;
                 for _ in 0..200 {
-                    let now = super::ax::string_attribute(&field, "AXValue").unwrap_or_default();
-                    if agent_screen_model::typing::landed(&text, &now) {
-                        return Sent::All;
+                    if stopped.load(std::sync::atomic::Ordering::Relaxed) {
+                        return Sent::Typed(text.chars().count());
                     }
+                    let now = super::ax::string_attribute(&field, "AXValue").unwrap_or_default();
                     still = if now == shown { still + 1 } else { 0 };
                     shown = now;
-                    if still >= 60 && shown != before {
-                        return Sent::Dropped(shown);
+                    match readback(&text, &before, &shown, still) {
+                        Readback::Landed | Readback::Unconfirmed => return Sent::All,
+                        Readback::Dropped => return Sent::Dropped(shown),
+                        Readback::Wait => thread::sleep(Duration::from_millis(READ_EVERY_MS)),
                     }
-                    thread::sleep(Duration::from_millis(25));
                 }
             }
             Sent::All
