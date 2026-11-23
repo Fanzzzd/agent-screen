@@ -616,7 +616,9 @@ fn web_tree_pending(pid: i32) -> bool {
 }
 
 /// Ask a Chromium or Electron app to publish its pages' elements: whether
-/// it took the request.
+/// it took the request. Dia 1.58 answers kAXErrorNotImplemented to
+/// AXEnhancedUserInterface and keeps it false, and its page elements list
+/// no AXPress either way (`diapress`, #222).
 fn publish_web_tree(pid: i32, timeout: f32) -> bool {
     let app = application(pid);
     unsafe { app.set_messaging_timeout(timeout) };
@@ -627,6 +629,47 @@ fn publish_web_tree(pid: i32, timeout: f32) -> bool {
                 set_attribute(&app, "AXEnhancedUserInterface", CFBoolean::new(true));
                 true
             })
+}
+
+/// An app's boolean attribute such as AXEnhancedUserInterface: None where
+/// it doesn't say.
+pub fn app_flag(pid: i32, name: &str) -> Option<bool> {
+    attribute(&application(pid), name)
+        .and_then(|v| v.downcast_ref::<CFBoolean>().map(|b| b.as_bool()))
+}
+
+/// Set an app's AXEnhancedUserInterface: whether it answered success.
+/// Chrome applies it and answers an error, so read it back to know.
+pub fn set_enhanced_ui(pid: i32, on: bool) -> bool {
+    set_attribute(
+        &application(pid),
+        "AXEnhancedUserInterface",
+        CFBoolean::new(on),
+    )
+}
+
+/// Each element of the first web area of `target`'s window, breadth
+/// first, at most `limit`: its role, its label and the actions it lists.
+pub fn web_actions(target: WindowTarget, limit: usize) -> Vec<(String, String, Vec<String>)> {
+    let Some(area) = window_element(target).and_then(|w| web_area(&w)) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut queue = std::collections::VecDeque::from([area]);
+    while let Some(element) = queue.pop_front() {
+        if out.len() >= limit {
+            break;
+        }
+        let role = string_attribute(&element, "AXRole").unwrap_or_default();
+        let label = ["AXTitle", "AXDescription", "AXValue"]
+            .iter()
+            .filter_map(|a| string_attribute(&element, a))
+            .find(|t| !t.trim().is_empty())
+            .unwrap_or_default();
+        out.push((role, label, actions(&element)));
+        queue.extend(elements_attribute(&element, "AXChildren"));
+    }
+    out
 }
 
 /// The address of the page in `target`'s window: its first web area's

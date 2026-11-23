@@ -271,6 +271,9 @@ pub const SCRIPTS: &[Script] = &[
         .manual(
         "it needs your own browser in front: run it with E2E_BROWSER=\"Google Chrome\" E2E_CHROME=1 while a Chrome window of yours has focus; Dia skips until it is verified",
     ),
+    script("diapress", &[AgentInput, Browser, Elements], Full, Agent, 1)
+        .hands_off()
+        .manual("it drives your own Dia: run it with E2E_DIA=1 from another app; it sets Dia's AXEnhancedUserInterface for a minute and, if Dia has a window of yours, brings Dia forward twice for a few seconds"),
     script("diaqueue", &[AgentInput, Browser, InputQueue], Full, Agent, 1)
         .hands_off()
         .manual("it drives your own Dia: run it with E2E_DIA=1 from another app; it brings Dia forward twice for a few seconds"),
