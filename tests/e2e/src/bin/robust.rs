@@ -674,14 +674,30 @@ fn body(r: &Robust, temporary: &mut Vec<String>) -> Result<()> {
         after.get("windows").as_array().is_some_and(Vec::is_empty),
         cut(&after.structured_content.to_string(), 160),
     );
+    // A window taken back is the user's: place_window asks them with a
+    // Window Request (ADR 0007), and they answer Keep, as the card's
+    // button would.
+    let keep = std::thread::spawn(move || {
+        sleep_ms(800);
+        Control::connect()?.call(
+            "debugAnswerWindow",
+            json!({ "displayId": display_id, "give": false }),
+        )
+    });
     let back = client.tool(
         "place_window",
         json!({ "display_id": display_id, "window_id": mine.window_id }),
     )?;
+    let kept = keep.join().expect("answer thread");
     check(
-        "place_window refuses the window taken back",
-        back.is_error && back.text().contains("took that window back"),
-        cut(back.text(), 120),
+        "place_window asks for the window taken back, and Keep leaves it with the user",
+        back.is_error
+            && back.text().contains("declined")
+            && !r
+                .windows_of("TextEdit")?
+                .iter()
+                .any(|w| w.window_id == mine.window_id),
+        format!("{}; answer: {kept:?}", cut(back.text(), 120)),
     );
     Ok(())
 }
