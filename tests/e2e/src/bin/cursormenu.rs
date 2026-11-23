@@ -4,7 +4,10 @@
 //! terminal focused, Edit > Find opens the terminal's find box, not the
 //! editor's. Agent Screen can't change that (AppKit runs the press with no
 //! current event), so the press answers with a note that says so and
-//! points to the Command Palette. Cursor starts on a
+//! points to the Command Palette. The script asks for that press with
+//! `realInput: false`: by default an item pressed while a text field has
+//! focus waits in the Input Queue as a real click (menupress covers it).
+//! Cursor starts on a
 //! throwaway profile and extensions folder with
 //! tests/e2e/fixtures/workspace/notes.txt open.
 //!
@@ -93,7 +96,9 @@ fn test() -> Result<()> {
             .unwrap_or_default()
             .to_string())
     };
-    // Menu > item, both through accessibility, as act_on_element does.
+    // Menu > item, both through accessibility. With a text field focused,
+    // act_on_element sends an Electron app's menu item as a real click
+    // through the Input Queue (#127); realInput false keeps the press.
     let choose = |menu: &str, item: &str| -> Result<String> {
         let bar = number(&tree()?, &format!(r#"menubaritem "{menu}""#))?;
         let listed = control.call(
@@ -104,7 +109,7 @@ fn test() -> Result<()> {
         let n = number(&listed, &format!(r#"menuitem "{item}"#))?;
         let pressed = control.call(
             "elementAction",
-            with(json!({ "element": n, "action": "press" })),
+            with(json!({ "element": n, "action": "press", "realInput": false })),
         )?;
         Ok(pressed["note"].as_str().unwrap_or_default().to_string())
     };
