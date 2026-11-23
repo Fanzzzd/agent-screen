@@ -18,8 +18,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use agent_screen_tests::{
-    McpClient, Window, check, cut, in_test_app, instance, json, now_ms, quit_app, run, running,
-    skip, sleep_ms, wait_for_idle,
+    McpClient, Window, allow_on_your_screen, check, cut, in_test_app, instance, json, now_ms,
+    quit_app, run, running, skip, sleep_ms, wait_for_idle,
 };
 use anyhow::{Context, Result};
 use regex::Regex;
@@ -211,6 +211,11 @@ fn browse(client: &McpClient, display_id: u64, port: u16, dir: &Path) -> Result<
     );
 
     // Safari runs now: the URL must go to the new window.
+    allow_on_your_screen(
+        "Safari",
+        150,
+        "a running app's new window shows where the app puts it until the catch moves it, 138 ms at most over 30 launches (robust's RUNNING_FLASH_LIMIT)",
+    );
     let second = client
         .tool(
             "launch_app",
