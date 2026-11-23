@@ -12,6 +12,7 @@
 //!
 //! Skips when Cursor runs. 1 display.
 
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use agent_screen_tests::{
@@ -36,10 +37,18 @@ fn main() -> ExitCode {
         );
         start_test_app(&[("AGENTSCREEN_LANG", "en")])?;
         let result = test();
-        quit_profile(&out().join("cursor-profile"));
+        quit_profile(&profile());
         stop_test_app();
         result
     })
+}
+
+/// Cursor's throwaway profile. Cursor listens on
+/// `<profile>/<version>-main.sock`, and quits before its first window when
+/// that path is longer than a socket's 103 characters, as under a
+/// worktree's target/e2e.
+fn profile() -> PathBuf {
+    std::env::temp_dir().join("agent-screen-cursormenu")
 }
 
 /// An element's number in a tree.
@@ -52,7 +61,7 @@ fn number(tree: &str, pattern: &str) -> Result<i64> {
 
 fn test() -> Result<()> {
     let control = Control::connect()?;
-    let profile = out().join("cursor-profile");
+    let profile = profile();
     let extensions = out().join("cursor-extensions");
     let _ = std::fs::remove_dir_all(&profile);
     let display = control.call(
