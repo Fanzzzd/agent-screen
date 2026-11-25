@@ -451,6 +451,21 @@ fn panel_options() -> WindowOptions {
     }
 }
 
+/// Watch the user's HID input and take the Viewer's presses (ADR 0014),
+/// once Accessibility is on: at launch, or as soon as the user turns it
+/// on. Without it, a tap that listens to keys makes macOS ask for Input
+/// Monitoring ("Keystroke Receiving") at launch, and a request for Screen
+/// Recording waits behind that prompt without putting Agent Screen in its
+/// list. The press tap can't be made without Accessibility anyway.
+fn watch_input() {
+    static WATCHING: std::sync::Once = std::sync::Once::new();
+    WATCHING.call_once(|| {
+        crate::mac::real_input::watch();
+        // After real_input::watch: a tap inserted later runs first.
+        viewer_input::install_private_press();
+    });
+}
+
 /// Start the shell: the menu bar icon, Peek, the Viewer and the guards.
 pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> {
     let mtm = MainThreadMarker::new().expect("main thread");
@@ -458,7 +473,9 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
     native::set_sender(events);
     let icon = StatusIcon::install(mtm);
     native::watch_mouse();
-    crate::mac::real_input::watch();
+    if crate::mac::ax::is_trusted() {
+        watch_input();
+    }
     native::watch_screens();
     native::watch_activations();
     crate::mac::cg::watch_display_changes();
@@ -467,8 +484,6 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
     let accent = native::accent();
     super::theme::set_accent(accent);
     viewer_input::install();
-    // After real_input::watch: a tap inserted later runs first.
-    viewer_input::install_private_press();
     notify::install();
     notify::check();
     native::debug_appearance();
@@ -2797,6 +2812,10 @@ impl Shell {
                 self.wait_for(p);
                 self.push_setup(cx);
             }
+            // The setup window's Turn On for a permission, as a click
+            // presses it: asking macOS, the pane and its helper.
+            "grant-screen" => self.grant(Permission::ScreenRecording, cx),
+            "grant-ax" => self.grant(Permission::Accessibility, cx),
             // The helper alone at the top-left corner of the main screen.
             "assist-preview" | "assist-preview-unlisted" | "assist-preview-still-off" => {
                 assist::preview(
@@ -4396,11 +4415,12 @@ impl Shell {
         }
     }
 
-    /// The user clicked 开启… for `p`: the system prompt when macOS still
-    /// shows one, else the pane, with the helper pinned to it.
+    /// The user clicked 开启… for `p`: Agent Screen asks, which puts it in
+    /// the list, and the pane opens with the helper pinned to it.
     pub fn grant(&mut self, p: Permission, cx: &mut Context<Self>) {
         permissions::request(p);
-        // Asking puts Agent Screen in the list, switched off.
+        // Asking puts Agent Screen in the list, switched off. Still not
+        // there, the helper says to drag the icon in.
         let listed = permissions::listed(p).unwrap_or(true);
         assist::show(p, listed);
         self.wait_for(p);
@@ -4659,6 +4679,9 @@ impl Shell {
             return;
         }
         self.permissions = now;
+        if now.accessibility {
+            watch_input();
+        }
         self.icon.set_needs_setup(!now.complete());
         // The Viewer covers its picture while Screen Recording is off.
         self.repaint(cx);
