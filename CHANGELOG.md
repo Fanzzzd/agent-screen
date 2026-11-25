@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.1.44 (2026-11-25)
+
+### Features
+
+#### Connect now sets up every agent client it finds on your Mac, not only Claude Code and Codex: Cursor, Claude Desktop, Antigravity (app and `agy`), Gemini CLI, OpenCode, VS Code and Copilot CLI, Windsurf, Devin, Zed, Cline, Roo Code and Goose too. Agent Screen edits each client's own config file and keeps your other servers, your settings in its entry and your comments. A config file it can't read is left as it is, and a crash during a write never leaves half a file. Claude Code no longer needs its command line on the app's PATH, so Connect no longer waits seconds for your shell.
+
+An entry left by a copy you ran from the disk image or Downloads is now repointed to the copy you run. Three commands show and change this from Terminal: `AgentScreen mcp status` lists each client and whether its config runs this copy, `mcp install --client cursor,zed` connects only the clients you name (`--dry-run` shows what would change), and `mcp uninstall` takes Agent Screen's entry out again. Each takes `--json`.
+
+The Agent Screen skill now also goes to `~/.agents/skills/agent-screen`, which Codex and other agents read, so Codex gets no second copy. A copy that `npx skills` installed or that is a link stays as it is.
+
+#### Settings now asks you to move Agent Screen to Applications when you open it from the disk image, from Downloads, or from the temporary copy macOS runs a downloaded app from. Permissions and agent connections set up from there stop working once the app moves. **Move to Applications…** copies it into Applications with its signature intact, asks before replacing a copy that is already there, and opens the moved copy at Settings. The disk image and the download are left as they were.
+
+**Reset Permissions…** beside the Permissions title in Settings clears Agent Screen's own Screen Recording, Accessibility and Input Monitoring entries, ends open Agent Displays and reopens Settings so you can turn them on again. When a switch is on in System Settings but macOS still says no, the row offers **Reset & Reopen…** instead of asking you to remove and re-add the app by hand. It asks first, and it never touches another app's entries. `AgentScreen permissions reset` does the same from Terminal.
+
+The Agents section of Settings now lists every agent client found on your Mac, each with its state: live now, configured (new sessions pick it up, or restart the app for Claude Desktop), an old path, not connected, or a config it can't read. Each row has one button, Connect, Fix Path or Disconnect, and **Connect All Detected** connects the rest at once, with no dialog to dismiss. **Other MCP Clients** copies the config as `mcpServers` JSON, OpenCode JSON, TOML or a command line. Once permissions are on and a client is configured, Settings shows a prompt to copy into a new session, which turns green when the agent loads the tools.
+
+### Fixes
+
+- Agent Displays get their own wallpaper on a first install too. Agent Screen now draws the picture itself, at each display's size and with the display's name, and keeps it in its Application Support folder, so it no longer depends on a picture file inside the app or on where the app was opened from. The old bundled picture still said Sidescreen; the drawn one says the display's name, which is how System Settings tells agent displays apart from your monitors. A display that macOS listed late gets its picture at the next screen change instead of going without one. A wallpaper you chose with Choose… stays as it was.
+- When a display has ended, agents are now told why: the session ended it with `end_display`, the session's connection closed for longer than the 2-second grace (as when a client restarts its MCP server), or you closed it. An agent whose client started a new MCP server learns that the display belonged to its own earlier session, instead of reading that it belongs to another session. Each end also leaves one line with its reason in `displays.log`, and `get_diagnostics` lists the last few ends, so a bug report says why a display went away.
+- On a first install, Agent Screen now shows up in System Settings' Screen & System Audio Recording list once you press Turn On… in its Settings window. Before, Agent Screen started watching the keyboard at launch, before it had Accessibility, so macOS asked for Input Monitoring ("Keystroke Receiving") right away, and the Screen Recording request then waited behind that prompt without adding Agent Screen to the list. Agent Screen now starts watching input only once Accessibility is on, so no Input Monitoring prompt comes up. Turn On… always asks macOS and then opens the pane, whatever macOS said before. Agents that hit a missing permission now tell you to press Turn On… in Agent Screen's Settings window, since System Settings opened by hand may not list Agent Screen yet.
+
+#### Agents no longer report a window as closed when it only went out of sight. When an agent's window is minimized, its app is hidden, or it sits on a macOS Space (desktop) the agent's display isn't showing, `wait_for_change` now says which (`window_minimized`, `window_hidden`, `window_on_other_space`) instead of `window_closed`. `list_windows` keeps such a window with an `offScreen` entry instead of dropping it, and `get_window_state` and the other window tools say why they can't reach it and what to ask you, instead of "no window". Agent Screen still never switches your Space or shows a hidden app for the agent.
+
+With "Displays have separate Spaces" off in System Settings > Desktop & Dock > Mission Control, as many AeroSpace users run it, every display shares one Space, so switching desktops on your screen also takes the agents' windows off their displays. Agent Screen now notices this. It tells the agent at `create_display`, shows you a card once, and lists the setting in Settings under Agent Displays with a button that opens Desktop & Dock. Turning the setting on takes a logout; Agent Screen doesn't change it for you.
+
 ## 0.1.43 (2026-11-23)
 
 ### Fixes
