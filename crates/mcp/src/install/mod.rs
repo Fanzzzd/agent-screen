@@ -425,6 +425,85 @@ pub fn client(id: &str) -> Option<&'static Client> {
         .find(|c| c.id == id || c.aliases.contains(&id))
 }
 
+/// The client whose MCP sessions introduce themselves as `info`, the
+/// `clientInfo.name` from `initialize` as the app hears it (Claude Code
+/// and Codex already given their product names). Matched by the words in
+/// it, so "claude-ai" is Claude Desktop and "Visual Studio Code" is VS
+/// Code; None when no client's words are there.
+pub fn client_for_info(info: &str) -> Option<&'static Client> {
+    let squashed: String = info
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    let has = |word: &str| squashed.contains(word);
+    let id = if has("claudecode") {
+        "claude-code"
+    } else if has("claudeai") || has("claudedesktop") || squashed == "claude" {
+        "claude-desktop"
+    } else if has("codex") {
+        "codex"
+    } else if has("cursor") {
+        "cursor"
+    } else if has("antigravity") || squashed == "agy" {
+        "antigravity"
+    } else if has("gemini") {
+        "gemini-cli"
+    } else if has("opencode") {
+        "opencode"
+    } else if has("visualstudiocode") || has("vscode") || has("copilot") {
+        "vscode"
+    } else if has("windsurf") || has("codeium") {
+        "windsurf"
+    } else if has("devin") {
+        "devin"
+    } else if has("zed") {
+        "zed"
+    } else if has("roo") {
+        "roo-code"
+    } else if has("cline") {
+        "cline"
+    } else if has("goose") {
+        "goose"
+    } else {
+        return None;
+    };
+    client(id)
+}
+
+/// What to paste for a client Agent Screen doesn't know.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Snippet {
+    /// A JSON config with `mcpServers`, as most clients take.
+    Json,
+    /// OpenCode's JSON.
+    OpenCode,
+    /// Codex's TOML.
+    Toml,
+    /// The command line that starts the server.
+    Command,
+}
+
+/// `kind` for this copy at `exe`: the entry the registry writes, in a
+/// config of its own.
+pub fn snippet(kind: Snippet, exe: &Path) -> String {
+    let exe_text = exe.to_string_lossy();
+    let from = |id: &str| {
+        client(id)
+            .and_then(|c| c.with_entry("", &exe_text).ok())
+            .unwrap_or_default()
+    };
+    match kind {
+        Snippet::Json => from("cursor"),
+        Snippet::OpenCode => from("opencode"),
+        Snippet::Toml => from("codex"),
+        Snippet::Command => {
+            let quoted = format!("'{}'", exe_text.replace('\'', r"'\''"));
+            format!("{quoted} mcp\n")
+        }
+    }
+}
+
 /// The server's name in the clients' configs: the development build
 /// registers beside the installed app, not over it.
 pub fn server_name(exe: &str) -> &'static str {

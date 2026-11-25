@@ -52,10 +52,8 @@ pub struct Setup {
     /// The client that last loaded the tools, maybe before a restart, and
     /// the day it did.
     pub earlier: Option<(String, String)>,
-    /// The MCP command was just copied.
-    pub copied: bool,
-    /// A Connect is running.
-    pub connecting: bool,
+    /// The Agents section: each client's state and what runs.
+    pub agents: Agents,
     /// Clients whose config has Agent Screen's server.
     pub registered: Vec<&'static str>,
     /// Whether macOS lets Agent Screen notify.
@@ -93,6 +91,111 @@ pub enum ResetStep {
     Failed(String),
 }
 
+/// The Agents section as the shell last read it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Agents {
+    /// None until the first probe ends.
+    pub rows: Option<Vec<AgentRow>>,
+    /// The client a Connect or Disconnect runs for, or "all".
+    pub busy: Option<&'static str>,
+    /// The snippet Other MCP Clients last copied.
+    pub copied: Option<agent_screen_mcp::install::Snippet>,
+    pub prompt: Prompt,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AgentRow {
+    pub id: &'static str,
+    pub name: &'static str,
+    /// It loads servers only when it starts.
+    pub restart: bool,
+    pub pill: Pill,
+    /// Its last Connect or Disconnect failed.
+    pub error: Option<String>,
+}
+
+/// A client's state as its row says it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pill {
+    /// Configured, and one of its sessions loaded the tools in this run
+    /// or the last day.
+    Live,
+    Configured,
+    /// The entry runs a copy of Agent Screen that is gone or elsewhere.
+    Stale,
+    NotConnected,
+    /// The config can't be read; Agent Screen leaves it alone.
+    Invalid,
+}
+
+impl Pill {
+    pub fn of(state: &agent_screen_mcp::install::State, live: bool) -> Pill {
+        use agent_screen_mcp::install::State;
+        match state {
+            State::Connected if live => Pill::Live,
+            State::Connected => Pill::Configured,
+            State::StalePath(_) => Pill::Stale,
+            State::NotConnected => Pill::NotConnected,
+            State::InvalidConfig(_) => Pill::Invalid,
+        }
+    }
+}
+
+/// The test prompt, before or after an agent loads the tools.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum Prompt {
+    #[default]
+    Hidden,
+    Waiting {
+        copied: bool,
+    },
+    /// The agent that loaded the tools.
+    Done(String),
+}
+
+/// What to ask an agent first.
+#[allow(non_snake_case)]
+pub fn TEST_PROMPT() -> &'static str {
+    t(
+        "Use Agent Screen to open Calculator and compute 12 × 34",
+        "用 Agent Screen 打开计算器算 12 × 34",
+    )
+}
+
+/// `debugShow setup-agents-…`: made-up rows, one of each state for
+/// `setup-agents-mixed`, configured ones for the test prompt.
+pub fn preview_rows(surface: &str) -> Vec<AgentRow> {
+    let row = |id: &'static str, pill: Pill, error: Option<&str>| {
+        let client = agent_screen_mcp::install::client(id).expect("a client in the registry");
+        AgentRow {
+            id,
+            name: client.name,
+            restart: client.restart,
+            pill,
+            error: error.map(str::to_string),
+        }
+    };
+    if surface != "setup-agents-mixed" {
+        return vec![
+            row("claude-code", Pill::Configured, None),
+            row("codex", Pill::Configured, None),
+        ];
+    }
+    vec![
+        row("claude-code", Pill::Live, None),
+        row("codex", Pill::Configured, None),
+        row("claude-desktop", Pill::Configured, None),
+        row("cursor", Pill::Stale, None),
+        row(
+            "zed",
+            Pill::Invalid,
+            Some("settings.json was left as it is: expected a value at line 4"),
+        ),
+        row("gemini-cli", Pill::NotConnected, None),
+        row("opencode", Pill::NotConnected, None),
+    ]
+}
+
 /// Move to Applications, while the bundle runs from a temporary place.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum MoveStep {
@@ -126,8 +229,7 @@ impl Setup {
             restart: false,
             agent: None,
             earlier: None,
-            copied: false,
-            connecting: false,
+            agents: Agents::default(),
             registered: Vec::new(),
             notifications: notify::Auth::Unknown,
             colorsync: None,
@@ -273,9 +375,15 @@ impl Render for Setup {
             .child(section(
                 t("Agents", "Agent"),
                 vec![
-                    self.agent_row(&theme, cx.weak_entity()).into_any_element(),
-                    self.reports_row(&theme).into_any_element(),
-                ],
+                    Some(self.clients_row(&theme).into_any_element()),
+                    self.client_list(&theme),
+                    Some(self.other_clients_row(&theme).into_any_element()),
+                    self.prompt_row(&theme),
+                    Some(self.reports_row(&theme).into_any_element()),
+                ]
+                .into_iter()
+                .flatten()
+                .collect(),
                 &theme,
             ))
             .child(section(
@@ -598,19 +706,6 @@ fn link(
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .keyboard(action, theme)
         .child(label)
-}
-
-/// Agent Screen's server as an MCP client's JSON config takes it, with the
-/// command and its arguments apart.
-pub fn mcp_config() -> String {
-    let exe = std::env::current_exe().unwrap_or_default();
-    mcp_config_for(&exe.display().to_string())
-}
-
-fn mcp_config_for(exe: &str) -> String {
-    let server = serde_json::json!({ "command": exe, "args": ["mcp"] });
-    let body = serde_json::to_string_pretty(&server).unwrap_or_default();
-    format!("\"agent-screen\": {body}")
 }
 
 /// docs/clients.md: each client's config.
@@ -960,69 +1055,211 @@ impl Setup {
         )
     }
 
-    /// Connecting agents, the step after the permissions: Connect sets up
-    /// the clients the registry finds, and any other takes the command.
-    fn agent_row(&self, theme: &Theme, this: WeakEntity<Setup>) -> impl IntoElement {
+    /// The agent clients: how many were found, Connect All Detected, and
+    /// what the agents did with the tools.
+    fn clients_row(&self, theme: &Theme) -> impl IntoElement {
         let shell = self.shell.clone();
+        let rows = self.agents.rows.as_deref().unwrap_or_default();
+        let pending = rows
+            .iter()
+            .filter(|r| matches!(r.pill, Pill::NotConnected | Pill::Stale))
+            .count();
         let loaded = self.agent.is_some();
-        let action = if loaded {
-            done(t("Connected", "已接入"))
-        } else if self.connecting {
+        let action = if self.agents.busy == Some("all") {
             busy(t("Connecting…", "正在接入…"), theme)
-        } else {
-            let again = !self.registered.is_empty() || self.earlier.is_some();
+        } else if pending > 0 {
             key_button(
                 "setup-connect",
-                if again {
-                    t("Connect Again…", "重新接入…")
-                } else {
-                    t("Connect…", "接入…")
-                }
+                tf!(
+                    "Connect All Detected ({pending})",
+                    "一键接入全部 ({pending})"
+                )
                 .into(),
-                (self.status.complete() && !again).then_some(theme.accent),
+                self.status.complete().then_some(theme.accent),
                 theme,
-                move |cx| tell(&shell, cx, |shell, cx| shell.connect_agents(cx)),
+                move |cx| tell(&shell, cx, |shell, cx| shell.connect_client(None, cx)),
             )
             .into_any_element()
+        } else if loaded {
+            done(t("Connected", "已接入"))
+        } else {
+            div().into_any_element()
         };
-        let detail = match (&self.agent, &self.earlier, self.registered.as_slice()) {
+        let detail = match (&self.agent, &self.earlier, &self.agents.rows) {
             (Some(agent), _, _) => tf!("{agent} loaded the tools", "{agent} 已加载工具"),
+            (None, _, None) => {
+                t("Looking for agent clients…", "正在查找 agent 客户端…").to_string()
+            }
+            (None, _, Some(rows)) if rows.is_empty() => t(
+                "No agent client found. Use Other MCP Clients below",
+                "未找到 agent 客户端，请使用下方的其他客户端",
+            )
+            .to_string(),
             (None, Some((client, day)), _) => tf!(
                 "{client} last loaded the tools on {day}",
                 "{client} 上次于 {day}加载工具"
             ),
-            (None, None, []) => t(
-                "Connect sets up the agent clients on this Mac",
-                "“接入”会配置这台 Mac 上的 agent 客户端",
-            )
-            .to_string(),
-            (None, None, clients) => tf!(
-                "Added to {}. Start a new session to load the tools",
-                "已添加到 {}。新建会话即可加载工具",
-                clients.join(t(" and ", " 和 "))
+            (None, None, Some(rows)) => tf!(
+                "{} found on this Mac",
+                "在这台 Mac 上找到 {} 个",
+                rows.len()
             ),
         };
         let color = if loaded { green() } else { theme.accent };
-        let copied = self.copied;
-        let others = div()
+        item(
+            badge("icons/plus.svg", color, loaded),
+            t("MCP Clients", "MCP 客户端").into(),
+            detail.into(),
+            None,
+            action,
+            theme,
+        )
+    }
+
+    /// One row per client: its state and the one thing to do about it.
+    /// More than five scroll inside the section.
+    fn client_list(&self, theme: &Theme) -> Option<AnyElement> {
+        let rows = self.agents.rows.as_ref().filter(|r| !r.is_empty())?;
+        let list = div()
+            .id("setup-clients")
             .flex()
-            .gap(px(12.))
-            .mt(px(2.))
-            .child(link(
-                "setup-copy-command",
-                if copied {
-                    t("Copied", "已复制")
-                } else {
-                    t("Copy MCP Config", "复制 MCP 配置")
-                },
+            .flex_col()
+            .when(rows.len() > 5, |d| {
+                d.max_h(px(5.5 * 41.)).overflow_y_scroll()
+            })
+            .children(rows.iter().enumerate().map(|(i, row)| {
+                div()
+                    .when(i > 0, |d| d.border_t_1().border_color(theme.card_border))
+                    .child(self.client_row(row, theme))
+            }));
+        Some(list.into_any_element())
+    }
+
+    fn client_row(&self, row: &AgentRow, theme: &Theme) -> impl IntoElement {
+        let shell = self.shell.clone();
+        let id = row.id;
+        let (label, color): (String, Hsla) = match row.pill {
+            Pill::Live => (t("Live now", "已实时连入").into(), green()),
+            Pill::Configured if row.restart => (
+                t("Configured · restart the app", "已配置，重启后生效").into(),
+                green(),
+            ),
+            Pill::Configured => (
+                t(
+                    "Configured · new sessions pick it up",
+                    "已配置，新开会话生效",
+                )
+                .into(),
+                green(),
+            ),
+            Pill::Stale => (t("Old path", "路径已过期").into(), theme.orange),
+            Pill::NotConnected => (t("Not connected", "未接入").into(), theme.secondary),
+            Pill::Invalid => (t("Config can't be read", "配置格式有误").into(), theme.red),
+        };
+        let action = if self.agents.busy == Some(id)
+            || (self.agents.busy == Some("all")
+                && matches!(row.pill, Pill::NotConnected | Pill::Stale))
+        {
+            busy(t("Working…", "正在处理…"), theme)
+        } else {
+            let (key, label, prominent): (&'static str, &'static str, bool) = match row.pill {
+                Pill::NotConnected => ("connect", t("Connect", "接入"), false),
+                Pill::Stale => ("fix", t("Fix Path", "修复路径"), true),
+                Pill::Live | Pill::Configured => ("disconnect", t("Disconnect", "断开"), false),
+                Pill::Invalid => ("show", t("Show File", "显示文件"), false),
+            };
+            let button_id: &'static str = match key {
+                "connect" => "setup-client-connect",
+                "fix" => "setup-client-fix",
+                "disconnect" => "setup-client-disconnect",
+                _ => "setup-client-show",
+            };
+            small_button(
+                (button_id, id),
+                label,
+                prominent.then_some(theme.orange),
                 theme,
                 move |cx| {
-                    native::copy(&mcp_config());
-                    let _ = this.update(cx, |setup, cx| {
-                        setup.copied = true;
-                        cx.notify();
-                    });
+                    tell(&shell, cx, move |shell, cx| match key {
+                        "disconnect" => shell.disconnect_client(id, cx),
+                        "show" => shell.reveal_config(id),
+                        _ => shell.connect_client(Some(id), cx),
+                    })
                 },
+            )
+            .into_any_element()
+        };
+        div()
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .pl(px(60.))
+            .pr(px(14.))
+            .py(px(7.))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(1.))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(div().flex_none().size(px(7.)).rounded_full().bg(color))
+                            .child(
+                                div()
+                                    .text_size(px(12.5))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(row.name),
+                            )
+                            .child(div().text_size(px(11.)).text_color(color).child(label)),
+                    )
+                    .when_some(row.error.clone(), |d, error| {
+                        d.child(
+                            div()
+                                .pl(px(13.))
+                                .text_size(px(11.))
+                                .text_color(theme.orange)
+                                .child(error),
+                        )
+                    }),
+            )
+            .child(action)
+    }
+
+    /// Any other MCP client: the config to paste, in each format, and the
+    /// guide.
+    fn other_clients_row(&self, theme: &Theme) -> impl IntoElement {
+        use agent_screen_mcp::install::Snippet;
+        let copied = self.agents.copied;
+        let copy = |id: &'static str, kind: Snippet, label: &'static str| {
+            let shell = self.shell.clone();
+            link(
+                id,
+                if copied == Some(kind) {
+                    t("Copied", "已复制")
+                } else {
+                    label
+                },
+                theme,
+                move |cx| tell(&shell, cx, move |shell, cx| shell.copy_snippet(kind, cx)),
+            )
+        };
+        let links = div()
+            .flex()
+            .flex_wrap()
+            .gap(px(12.))
+            .mt(px(2.))
+            .child(copy("setup-copy-json", Snippet::Json, "JSON"))
+            .child(copy("setup-copy-opencode", Snippet::OpenCode, "OpenCode"))
+            .child(copy("setup-copy-toml", Snippet::Toml, "TOML"))
+            .child(copy(
+                "setup-copy-command",
+                Snippet::Command,
+                t("Command", "命令"),
             ))
             .child(link(
                 "setup-client-guide",
@@ -1031,13 +1268,67 @@ impl Setup {
                 |_| open_client_guide(),
             ));
         item_with(
-            badge("icons/plus.svg", color, loaded),
-            t("MCP Clients", "MCP 客户端").into(),
-            detail.into(),
+            badge("icons/tray.svg", theme.secondary, false),
+            t("Other MCP Clients", "其他客户端").into(),
+            t(
+                "Copy the server's config in the format your client takes",
+                "按客户端的格式复制服务器配置",
+            )
+            .into(),
             None,
-            Some(others.into_any_element()),
-            action,
+            Some(links.into_any_element()),
+            div().into_any_element(),
             theme,
+        )
+    }
+
+    /// The first thing to ask an agent, until one loads the tools; then
+    /// green.
+    fn prompt_row(&self, theme: &Theme) -> Option<AnyElement> {
+        let shell = self.shell.clone();
+        let (on, detail, action) = match &self.agents.prompt {
+            Prompt::Hidden => return None,
+            Prompt::Waiting { copied } => (
+                false,
+                t(
+                    "Paste it into a new agent session",
+                    "粘贴到新的 agent 会话中",
+                )
+                .to_string(),
+                key_button(
+                    "setup-copy-prompt",
+                    if *copied {
+                        t("Copied", "已复制")
+                    } else {
+                        t("Copy", "复制")
+                    }
+                    .into(),
+                    (!*copied).then_some(theme.accent),
+                    theme,
+                    move |cx| tell(&shell, cx, |shell, cx| shell.copy_test_prompt(cx)),
+                )
+                .into_any_element(),
+            ),
+            Prompt::Done(agent) => (
+                true,
+                tf!(
+                    "{agent} is using Agent Screen",
+                    "{agent} 已在使用 Agent Screen"
+                ),
+                done(t("Working", "已生效")),
+            ),
+        };
+        let color = if on { green() } else { theme.accent };
+        Some(
+            item(
+                badge("icons/play.svg", color, on),
+                TEST_PROMPT().into(),
+                detail.into(),
+                None,
+                action,
+                theme,
+            )
+            .into_any_element(),
         )
     }
 
@@ -1256,6 +1547,46 @@ pub(crate) fn button(
         .child(title)
 }
 
+/// A client row's button: smaller, with an id per client.
+fn small_button(
+    id: (&'static str, &'static str),
+    title: &'static str,
+    prominent: Option<Hsla>,
+    theme: &Theme,
+    action: impl Fn(&mut App) + 'static,
+) -> impl IntoElement {
+    let (bg, hover, fg) = match prominent {
+        Some(color) => (color.opacity(0.9), color, gpui::white()),
+        None => (
+            theme.control_hover.opacity(0.6),
+            theme.control_hover,
+            theme.label,
+        ),
+    };
+    div()
+        .id(gpui::ElementId::NamedChild(
+            std::sync::Arc::new(gpui::ElementId::Name(id.0.into())),
+            id.1.into(),
+        ))
+        .role(Role::Button)
+        .aria_label(title)
+        .flex_none()
+        .h(px(24.))
+        .px(px(11.))
+        .flex()
+        .items_center()
+        .rounded_full()
+        .bg(bg)
+        .hover(move |s| s.bg(hover))
+        .active(|s| s.opacity(0.7))
+        .text_size(px(11.5))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(fg)
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .keyboard(action, theme)
+        .child(title)
+}
+
 /// A Settings button: as `button`, and the keyboard reaches it.
 fn key_button(
     id: &'static str,
@@ -1333,17 +1664,38 @@ impl Keyboard for gpui::Stateful<gpui::Div> {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_screen_mcp::install::State;
 
     #[test]
-    fn the_mcp_config_keeps_command_and_args_apart() {
-        let config = mcp_config_for("/Applications/Agent Screen.app/Contents/MacOS/AgentScreen");
-        let value: serde_json::Value =
-            serde_json::from_str(&format!("{{{config}}}")).expect("valid JSON in braces");
-        let server = &value["agent-screen"];
+    fn each_state_has_its_pill() {
+        assert_eq!(Pill::of(&State::Connected, true), Pill::Live);
+        assert_eq!(Pill::of(&State::Connected, false), Pill::Configured);
+        // A session counts only while the config runs this copy.
+        let stale = State::StalePath("/Volumes/x".into());
+        assert_eq!(Pill::of(&stale, true), Pill::Stale);
+        assert_eq!(Pill::of(&State::NotConnected, true), Pill::NotConnected);
         assert_eq!(
-            server["command"],
-            "/Applications/Agent Screen.app/Contents/MacOS/AgentScreen"
+            Pill::of(&State::InvalidConfig("x".into()), false),
+            Pill::Invalid
         );
-        assert_eq!(server["args"], serde_json::json!(["mcp"]));
+    }
+
+    #[test]
+    fn the_mixed_preview_shows_every_state_and_scrolls() {
+        let rows = preview_rows("setup-agents-mixed");
+        for pill in [
+            Pill::Live,
+            Pill::Configured,
+            Pill::Stale,
+            Pill::NotConnected,
+            Pill::Invalid,
+        ] {
+            assert!(rows.iter().any(|r| r.pill == pill), "{pill:?}");
+        }
+        assert!(rows.len() > 5);
+        assert!(
+            rows.iter()
+                .all(|r| agent_screen_mcp::install::client(r.id).is_some())
+        );
     }
 }

@@ -32,9 +32,11 @@ fn main() -> ExitCode {
         // A test app started earlier has another environment.
         stop_test_app();
         let (tccutil, open) = stand_ins(&dir)?;
+        let home = agents_home(&dir)?;
         start_test_app(&[
             ("AGENTSCREEN_TCCUTIL", path(&tccutil)),
             ("AGENTSCREEN_OPEN", path(&open)),
+            ("AGENTSCREEN_AGENTS_HOME", path(&home)),
         ])?;
         let result = test(&dir);
         stop_test_app();
@@ -96,7 +98,126 @@ fn test(dir: &Path) -> Result<()> {
     }
     control.call("debugShow", json!({ "surface": "setup-close" }))?;
     sleep_ms(400);
+    agents(&control, dir, &shot)?;
+    // Last: it quits the test app.
     reset_helper(&control, dir)?;
+    Ok(())
+}
+
+/// A home with Cursor (no config yet), Codex whose entry runs a copy that
+/// is gone, and Zed whose settings can't be read.
+fn agents_home(dir: &Path) -> Result<PathBuf> {
+    let home = dir.join("home");
+    std::fs::create_dir_all(home.join(".cursor"))?;
+    std::fs::create_dir_all(home.join(".codex"))?;
+    std::fs::write(
+        home.join(".codex/config.toml"),
+        "[mcp_servers.agent-screen-dev]\ncommand = \"/Volumes/Old/Agent Screen Dev.app/Contents/MacOS/AgentScreen\"\nargs = [\"mcp\"]\n",
+    )?;
+    std::fs::create_dir_all(home.join(".config/zed"))?;
+    std::fs::write(home.join(".config/zed/settings.json"), "{ \"theme\": ")?;
+    Ok(home)
+}
+
+/// The user's own configs this test must never write.
+fn owners_configs() -> Vec<(PathBuf, Option<std::time::SystemTime>)> {
+    let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
+    [
+        ".cursor/mcp.json",
+        ".codex/config.toml",
+        ".config/zed/settings.json",
+        ".claude.json",
+    ]
+    .iter()
+    .map(|p| {
+        let path = home.join(p);
+        let when = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        (path, when)
+    })
+    .collect()
+}
+
+/// The Agents section on the temporary home: a row per client with its
+/// state, Connect, Connect All Detected and Disconnect writing that home,
+/// and the made-up previews.
+fn agents(control: &Control, dir: &Path, shot: &dyn Fn(&str)) -> Result<()> {
+    let home = dir.join("home");
+    let exe = agent_screen_tests::binary_of(&debug_app());
+    let before = owners_configs();
+    let read = |p: &str| std::fs::read_to_string(home.join(p)).unwrap_or_default();
+    let wait_for = |what: &dyn Fn() -> bool| {
+        for _ in 0..40 {
+            if what() {
+                return true;
+            }
+            sleep_ms(200);
+        }
+        false
+    };
+    control.call("debugShow", json!({ "surface": "settings" }))?;
+    sleep_ms(800);
+    shot("setup-agents-found");
+
+    control.call(
+        "debugShow",
+        json!({ "surface": "setup-agents-connect:cursor" }),
+    )?;
+    let cursor = wait_for(&|| read(".cursor/mcp.json").contains(&exe));
+    check(
+        "Connect writes Cursor's config in the test home",
+        cursor,
+        read(".cursor/mcp.json"),
+    );
+
+    control.call(
+        "debugShow",
+        json!({ "surface": "setup-agents-connect-all" }),
+    )?;
+    let codex = wait_for(&|| read(".codex/config.toml").contains(&exe));
+    check(
+        "Connect All Detected fixes Codex's old path",
+        codex && !read(".codex/config.toml").contains("/Volumes/Old"),
+        read(".codex/config.toml"),
+    );
+    check(
+        "it leaves Zed's unreadable settings as they were",
+        read(".config/zed/settings.json") == "{ \"theme\": ",
+        read(".config/zed/settings.json"),
+    );
+    sleep_ms(600);
+    shot("setup-agents-connected");
+
+    control.call(
+        "debugShow",
+        json!({ "surface": "setup-agents-disconnect:cursor" }),
+    )?;
+    let gone = wait_for(&|| !read(".cursor/mcp.json").contains("agent-screen-dev"));
+    check(
+        "Disconnect takes Cursor's entry out",
+        gone,
+        read(".cursor/mcp.json"),
+    );
+    let refused = control.send(
+        "debugShow",
+        json!({ "surface": "setup-agents-connect:nope" }),
+    )?;
+    check("an unknown client is refused", refused.error.is_some(), "");
+
+    for surface in [
+        "setup-agents-mixed",
+        "setup-agents-prompt",
+        "setup-agents-prompt-done",
+    ] {
+        control.call("debugShow", json!({ "surface": surface }))?;
+        shot(surface);
+    }
+    control.call("debugShow", json!({ "surface": "setup-close" }))?;
+    sleep_ms(400);
+    check(
+        "the user's own client configs were not written",
+        owners_configs() == before,
+        "",
+    );
     Ok(())
 }
 
