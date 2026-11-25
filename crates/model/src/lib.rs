@@ -14,6 +14,7 @@ pub mod claims;
 pub mod connect_policy;
 pub mod devtools;
 pub mod display_picture;
+pub mod ended;
 pub mod front_hold;
 pub mod held;
 pub mod input_queue;

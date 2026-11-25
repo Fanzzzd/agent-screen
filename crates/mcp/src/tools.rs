@@ -761,12 +761,7 @@ const RESTARTED: &str = "Agent Screen quit since your last call and restarted; y
 
 /// What a call naming a display that ended when the app quit gets back.
 pub fn ended_with_app(id: i64) -> ControlError {
-    ControlError::new(
-        "ended",
-        format!(
-            "display {id} ended when the Agent Screen app quit; it has restarted. macOS moved the display's windows to the user's screen. Call create_display, then list_windows with strays: true and place_window to bring back windows of apps you launched there."
-        ),
-    )
+    ControlError::new("ended", agent_screen_model::ended::app_quit_message(id))
 }
 
 // MARK: Handlers
@@ -1681,7 +1676,14 @@ fn wait_outcome(reply: &Object, resolution: &str, request: Option<&str>) -> Valu
         ("closedByUser", _) => {
             json!({ "control": "none", "note": "The user closed the display, so stop working on screen. Ask the user before you call create_display again." })
         }
-        _ => json!({ "control": "none", "note": "The display has ended." }),
+        _ => {
+            // Why, from an app that says (#326).
+            let note = match reply.get("endedMessage").and_then(Value::as_str) {
+                Some(why) => format!("{why}."),
+                None => "The display has ended.".into(),
+            };
+            json!({ "control": "none", "note": note })
+        }
     }
 }
 
@@ -1956,6 +1958,12 @@ fn wait_output(display: i64, window: i64, root: Option<usize>, reply: &Object) -
             "root_gone after {waited} s: element [{}] left window {window}. Call get_window_state without root to find the current tree.",
             root.unwrap_or_default()
         ),
+        // Why, from an app that says (#326).
+        Some("displayEnded")
+            if let Some(why) = reply.get("endedMessage").and_then(Value::as_str) =>
+        {
+            format!("display_ended after {waited} s: {why}.")
+        }
         Some("displayEnded") if reply.get("closedByUser") == Some(&Value::Bool(true)) => format!(
             "display_ended after {waited} s: the user closed display {display}, so stop working on screen. Ask the user before you call create_display again."
         ),
@@ -2691,6 +2699,21 @@ mod tests {
             &reply(json!({ "outcome": "displayEnded", "closedByUser": true })),
         );
         assert!(closed.contains("the user closed display 3"), "{closed}");
+        // An app that says why: the agent reads its words.
+        let why = wait_output(
+            3,
+            5,
+            None,
+            &reply(json!({
+                "outcome": "displayEnded",
+                "endedReason": "end_display",
+                "endedMessage": "display 3 has ended: this session ended it with end_display. Call create_display for a new one",
+            })),
+        );
+        assert!(
+            why.starts_with("display_ended after 0 s: display 3 has ended: this session ended it"),
+            "{why}"
+        );
         // A window out of sight is never called closed, and the agent is
         // told what to ask the user.
         let space = wait_output(
@@ -2792,6 +2815,18 @@ mod tests {
         );
         let closed = wait(json!({ "resolution": "closedByUser" }));
         assert!(note(&closed).contains("closed the display"), "{closed}");
+        // An ended display says why, from an app that says (#326).
+        let ended = wait(json!({ "resolution": "ended" }));
+        assert_eq!(note(&ended), "The display has ended.");
+        let why = wait(json!({
+            "resolution": "ended",
+            "endedReason": "end_display",
+            "endedMessage": "display 4 has ended: this session ended it with end_display. Call create_display for a new one",
+        }));
+        assert!(
+            note(&why).starts_with("display 4 has ended: this session ended it"),
+            "{why}"
+        );
         // In a Takeover the user is still at the display.
         let busy = wait(json!({ "resolution": "timedOut", "request": null }));
         assert!(note(&busy).contains("still operating"), "{busy}");

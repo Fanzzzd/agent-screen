@@ -131,6 +131,45 @@ pub enum AppStatus {
 pub struct AppReport {
     pub status: AppStatus,
     pub identity: Option<ProcessIdentity>,
+    /// Why the app's last displays ended, newest first (#326). Empty from
+    /// an app built before it said.
+    pub ended_displays: Vec<EndedDisplay>,
+}
+
+/// One display's end as the app reports it: its id, the reason's tag and
+/// the owner's session tag, nothing the user made.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EndedDisplay {
+    pub display: u32,
+    pub reason: String,
+    pub session: String,
+}
+
+impl EndedDisplay {
+    /// Only what the app writes: a known reason and a short session tag.
+    fn valid(&self) -> bool {
+        agent_screen_model::model::EndReason::from_tag(&self.reason).is_some()
+            && self.session.len() <= 48
+            && self
+                .session
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b':' || b == b'-')
+    }
+}
+
+/// The app's `endedDisplays`, dropping any entry it wouldn't write.
+fn ended_displays(result: &Value) -> Vec<EndedDisplay> {
+    result
+        .get("endedDisplays")
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(|e| serde_json::from_value::<EndedDisplay>(e.clone()).ok())
+                .filter(EndedDisplay::valid)
+                .take(16)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Serialize)]
@@ -171,17 +210,20 @@ async fn collect_with(
     })
     .await
     {
-        Ok(Ok(identity)) => AppReport {
+        Ok(Ok((identity, ended_displays))) => AppReport {
             status: AppStatus::Available,
             identity: Some(identity),
+            ended_displays,
         },
         Ok(Err(status)) => AppReport {
             status,
             identity: None,
+            ended_displays: Vec::new(),
         },
         Err(_) => AppReport {
             status: AppStatus::Timeout,
             identity: None,
+            ended_displays: Vec::new(),
         },
     };
     let local = process_identity(package_version);
@@ -279,7 +321,10 @@ fn identity_summary(build: &BuildIdentity) -> String {
     )
 }
 
-async fn request(reader: Reader, mut writer: Writer) -> Result<ProcessIdentity, AppStatus> {
+async fn request(
+    reader: Reader,
+    mut writer: Writer,
+) -> Result<(ProcessIdentity, Vec<EndedDisplay>), AppStatus> {
     writer
         .write_all(b"{\"id\":1,\"method\":\"getDiagnostics\",\"params\":{}}\n")
         .await
@@ -324,11 +369,14 @@ async fn request(reader: Reader, mut writer: Writer) -> Result<ProcessIdentity, 
     if !build.valid() {
         return Err(AppStatus::Malformed);
     }
-    Ok(ProcessIdentity {
-        build,
-        bundle_version: None,
-        bundle_version_status: "not_collected".into(),
-    })
+    Ok((
+        ProcessIdentity {
+            build,
+            bundle_version: None,
+            bundle_version_status: "not_collected".into(),
+        },
+        ended_displays(result),
+    ))
 }
 
 #[cfg(test)]
@@ -442,6 +490,22 @@ mod tests {
                 "report_schema_version"
             ]
         );
+    }
+
+    #[test]
+    fn ended_displays_keep_only_ids_reasons_and_session_tags() {
+        let result = json!({ "endedDisplays": [
+            { "display": 7, "reason": "disconnected", "session": "pipe:1a2b3c4d" },
+            { "display": 8, "reason": "end_display", "session": "none" },
+            { "display": 9, "reason": "idle", "session": "pipe:1a2b3c4d" },
+            { "display": 10, "reason": "end_display", "session": "/Users/x/PRIVATE" },
+            { "display": 11, "reason": "end_display" },
+            "PRIVATE",
+        ]});
+        let ends = ended_displays(&result);
+        assert_eq!(ends.iter().map(|e| e.display).collect::<Vec<_>>(), [7, 8]);
+        assert_eq!(ends[0].reason, "disconnected");
+        assert!(ended_displays(&json!({})).is_empty());
     }
 
     fn ends<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static>(
