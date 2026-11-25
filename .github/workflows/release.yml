@@ -135,6 +135,10 @@ jobs:
           security list-keychains -d user -s "$keychain" "${existing[@]}"
           security find-identity -v -p codesigning "$keychain" | grep -F "Developer ID Application"
 
+      # As in CI, so the cache CI saved fits; bundle.sh exports it too and
+      # checks the binaries against it.
+      - name: Build for LSMinimumSystemVersion
+        run: echo "MACOSX_DEPLOYMENT_TARGET=$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' apps/macos/resources/Info.plist)" >> "$GITHUB_ENV"
       - run: rustup show active-toolchain
       # The cache key must match CI's: see ci.yml.
       - name: Keep only the pinned toolchain

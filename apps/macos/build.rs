@@ -10,6 +10,9 @@ fn main() {
         .flag("-fobjc-arc")
         .compile("agent_screen_private");
     println!("cargo:rerun-if-changed=native");
+    // rustc writes it into the binary's minos without telling cargo; the cc
+    // crate says so too, but the link shouldn't depend on it.
+    println!("cargo:rerun-if-env-changed=MACOSX_DEPLOYMENT_TARGET");
     for framework in [
         "ApplicationServices",
         "CoreGraphics",

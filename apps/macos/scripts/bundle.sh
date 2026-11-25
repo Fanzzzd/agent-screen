@@ -14,9 +14,16 @@ cd "$(dirname "$0")/.."
 config="${1:-debug}"
 flags=()
 [[ "$config" == release ]] && flags=(--release)
+# Build for the macOS that Info.plist says the app needs. rustc writes it
+# as the binary's minos and the cc crate passes it to clang. Unset, rustc
+# writes 11.0 and the cc crate builds the native shims for the SDK, so
+# clang would not warn about an API macOS 15 lacks.
+MACOSX_DEPLOYMENT_TARGET="$(/usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion" resources/Info.plist)"
+export MACOSX_DEPLOYMENT_TARGET
 cargo build -p agent-screen -p agent-screen-colorsync ${flags[@]+"${flags[@]}"}
 
 target="$(cd ../.. && pwd)/target"
+../../.github/scripts/check-deployment-target.sh "$target/$config/AgentScreen" "$target/$config/agent-screen-colorsync" >/dev/null
 # Development builds are a separate app, "Agent Screen Dev", so they never
 # take the installed app's privacy grants, socket or agent registration.
 if [[ "$config" == release ]]; then
