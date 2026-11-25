@@ -112,9 +112,86 @@ impl Presence {
     }
 }
 
+/// The windows list_windows found closed while a record still held them:
+/// an app that closes a window but keeps it can leave it in the records
+/// for good, and each look at it costs a SkyLight call and an
+/// Accessibility read. Such a window is skipped until it shows on screen
+/// again, when its app brought it back.
+#[derive(Clone, Debug, Default)]
+pub struct ClosedMarks(std::collections::HashSet<u32>);
+
+impl ClosedMarks {
+    /// Bounds what a long session marks.
+    const MAX: usize = 4096;
+
+    /// Whether to skip `window` without asking macOS: it was found closed
+    /// and isn't on screen now. On screen, its mark goes.
+    pub fn skip(&mut self, window: u32, on_screen: bool) -> bool {
+        if on_screen {
+            self.0.remove(&window);
+            return false;
+        }
+        self.0.contains(&window)
+    }
+
+    /// What a look at `window` found: a closed one is marked, any other
+    /// presence clears its mark.
+    pub fn note(&mut self, window: u32, presence: Presence) {
+        if presence != Presence::Closed {
+            self.0.remove(&window);
+            return;
+        }
+        if self.0.len() >= Self::MAX {
+            self.0.clear();
+        }
+        self.0.insert(window);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_window_found_closed_is_skipped_until_it_shows_again() {
+        let mut marks = ClosedMarks::default();
+        assert!(!marks.skip(7, false));
+        marks.note(7, Presence::Closed);
+        assert!(marks.skip(7, false));
+        assert!(marks.skip(7, false));
+        assert!(!marks.skip(8, false));
+        // Back on screen: asked about again, and not skipped once off it.
+        assert!(!marks.skip(7, true));
+        assert!(!marks.skip(7, false));
+    }
+
+    #[test]
+    fn only_closed_marks() {
+        let mut marks = ClosedMarks::default();
+        for p in [
+            Presence::Here,
+            Presence::Elsewhere,
+            Presence::OtherSpace,
+            Presence::Minimized,
+            Presence::Hidden,
+        ] {
+            marks.note(3, p);
+            assert!(!marks.skip(3, false), "{p:?}");
+        }
+        marks.note(3, Presence::Closed);
+        marks.note(3, Presence::Minimized);
+        assert!(!marks.skip(3, false));
+    }
+
+    #[test]
+    fn marks_stay_bounded() {
+        let mut marks = ClosedMarks::default();
+        for w in 0..(ClosedMarks::MAX as u32 + 10) {
+            marks.note(w, Presence::Closed);
+        }
+        assert!(marks.0.len() <= ClosedMarks::MAX);
+        assert!(marks.skip(ClosedMarks::MAX as u32 + 9, false));
+    }
 
     #[test]
     fn on_screen_answers_without_asking_why() {

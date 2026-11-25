@@ -240,7 +240,7 @@ use std::sync::{Arc, LazyLock, RwLock};
 
 use agent_screen_model::bring_out::{self, AppState, OtherWindow, Refusal, Step, Undo};
 use agent_screen_model::placement::PutAway;
-use agent_screen_model::presence::Presence;
+use agent_screen_model::presence::{ClosedMarks, Presence};
 use objc2_application_services::AXUIElement;
 
 /// Other apps' document windows that exist but aren't on screen, that
@@ -284,7 +284,7 @@ fn why_away_on(target: WindowTarget, (held, unshown): (i32, i32)) -> PutAway {
     let minimized = element.as_ref().is_some_and(|w| ax::is_minimized(w));
     let hidden = super::app::is_hidden(target.pid);
     let why = PutAway::of(element.is_some(), minimized, hidden, spaces);
-    log::info!(
+    log::debug!(
         "window {} off screen: {why:?} (listed {}, minimized {minimized}, app hidden {hidden}, on {held} Spaces, {unshown} unshown)",
         target.window_id,
         element.is_some()
@@ -667,6 +667,10 @@ pub fn on_display(display: DisplayId) -> Vec<Window> {
 static LAST_SEEN: LazyLock<std::sync::Mutex<HashMap<u32, (DisplayId, Window)>>> =
     LazyLock::new(Default::default);
 
+/// Recorded windows `held_off_screen` found closed, skipped until they
+/// show on screen again.
+static CLOSED: LazyLock<std::sync::Mutex<ClosedMarks>> = LazyLock::new(Default::default);
+
 fn note_seen(display: DisplayId, windows: &[Window]) {
     let Ok(mut seen) = LAST_SEEN.lock() else {
         return;
@@ -746,7 +750,9 @@ fn off_screen_presence(here: bool, elsewhere: bool, target: WindowTarget) -> Pre
 /// show nowhere: minimized, of a hidden app, or on a Space no display
 /// shows (`agent_screen_model::presence`). Nothing to ask while every one
 /// shows; then one id scan, and for each one off screen a SkyLight call,
-/// and an Accessibility read for one that still exists. Blocking.
+/// and an Accessibility read for one that still exists. A window found
+/// closed is skipped until it shows on screen again (`ClosedMarks`).
+/// Blocking.
 pub fn held_off_screen(
     display: DisplayId,
     recorded: &[WindowTarget],
@@ -767,13 +773,30 @@ pub fn held_off_screen(
         return Vec::new();
     }
     let on = cg::on_screen_ids();
-    held.into_iter()
+    {
+        let mut closed = CLOSED.lock().unwrap_or_else(|e| e.into_inner());
+        held.retain(|w, _| !closed.skip(*w, on.contains(w)));
+    }
+    let looked: Vec<(u32, Option<Window>, WindowTarget, Presence)> = held
+        .into_iter()
         .filter_map(|(w, window)| {
             let target = window
                 .as_ref()
                 .map(|w| w.target)
                 .or_else(|| recorded.iter().find(|t| t.window_id == w).copied())?;
             let presence = off_screen_presence(false, on.contains(&w), target);
+            Some((w, window, target, presence))
+        })
+        .collect();
+    {
+        let mut closed = CLOSED.lock().unwrap_or_else(|e| e.into_inner());
+        for (w, _, _, presence) in &looked {
+            closed.note(*w, *presence);
+        }
+    }
+    looked
+        .into_iter()
+        .filter_map(|(w, window, target, presence)| {
             let Some(_) = presence.off_screen() else {
                 // On screen elsewhere, or closed: no longer this display's
                 // to describe.
