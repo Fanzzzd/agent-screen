@@ -963,6 +963,7 @@ impl Shell {
                 self.core.update(cx, |core, cx| {
                     core.repark(cx);
                     core.hold_modes(cx);
+                    core.relabel();
                 });
                 self.streams.update(cx, |s, cx| s.restart_misrouted(cx));
                 self.schedule_guard(cx);

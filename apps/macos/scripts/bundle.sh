@@ -52,7 +52,6 @@ fi
 #   cp <dir>/i.iconset/icon_128x128@2x.png assets/app-icon.png
 cp resources/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
 cp resources/Assets.car "$app/Contents/Resources/Assets.car"
-cp resources/AgentDisplay.png "$app/Contents/Resources/AgentDisplay.png"
 # Release builds update themselves through Sparkle (ADR 0012). Agent Screen
 # isn't sandboxed, so Sparkle's XPC services, which only sandboxed apps
 # need, stay out.
