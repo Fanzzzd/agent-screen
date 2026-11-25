@@ -1,5 +1,6 @@
 //! Running apps and screens, through AppKit.
 
+use crate::i18n::t;
 use crate::model::DisplayId;
 use objc2::MainThreadMarker;
 use objc2_app_kit::{NSRunningApplication, NSScreen, NSWorkspace};
@@ -818,26 +819,148 @@ pub fn set_wallpaper(picture: Option<&Path>) -> Result<(), String> {
     Ok(())
 }
 
-/// The picture for Agent Displays: the user's, else Agent Screen's, which
-/// names the display. None in a bare debug binary without either.
-fn wallpaper() -> Option<std::path::PathBuf> {
-    custom_wallpaper().or_else(|| {
-        std::env::current_exe()
-            .ok()
-            .and_then(|exe| Some(exe.parent()?.parent()?.join("Resources/AgentDisplay.png")))
-            .filter(|path| path.exists())
-    })
+/// Agent Screen's own picture for `screen`: drawn at the screen's size
+/// with its name (`display_picture`), kept in the support folder, where it
+/// stays put however the app was opened, from a disk image or a moved
+/// bundle. Drawn once per name, size and language.
+fn own_picture(screen: &NSScreen) -> Option<std::path::PathBuf> {
+    use agent_screen_model::display_picture;
+    let name = screen.localizedName().to_string();
+    let frame = screen.frame();
+    let scale = screen.backingScaleFactor().max(1.0);
+    let (width, height) = (
+        (frame.size.width * scale).round() as u32,
+        (frame.size.height * scale).round() as u32,
+    );
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let lang = match crate::i18n::lang() {
+        crate::i18n::Lang::En => "en",
+        crate::i18n::Lang::ZhHans => "zh",
+    };
+    let folder = support_folder()?.join("Display Pictures");
+    let path = folder.join(display_picture::file_name(&name, width, height, lang));
+    if path.exists() {
+        return Some(path);
+    }
+    std::fs::create_dir_all(&folder).ok()?;
+    let drawing = std::time::Instant::now();
+    let drawn = draw_picture(&name, width, height, &path);
+    log::info!(
+        "drew the desktop picture for {name} at {width}x{height} in {} ms: {drawn}",
+        drawing.elapsed().as_millis()
+    );
+    drawn.then_some(path)
 }
 
-/// Give an Agent Display its desktop picture: the user's choice, or the
-/// one that names it, so System Settings, which shows each display with its
-/// desktop, tells it apart from the user's monitors. False when its screen
-/// isn't listed yet or there is no picture, as in a bare debug binary. Main
-/// thread only (`NSWorkspace.setDesktopImageURL` requires the main thread).
-pub fn label_display(display: DisplayId, mtm: MainThreadMarker) -> bool {
-    let Some(picture) = wallpaper() else {
+/// Draw Agent Screen's picture, `name` over a line on what the display is,
+/// `width` × `height` pixels, as a PNG at `path`.
+fn draw_picture(name: &str, width: u32, height: u32, path: &Path) -> bool {
+    use agent_screen_model::display_picture::{self, BACKGROUND};
+    use objc2::AnyThread;
+    use objc2::runtime::AnyObject;
+    use objc2_app_kit::{
+        NSBezierPath, NSBitmapImageFileType, NSBitmapImageRep, NSColor, NSColorSpace,
+        NSDeviceRGBColorSpace, NSFont, NSFontAttributeName, NSForegroundColorAttributeName,
+        NSGraphicsContext, NSStringDrawing,
+    };
+    use objc2_foundation::{NSAttributedStringKey, NSDictionary, NSPoint, NSRect, NSSize};
+
+    let Some(rep) = (unsafe {
+        NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+            NSBitmapImageRep::alloc(),
+            std::ptr::null_mut(),
+            width as isize,
+            height as isize,
+            8,
+            4,
+            true,
+            false,
+            NSDeviceRGBColorSpace,
+            0,
+            0,
+        )
+    }) else {
         return false;
     };
+    let Some(rep) = rep.bitmapImageRepByRetaggingWithColorSpace(&NSColorSpace::sRGBColorSpace())
+    else {
+        return false;
+    };
+    let Some(context) = NSGraphicsContext::graphicsContextWithBitmapImageRep(&rep) else {
+        return false;
+    };
+    let (w, h) = (f64::from(width), f64::from(height));
+    let layout = display_picture::layout(w, h);
+    NSGraphicsContext::saveGraphicsState_class();
+    NSGraphicsContext::setCurrentContext(Some(&context));
+    let channel = |c: u8| f64::from(c) / 255.0;
+    NSColor::colorWithSRGBRed_green_blue_alpha(
+        channel(BACKGROUND.0),
+        channel(BACKGROUND.1),
+        channel(BACKGROUND.2),
+        1.0,
+    )
+    .setFill();
+    NSBezierPath::fillRect(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w, h)));
+    // One centered line of `text` at `size`, shrunk to fit the width.
+    let line = |text: &str, size: f64, bold: bool, alpha: f64, center: f64| {
+        let text = NSString::from_str(text);
+        let attributes = |size: f64| {
+            let font = if bold {
+                NSFont::boldSystemFontOfSize(size)
+            } else {
+                NSFont::systemFontOfSize(size)
+            };
+            let color = NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 1.0, 1.0, alpha);
+            let (font, color): (&AnyObject, &AnyObject) = (&font, &color);
+            let keys: [&NSAttributedStringKey; 2] =
+                unsafe { [NSFontAttributeName, NSForegroundColorAttributeName] };
+            NSDictionary::<NSAttributedStringKey, AnyObject>::from_slices(&keys, &[font, color])
+        };
+        let measured = unsafe { text.sizeWithAttributes(Some(&attributes(size))) };
+        let size = display_picture::fit(size, measured.width, layout.max_width);
+        let attributes = attributes(size);
+        let fitted = unsafe { text.sizeWithAttributes(Some(&attributes)) };
+        unsafe {
+            text.drawAtPoint_withAttributes(
+                NSPoint::new(
+                    ((w - fitted.width) / 2.0).round(),
+                    (center - fitted.height / 2.0).round(),
+                ),
+                Some(&attributes),
+            )
+        };
+    };
+    line(name, layout.title_size, true, 1.0, layout.title_center);
+    line(
+        t(
+            "An AI agent's display, removed when it's done",
+            "AI 智能体的显示器，用完即移除",
+        ),
+        layout.tagline_size,
+        false,
+        0.78,
+        layout.tagline_center,
+    );
+    context.flushGraphics();
+    NSGraphicsContext::restoreGraphicsState_class();
+    let Some(png) = (unsafe {
+        rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &NSDictionary::new())
+    }) else {
+        return false;
+    };
+    png.writeToFile_atomically(&NSString::from_str(&path.to_string_lossy()), true)
+}
+
+/// Give an Agent Display its desktop picture: the user's choice, or
+/// Agent Screen's own, which names it, so System Settings, which shows
+/// each display with its desktop, tells it apart from the user's monitors.
+/// False when its screen isn't listed yet or the picture couldn't be set.
+/// Main thread only (`NSWorkspace.setDesktopImageURL` requires the main
+/// thread).
+pub fn label_display(display: DisplayId, mtm: MainThreadMarker) -> bool {
     let Some(screen) = NSScreen::screens(mtm).iter().find(|screen| {
         screen
             .deviceDescription()
@@ -845,6 +968,9 @@ pub fn label_display(display: DisplayId, mtm: MainThreadMarker) -> bool {
             .and_then(|n| n.downcast::<NSNumber>().ok())
             .is_some_and(|n| n.unsignedIntValue() == display)
     }) else {
+        return false;
+    };
+    let Some(picture) = custom_wallpaper().or_else(|| own_picture(&screen)) else {
         return false;
     };
     let url =
@@ -860,10 +986,16 @@ pub fn label_display(display: DisplayId, mtm: MainThreadMarker) -> bool {
         return true;
     }
     let options = objc2_foundation::NSDictionary::new();
-    unsafe {
-        workspace
-            .setDesktopImageURL_forScreen_options_error(&url, &screen, &options)
-            .is_ok()
+    match unsafe { workspace.setDesktopImageURL_forScreen_options_error(&url, &screen, &options) } {
+        Ok(()) => true,
+        Err(error) => {
+            log::warn!(
+                "display {display}: macOS refused the desktop picture {}: {}",
+                picture.display(),
+                error.localizedDescription()
+            );
+            false
+        }
     }
 }
 

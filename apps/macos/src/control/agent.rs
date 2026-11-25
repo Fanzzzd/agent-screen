@@ -2501,8 +2501,10 @@ async fn permitted(cx: &mut AsyncApp) -> Result<(), ControlError> {
         message: format!(
             "Agent Screen is missing the macOS {} permission, and only the user can grant it. \
              Agent Screen has put its Settings window on the user's screen (also reachable from its \
-             menu bar icon). Tell the user to turn it on there, then retry; until then every call \
-             fails the same way.",
+             menu bar icon). Tell the user to press Turn On… beside it in that window: Agent Screen \
+             then appears in System Settings' list, where they switch it on. Opened directly, \
+             System Settings may not list Agent Screen yet. Retry after that; until then every \
+             call fails the same way.",
             names.join(" and ")
         ),
     })

@@ -3,7 +3,10 @@
 //!
 //! macOS shows each permission's prompt only while the app has no entry in
 //! the list; after that the only way is the pane. The prompts never come up
-//! at launch: the setup window asks when the user clicks.
+//! at launch: the setup window asks when the user clicks. On macOS 26 the
+//! Accessibility check at launch already adds an entry, switched off, but
+//! nothing adds a Screen Recording entry until the app asks: before that
+//! the Screen & System Audio Recording pane has no Agent Screen row.
 
 use super::cg;
 use crate::i18n::t;
@@ -159,21 +162,25 @@ pub fn listed(p: Permission) -> Option<bool> {
     Some(answer != 2)
 }
 
-/// Ask for the permission. Shows the system prompt while Agent Screen has no
-/// entry in the list and returns true; otherwise opens the pane and returns
-/// false, since the prompt would not come up.
-pub fn request(p: Permission) -> bool {
-    if listed(p) == Some(false) {
-        match p {
-            Permission::ScreenRecording => {
-                CGRequestScreenCaptureAccess();
-            }
-            Permission::Accessibility => super::ax::request_trust(),
+/// Ask for the permission: put Agent Screen in the permission's list, then
+/// open its pane. Only asking adds the entry: a pane opened before it, as
+/// by a user who went to System Settings alone, has no Agent Screen row.
+/// macOS shows its prompt, or on macOS 26 opens the pane itself, only the
+/// first time; asking again is harmless, so it asks whatever `listed`
+/// says, which can be wrong or unknown.
+pub fn request(p: Permission) {
+    let before = listed(p);
+    match p {
+        Permission::ScreenRecording => {
+            CGRequestScreenCaptureAccess();
         }
-        return true;
+        Permission::Accessibility => super::ax::request_trust(),
     }
+    log::info!(
+        "{p:?}: asked macOS; in the list before: {before:?}, after: {:?}",
+        listed(p)
+    );
     open_pane(p);
-    false
 }
 
 pub fn open_pane(p: Permission) {

@@ -669,6 +669,7 @@ The control socket accepts these methods in debug builds. `AGENTSCREEN_DEBUG=1` 
 | `recordings`, `recordings-close` | Open or close the independent recording library/player. No display is required. A debug build can use `AGENTSCREEN_PLAYBACK_DIR` for owned synthetic MP4/sidecar fixtures instead of the user's recording directory. |
 | `settings`, `setup`, `setup-close`, `setup-waiting`, `setup-still-off`, `setup-tab` | Open Settings, close it, or preview its waiting state with both permissions missing; `setup-still-off` adds the note for a switch that is on while macOS still says no; `setup-tab` moves the keyboard to the next button, as Tab does. `settings` and `setup` are aliases. |
 | `assist-screen`, `assist-ax` | Open the Screen Recording or Accessibility pane and its helper. |
+| `grant-screen`, `grant-ax` | Press the setup window's Turn On for Screen Recording or Accessibility: ask macOS, which lists Agent Screen, then open the pane and its helper. |
 | `assist-preview`, `assist-preview-unlisted`, `assist-preview-still-off`, `assist-hide` | Show the helper preview, preview an app absent from the permission list or one whose switch is on while macOS still says no, or hide the helper. |
 | `pretend-screen-off`, `pretend-ax-off`, `pretend-clear` | Make the UI act as if Screen Recording or Accessibility were off, without changing the grant, or stop pretending. |
 | `connect`, `wallpaper`, `quit` | Run Connect Claude Code and Codex, open Settings' wallpaper picker, or quit. |

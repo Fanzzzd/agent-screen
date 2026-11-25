@@ -311,6 +311,17 @@ impl Core {
             .collect()
     }
 
+    /// The screens changed: give each display its desktop picture where it
+    /// has none yet. One that has it costs a look and is left alone.
+    pub fn relabel(&self) {
+        let Some(mtm) = objc2::MainThreadMarker::new() else {
+            return;
+        };
+        for display in &self.displays.list {
+            crate::mac::app::label_display(display.id, mtm);
+        }
+    }
+
     /// Ids of unused spare displays kept for reuse.
     pub fn spare_ids(&self) -> Vec<DisplayId> {
         self.spares.iter().map(|s| s.handle.id).collect()
@@ -1668,10 +1679,12 @@ pub fn park_fillers(virtual_ids: &[DisplayId]) {
 
 /// Give a new display its desktop picture, whoever made it: the user with
 /// "+" or an agent. Off the moment it is made, as macOS lists its screen a
-/// little later and takes up to seconds the first time for a serial.
+/// little later and takes up to seconds the first time for a serial. A
+/// display still without one after these tries gets it at the next screen
+/// change (`Core::relabel`), as when macOS mirrored it at first.
 fn label_soon(id: DisplayId, cx: &mut Context<Core>) {
     cx.spawn(async move |this, cx| {
-        for _ in 0..10 {
+        for attempt in 1..=10 {
             cx.background_executor()
                 .timer(Duration::from_millis(300))
                 .await;
@@ -1690,6 +1703,11 @@ fn label_soon(id: DisplayId, cx: &mut Context<Core>) {
             };
             if labelled {
                 return;
+            }
+            if attempt == 10 {
+                log::info!(
+                    "display {id}: no desktop picture after 3 s; trying again at the next screen change"
+                );
             }
         }
     })
