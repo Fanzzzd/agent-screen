@@ -431,30 +431,51 @@ pub fn replace(text: &str, member: &Member, out: &Out) -> String {
     splice(text, member.value.start, member.value.end, &printed)
 }
 
-/// `text` without the member at `index` of `object`, its comma and the
-/// space before it.
+/// `text` without the member at `index` of `object` and its comma. A
+/// member on lines of its own goes with those lines; comments on other
+/// lines and after another member's comma stay.
 pub fn remove(text: &str, object: &Node, index: usize) -> String {
     let members = object.members().unwrap_or_default();
     let member = &members[index];
-    if members.len() == 1 {
-        return splice(text, object.start + 1, object.end - 1, "");
-    }
-    // From the end of the token before it: the brace or the comma.
-    let before = if index == 0 {
-        object.start + 1
+    let own_end = member.comma.map_or(member.value.end, |c| c + 1);
+    let line_start = text[..member.key_start].rfind('\n').map_or(0, |i| i + 1);
+    let line_end = text[own_end..]
+        .find('\n')
+        .map_or(text.len(), |i| own_end + i);
+    let after = text[own_end..line_end].trim();
+    let own_lines = line_start > object.start
+        && text[line_start..member.key_start].trim().is_empty()
+        && (after.is_empty() || after.starts_with("//"));
+    let (mut from, mut to) = if own_lines {
+        (line_start, (line_end + 1).min(text.len()))
     } else {
-        members[index - 1]
-            .comma
-            .map_or(members[index - 1].value.end, |c| c + 1)
+        let spaces = |s: &str| s.len() - s.trim_end_matches([' ', '\t']).len();
+        let lead = if member.comma.is_none() {
+            spaces(&text[..member.key_start])
+        } else {
+            0
+        };
+        let trail = text[own_end..].len() - text[own_end..].trim_start_matches([' ', '\t']).len();
+        (member.key_start - lead, own_end + trail)
     };
-    match member.comma {
-        Some(comma) => splice(text, before, comma + 1, ""),
-        // The last member without a comma: the previous member's comma goes.
-        None => {
-            let prev_comma = members[index - 1].comma.unwrap_or(before);
-            splice(text, prev_comma, member.value.end, "")
-        }
+    // Its only member: the braces close up when nothing else is inside.
+    if members.len() == 1
+        && text[object.start + 1..from].trim().is_empty()
+        && text[to..object.end - 1].trim().is_empty()
+    {
+        from = object.start + 1;
+        to = object.end - 1;
     }
+    let mut out = splice(text, from, to, "");
+    // The last member without a comma: the one before gives up its comma,
+    // as strict JSON wants, and keeps the comment after it.
+    if member.comma.is_none()
+        && index > 0
+        && let Some(comma) = members[index - 1].comma
+    {
+        out = splice(&out, comma, comma + 1, "");
+    }
+    out
 }
 
 #[cfg(test)]
@@ -546,5 +567,29 @@ mod tests {
         assert_eq!(remove(text, &obj(text), 1), "{\n  \"a\": 1,\n}");
         let text = "{ \"only\": {\"x\": 1} }";
         assert_eq!(remove(text, &obj(text), 0), "{}");
+        let text = "{\"a\": 1, \"b\": 2}";
+        assert_eq!(remove(text, &obj(text), 0), "{\"b\": 2}");
+        assert_eq!(remove(text, &obj(text), 1), "{\"a\": 1}");
+    }
+
+    #[test]
+    fn removing_keeps_the_comments_around_it() {
+        // Standalone comments in an object left empty.
+        let text = "{\n  // my servers\n  \"ours\": {\"x\": 1},\n  /* more */\n}";
+        assert_eq!(
+            remove(text, &obj(text), 0),
+            "{\n  // my servers\n  /* more */\n}"
+        );
+        // Another member's comment after its comma.
+        let text = "{\n  \"a\": 1, // keep me\n  \"ours\": {\n    \"x\": 1\n  }\n}";
+        let after = remove(text, &obj(text), 1);
+        assert_eq!(after, "{\n  \"a\": 1 // keep me\n}");
+        assert_eq!(read(&after).unwrap(), json!({"a": 1}));
+        // A comment between two members stays with the one after it.
+        let text = "{\n  \"ours\": 1,\n  // about b\n  \"b\": 2\n}";
+        assert_eq!(
+            remove(text, &obj(text), 0),
+            "{\n  // about b\n  \"b\": 2\n}"
+        );
     }
 }

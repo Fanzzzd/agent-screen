@@ -197,7 +197,14 @@ pub fn with_entry(shape: &Shape, text: &str, exe: &str) -> Result<String, String
     let Some(doc) = parsed(text)? else {
         let root = (shape.preferred)(&Value::Null);
         let entry = to_out(&(shape.entry)(exe, root));
-        return Ok(jsonc::fresh(&nest(shape.roots[root], name, entry)));
+        let fresh = jsonc::fresh(&nest(shape.roots[root], name, entry));
+        // Only comments: they stay, above the new settings.
+        return Ok(if text.trim().is_empty() {
+            fresh
+        } else {
+            let sep = if text.ends_with('\n') { "" } else { "\n" };
+            format!("{text}{sep}{fresh}")
+        });
     };
     let root = shape
         .roots
@@ -205,7 +212,7 @@ pub fn with_entry(shape: &Shape, text: &str, exe: &str) -> Result<String, String
         .position(|r| at(&doc, r).and_then(|s| s.get(name)).is_some())
         .unwrap_or_else(|| (shape.preferred)(&doc.to_value()));
     let path = shape.roots[root];
-    let fields = (shape.entry)(exe, root);
+    let mut fields = (shape.entry)(exe, root);
     // The deepest object on the path that exists gets what is missing.
     let mut node = &doc;
     for (depth, key) in path.iter().enumerate() {
@@ -220,20 +227,45 @@ pub fn with_entry(shape: &Shape, text: &str, exe: &str) -> Result<String, String
             Some(member) => node = &member.value,
         }
     }
-    match node.get(name) {
+    let existing = match node.get(name) {
         None => return Ok(jsonc::insert(text, node, name, &to_out(&fields))),
         Some(member) if member.value.members().is_none() => {
             return Err(format!("{}.{name} isn't an object", path.join(".")));
         }
-        Some(_) => {}
+        Some(member) => member.value.to_value(),
+    };
+    let mut target: Vec<&str> = path.iter().copied().chain([name]).collect();
+    // Zed before 2025 wrote `"command": {"path", "args", "env"}`. Its env
+    // moves beside the flat command; a key the flat form has no place for
+    // keeps the object form, with this copy's path and args in it.
+    if let Some(Value::Object(command)) = existing.get("command") {
+        if command
+            .keys()
+            .any(|k| !matches!(k.as_str(), "path" | "args" | "env"))
+        {
+            target.push("command");
+            fields = vec![ours("path", json!(exe)), ours("args", json!(["mcp"]))];
+        } else if let Some(env) = command
+            .get("env")
+            .filter(|e| e.as_object().is_some_and(|e| !e.is_empty()))
+            && existing
+                .get("env")
+                .is_none_or(|e| e.as_object().is_some_and(|e| e.is_empty()))
+        {
+            for field in fields.iter_mut().filter(|f| f.key == "env") {
+                *field = ours("env", env.clone());
+            }
+        }
     }
+    set_fields(text, &target, &fields)
+}
+
+/// `text` with `fields` set in the object at `target`, which is there.
+fn set_fields(text: &str, target: &[&str], fields: &[Field]) -> Result<String, String> {
     let mut text = text.to_string();
-    for field in &fields {
+    for field in fields {
         let doc = parsed(&text)?.expect("an object was here");
-        let entry = at(&doc, path)
-            .and_then(|s| s.get(name))
-            .map(|m| &m.value)
-            .expect("the entry was here");
+        let entry = at(&doc, target).expect("the entry was here");
         text = match entry.get(field.key) {
             None => jsonc::insert(&text, entry, field.key, &Out::Json(field.value.clone())),
             Some(member) if field.ours && member.value.to_value() != field.value => {
@@ -417,6 +449,37 @@ mod tests {
             value(&text)["context_servers"]["agent-screen"],
             json!({"command": EXE, "args": ["mcp"], "env": {}})
         );
+    }
+
+    #[test]
+    fn keeps_a_comment_only_file_above_the_new_settings() {
+        let before = "// my notes\n/* \"mcpServers\": {} */\n";
+        let text = with_entry(&MCP_SERVERS, before, EXE).unwrap();
+        assert!(text.starts_with(before), "{text}");
+        assert_eq!(state(&MCP_SERVERS, &text, EXE), State::Connected);
+        let text = with_entry(&MCP_SERVERS, "// no newline", EXE).unwrap();
+        assert!(text.starts_with("// no newline\n{"), "{text}");
+    }
+
+    #[test]
+    fn zed_keeps_the_env_of_the_older_nested_command() {
+        let nested = format!(
+            "{{\"context_servers\": {{\"agent-screen\": {{\"command\": {{\"path\": \"{OLD}\", \"args\": [\"mcp\"], \"env\": {{\"A\": \"1\"}}}}}}}}}}"
+        );
+        let text = with_entry(&ZED, &nested, EXE).unwrap();
+        assert_eq!(
+            value(&text)["context_servers"]["agent-screen"],
+            json!({"command": EXE, "args": ["mcp"], "env": {"A": "1"}})
+        );
+        // A key the flat form has no place for keeps the object form.
+        let extra = nested.replace("\"env\"", "\"cwd\": \"/x\", \"env\"");
+        let text = with_entry(&ZED, &extra, EXE).unwrap();
+        assert_eq!(
+            value(&text)["context_servers"]["agent-screen"],
+            json!({"command": {"path": EXE, "args": ["mcp"], "cwd": "/x", "env": {"A": "1"}}})
+        );
+        assert_eq!(state(&ZED, &text, EXE), State::Connected);
+        assert_eq!(with_entry(&ZED, &text, EXE).unwrap(), text);
     }
 
     #[test]

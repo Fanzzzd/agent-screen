@@ -21,7 +21,7 @@ AS="/Applications/Agent Screen.app/Contents/MacOS/AgentScreen"
 - A config file that can't be read is never written: `install` reports it and leaves it as it is. Each write goes to a temporary file in the same folder, then replaces the file, so a crash never leaves half a config; the file keeps its permissions. A config that is a link, as a dotfiles manager makes, is written through the link when it points to a file; any other link is reported and left alone.
 - The development build (`Agent Screen Dev.app`) registers as `agent-screen-dev`, beside the installed app's `agent-screen`, and writes no skill.
 
-`install` also writes the Agent Screen skill that matches this version to `~/.agents/skills/agent-screen/SKILL.md`, which Codex and other agents read, and to `~/.claude/skills/agent-screen/SKILL.md` for Claude Code. It leaves a copy alone when it is a link or when `npx skills` installed it, and writes no Claude Code copy when the agent-screen plugin is installed. Codex gets its own copy in `~/.codex/skills` only when the shared one can't be written. Each update of the app brings the copies it wrote up to its version.
+`install` also writes the Agent Screen skill that matches this version to `~/.agents/skills/agent-screen/SKILL.md`, which Codex and other agents read, and to `~/.claude/skills/agent-screen/SKILL.md` for Claude Code. It leaves a copy alone when the file or any folder above it in your home folder is a link, as a dotfiles manager makes, or when `npx skills` installed it, and writes no Claude Code copy when the agent-screen plugin is installed. Codex gets its own copy in `~/.codex/skills` only when the shared one can't be written. Each update of the app brings the copies it wrote up to its version.
 
 ## The clients
 

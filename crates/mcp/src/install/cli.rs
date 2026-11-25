@@ -88,6 +88,12 @@ pub fn run(command: &str, args: &[String], exe: &Path, env: &Env) -> Option<Outp
     }))
 }
 
+/// A path as JSON text. serde_json can't write a path that isn't UTF-8,
+/// and `json!` would panic on one.
+fn lossy(path: &Path) -> Value {
+    Value::String(path.to_string_lossy().into_owned())
+}
+
 fn pretty(value: Value) -> String {
     format!(
         "{}\n",
@@ -97,7 +103,7 @@ fn pretty(value: Value) -> String {
 
 fn state_json(state: &State) -> Value {
     match state {
-        State::StalePath(from) => json!({"state": state.key(), "command": from}),
+        State::StalePath(from) => json!({"state": state.key(), "command": lossy(from)}),
         State::InvalidConfig(e) => json!({"state": state.key(), "error": e}),
         _ => json!({"state": state.key()}),
     }
@@ -133,7 +139,7 @@ fn status_output(exe: &Path, env: &Env, as_json: bool) -> Output {
                     "id": s.client.id,
                     "name": s.client.name,
                     "detected": s.detected,
-                    "config": s.config,
+                    "config": lossy(&s.config),
                     "restart": s.client.restart,
                 });
                 if let (Value::Object(v), Value::Object(state)) = (&mut v, state_json(&s.state)) {
@@ -144,12 +150,12 @@ fn status_output(exe: &Path, env: &Env, as_json: bool) -> Output {
             .collect();
         let skills: Vec<Value> = copies
             .iter()
-            .map(|(who, path, copy)| json!({"for": who, "path": path, "state": skill_key(copy)}))
+            .map(|(who, path, copy)| json!({"for": who, "path": lossy(path), "state": skill_key(copy)}))
             .collect();
         return Output {
             text: pretty(json!({
                 "server": server_name(&exe_text),
-                "command": exe,
+                "command": lossy(exe),
                 "args": ["mcp"],
                 "clients": clients,
                 "skills": skills,
@@ -196,17 +202,17 @@ fn done_json(done: &Done) -> Value {
     match done {
         Done::Already => json!({"result": "already"}),
         Done::AddedTo(_) => json!({"result": "added"}),
-        Done::Repointed { from, .. } => json!({"result": "repointed", "from": from}),
+        Done::Repointed { from, .. } => json!({"result": "repointed", "from": lossy(from)}),
         Done::Updated(_) => json!({"result": "updated"}),
     }
 }
 
 fn skill_json(skill: &Result<Skill, String>) -> Value {
     match skill {
-        Ok(Skill::Written(p)) => json!({"result": "written", "path": p}),
-        Ok(Skill::Current(p)) => json!({"result": "current", "path": p}),
-        Ok(Skill::Linked(p)) => json!({"result": "linked", "path": p}),
-        Ok(Skill::Shared(p)) => json!({"result": "shared", "path": p}),
+        Ok(Skill::Written(p)) => json!({"result": "written", "path": lossy(p)}),
+        Ok(Skill::Current(p)) => json!({"result": "current", "path": lossy(p)}),
+        Ok(Skill::Linked(p)) => json!({"result": "linked", "path": lossy(p)}),
+        Ok(Skill::Shared(p)) => json!({"result": "shared", "path": lossy(p)}),
         Ok(Skill::Plugin) => json!({"result": "plugin"}),
         Err(e) => json!({"result": "failed", "error": e}),
     }
@@ -248,7 +254,7 @@ fn install_output(exe: &Path, env: &Env, args: Args) -> Output {
                 };
                 v["id"] = json!(o.client.id);
                 v["name"] = json!(o.client.name);
-                v["config"] = json!(o.config);
+                v["config"] = lossy(&o.config);
                 v["restart"] = json!(o.client.restart);
                 if let Some(skill) = &o.skill {
                     v["skill"] = skill_json(skill);
@@ -316,7 +322,7 @@ fn uninstall_output(exe: &Path, env: &Env, args: Args) -> Output {
                 };
                 v["id"] = json!(r.client.id);
                 v["name"] = json!(r.client.name);
-                v["config"] = json!(r.config);
+                v["config"] = lossy(&r.config);
                 v
             })
             .collect();

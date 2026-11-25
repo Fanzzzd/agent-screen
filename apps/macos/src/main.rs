@@ -281,6 +281,13 @@ Usage:
   AgentScreen --version     print compiled package/build metadata (older-build fallback)
 ";
 
+/// The arguments as text, with U+FFFD for bytes that aren't UTF-8:
+/// std::env::args panics on such an argument, before the CLI can say what
+/// is wrong with it.
+fn lossy_args(args: impl Iterator<Item = std::ffi::OsString>) -> Vec<String> {
+    args.map(|a| a.to_string_lossy().into_owned()).collect()
+}
+
 /// `AgentScreen colorsync [setup|remove|reclaim]`: the helper that keeps
 /// macOS's display registry short (ADR 0009, `mac::colorsync`).
 fn colorsync(command: Option<&str>) {
@@ -375,13 +382,15 @@ fn main() {
     }
     // `AgentScreen mcp status | install | uninstall`: the agent clients'
     // configs, read and edited by the registry in `install`.
-    if std::env::args().nth(1).as_deref() == Some("mcp")
-        && let Some(command) = std::env::args().nth(2)
+    let args = lossy_args(std::env::args_os());
+    let arg = |n: usize| args.get(n).cloned();
+    if arg(1).as_deref() == Some("mcp")
+        && let Some(command) = arg(2)
     {
         let exe = std::env::current_exe().unwrap_or_default();
-        let rest: Vec<String> = std::env::args().skip(3).collect();
+        let rest = &args[3.min(args.len())..];
         let env = agent_screen_mcp::install::Env::current();
-        if let Some(out) = agent_screen_mcp::install::cli::run(&command, &rest, &exe, &env) {
+        if let Some(out) = agent_screen_mcp::install::cli::run(&command, rest, &exe, &env) {
             if out.code == 2 {
                 eprint!("{}", out.text);
             } else {
@@ -395,7 +404,7 @@ fn main() {
     if std::env::args().nth(1).as_deref() == Some("mcp") {
         // `--v1` serves the tools in this process, as before the pipe: for
         // the v1 compatibility test only.
-        let served = if std::env::args().nth(2).as_deref() == Some("--v1") {
+        let served = if arg(2).as_deref() == Some("--v1") {
             agent_screen_mcp::run_v1()
         } else {
             agent_screen_mcp::run(env!("CARGO_PKG_VERSION"))
@@ -591,6 +600,36 @@ mod cli_tests {
             agent_screen_mcp::diagnostics::cli(&["--help".into()], env!("CARGO_PKG_VERSION"))
                 .unwrap();
         assert!(help.contains("REPORTING_BUGS.md"));
+    }
+
+    #[test]
+    fn an_argument_that_isnt_utf8_reaches_the_cli() {
+        use std::os::unix::ffi::OsStringExt;
+        let bad = std::ffi::OsString::from_vec(vec![b'c', 0xff]);
+        let args = super::lossy_args(
+            [
+                "AgentScreen".into(),
+                "mcp".into(),
+                "install".into(),
+                "--client".into(),
+                bad,
+            ]
+            .into_iter(),
+        );
+        assert_eq!(args[4], "c\u{fffd}");
+        let env = agent_screen_mcp::install::Env::for_home(std::env::temp_dir().join("as-none"));
+        let out = agent_screen_mcp::install::cli::run(
+            &args[2],
+            &args[3..],
+            std::path::Path::new("/x"),
+            &env,
+        )
+        .unwrap();
+        assert_eq!(out.code, 2);
+        assert!(
+            out.text
+                .contains("unknown client c\u{fffd}; the clients are claude-code")
+        );
     }
 
     #[test]

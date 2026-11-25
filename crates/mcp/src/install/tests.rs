@@ -520,3 +520,35 @@ fn the_cli_reports_installs_and_refuses_unknown_clients() {
         out.text
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn json_output_survives_a_path_that_isnt_utf8() {
+    use std::os::unix::ffi::OsStrExt;
+    let home = Home::new("lossy");
+    let odd = home.0.home.join(std::ffi::OsStr::from_bytes(b"codex-\xff"));
+    let env = home.0.clone().with_var("CODEX_HOME", &odd);
+    let exe = Path::new(EXE);
+    let run = |cmd: &str, args: &[&str]| {
+        let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        cli::run(cmd, &args, exe, &env).unwrap()
+    };
+    // APFS refuses such a name, so the write fails; the report still comes.
+    let installed = run("install", &["--client", "codex", "--no-skill", "--json"]);
+    let json: serde_json::Value = serde_json::from_str(&installed.text).unwrap();
+    assert!(
+        json["clients"][0]["config"]
+            .as_str()
+            .unwrap()
+            .contains("codex-\u{fffd}")
+    );
+    let status: serde_json::Value = serde_json::from_str(&run("status", &["--json"]).text).unwrap();
+    let codex = status["clients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == "codex")
+        .unwrap();
+    assert!(codex["config"].as_str().unwrap().contains("codex-\u{fffd}"));
+    assert!(serde_json::from_str::<serde_json::Value>(&run("uninstall", &["--json"]).text).is_ok());
+}
