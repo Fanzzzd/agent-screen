@@ -300,6 +300,32 @@ pub(super) async fn handle(
             .detach();
             Ok(json!({}))
         }
+        // Test hook: Move to Applications from `from` into the folder `to`,
+        // as the banner's button runs it, without opening the copy. The
+        // e2e instance only, and never into an Applications folder.
+        "debugMoveApp" => {
+            let from = std::path::PathBuf::from(p.string("from").unwrap_or_default());
+            let to = std::path::PathBuf::from(p.string("to").unwrap_or_default());
+            let replace = p.0.get("replace").and_then(Value::as_bool).unwrap_or(false);
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            let applications = to.starts_with("/Applications")
+                || home.is_some_and(|h| to.starts_with(h.join("Applications")));
+            if agent_screen_mcp::endpoint::instance().as_deref() != Some("e2e")
+                || applications
+                || !to.is_absolute()
+                || !from.is_absolute()
+            {
+                return Some(Err(ControlError::invalid(
+                    "debugMoveApp needs the e2e instance and absolute paths outside Applications",
+                )));
+            }
+            use crate::mac::relocate::{MoveError, move_to};
+            Ok(match off(cx, move || move_to(&from, &to, replace)).await {
+                Ok(dest) => json!({ "moved": dest.display().to_string() }),
+                Err(MoveError::Exists(dest)) => json!({ "exists": dest.display().to_string() }),
+                Err(MoveError::Failed(error)) => json!({ "error": error }),
+            })
+        }
         "debugInputObserver" => debug_input_observer(p, cx),
         // The Help Card's width and its buttons' bounds at the last paint.
         "debugCard" => debug_card(cx),

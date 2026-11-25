@@ -194,13 +194,14 @@ pub fn open_pane(p: Permission) {
 
 /// Start a fresh copy of the app once this one has quit, then quit.
 pub fn relaunch() {
-    let Some(bundle) = std::env::current_exe().ok().and_then(|exe| {
-        exe.ancestors()
-            .find(|p| p.extension().is_some_and(|e| e == "app"))
-            .map(|p| p.to_path_buf())
-    }) else {
-        return;
-    };
+    if let Some(bundle) = super::relocate::bundle() {
+        relaunch_bundle(&bundle);
+    }
+}
+
+/// Open `bundle` at Settings once this process has exited: the caller
+/// quits next.
+pub fn relaunch_bundle(bundle: &std::path::Path) {
     let pid = std::process::id();
     // --setup: the new process shows the setup window again, at the step
     // after the permissions.

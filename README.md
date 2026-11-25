@@ -76,7 +76,7 @@ Built-in computer use drives your real mouse and keyboard, so you stop working w
 
    Agent Screen updates itself. It downloads a new version in the background and installs it once no Agent Display is open, so it never ends an agent's work. **Restart to Update…** in the menu bar icon's menu installs it sooner, and **Check for Updates…** checks now.
 
-2. Open Agent Screen. Its Settings window asks for Screen & System Audio Recording and Accessibility. Both stay on this Mac. Settings works from the keyboard: Tab moves between buttons, Return or Space presses one, Escape closes it.
+2. Open Agent Screen. Opened from the disk image or Downloads, Settings first asks you to move it: **Move to Applications…** copies it there and opens the copy, since permissions and agent connections set up from a temporary place stop working once the app moves. Its Settings window asks for Screen & System Audio Recording and Accessibility. Both stay on this Mac. Settings works from the keyboard: Tab moves between buttons, Return or Space presses one, Escape closes it.
 3. Connect your agents. Press **Connect…** in Settings (right-click the menu bar icon and choose **Settings…**), or run:
 
    ```sh

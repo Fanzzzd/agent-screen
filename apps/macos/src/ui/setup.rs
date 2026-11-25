@@ -12,6 +12,7 @@ use crate::mac::aerospace::Ignoring;
 use crate::mac::native::{self, MenuAction, Native};
 use crate::mac::notify;
 use crate::mac::permissions::{Permission, Status};
+use agent_screen_model::location::Temporary;
 use gpui::{
     AnyElement, App, Context, FocusHandle, FontWeight, Hsla, InteractiveElement, IntoElement,
     KeyDownEvent, MouseButton, ObjectFit, ParentElement, Render, Role, SharedString,
@@ -71,7 +72,22 @@ pub struct Setup {
     /// Every display shares one macOS Space ("Displays have separate
     /// Spaces" off): a row says what that does and where to change it.
     pub spaces_shared: bool,
+    /// The bundle runs from the disk image, Downloads or a translocated
+    /// copy: a banner asks to move it first.
+    pub temporary: Option<Temporary>,
+    pub moving: MoveStep,
     icon: Arc<gpui::Image>,
+}
+
+/// Move to Applications, while the bundle runs from a temporary place.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum MoveStep {
+    #[default]
+    Idle,
+    /// Applications has an Agent Screen: replace it?
+    AskReplace,
+    Copying,
+    Failed(String),
 }
 
 /// The app icon, flat, from AppIcon.icns. Asking macOS for the Icon
@@ -107,6 +123,8 @@ impl Setup {
             wallpaper: None,
             reports_on: true,
             spaces_shared: false,
+            temporary: None,
+            moving: MoveStep::Idle,
             icon,
         }
     }
@@ -216,6 +234,9 @@ impl Render for Setup {
             .px(px(32.))
             .pt(px(if ready { 36. } else { 44. }))
             .pb(px(24.))
+            .when_some(self.temporary, |d, why| {
+                d.child(self.location_banner(why, &theme))
+            })
             .child(header)
             .child(section(t("Permissions", "权限"), permissions, &theme))
             .child(section(
@@ -491,6 +512,105 @@ pub fn open_client_guide() {
 }
 
 impl Setup {
+    /// The bundle runs from a temporary place: what breaks, and Move to
+    /// Applications, which copies it there and opens the copy.
+    fn location_banner(&self, why: Temporary, theme: &Theme) -> impl IntoElement {
+        let shell = self.shell.clone();
+        let detail = match why {
+            Temporary::DiskImage => t(
+                "It runs from the disk image. Permissions and agent connections set up here stop working once it moves.",
+                "当前从磁盘映像运行。在此授予的权限和 agent 接入在移动后会失效。",
+            ),
+            Temporary::Downloads => t(
+                "It runs from Downloads. Permissions and agent connections set up here stop working once it moves.",
+                "当前从“下载”运行。在此授予的权限和 agent 接入在移动后会失效。",
+            ),
+            Temporary::Translocated => t(
+                "macOS runs it from a temporary copy. Permissions and agent connections set up here stop working.",
+                "macOS 正从临时副本运行它。在此授予的权限和 agent 接入会失效。",
+            ),
+        };
+        let note = match &self.moving {
+            MoveStep::AskReplace => Some((
+                t(
+                    "Applications already has Agent Screen. Replace it?",
+                    "“应用程序”中已有 Agent Screen，是否替换？",
+                )
+                .to_string(),
+                theme.label,
+            )),
+            MoveStep::Failed(error) => Some((
+                tf!(
+                    "Didn't work: {error}. Drag it to Applications in Finder instead.",
+                    "未成功：{error}。请在访达中将它拖到“应用程序”。"
+                ),
+                theme.orange,
+            )),
+            _ => None,
+        };
+        let action = match &self.moving {
+            MoveStep::Copying => busy(t("Copying…", "正在拷贝…"), theme),
+            MoveStep::AskReplace => {
+                let cancel = shell.clone();
+                div()
+                    .flex()
+                    .gap(px(8.))
+                    .child(key_button(
+                        "setup-move-cancel",
+                        t("Cancel", "取消").into(),
+                        None,
+                        theme,
+                        move |cx| tell(&cancel, cx, |shell, cx| shell.cancel_move(cx)),
+                    ))
+                    .child(key_button(
+                        "setup-move-replace",
+                        t("Replace", "替换").into(),
+                        Some(theme.orange),
+                        theme,
+                        move |cx| {
+                            tell(&shell, cx, |shell, cx| shell.move_to_applications(true, cx))
+                        },
+                    ))
+                    .into_any_element()
+            }
+            step => key_button(
+                "setup-move",
+                if matches!(step, MoveStep::Failed(_)) {
+                    t("Try Again", "重试")
+                } else {
+                    t("Move to Applications…", "移至应用程序…")
+                }
+                .into(),
+                Some(theme.orange),
+                theme,
+                move |cx| {
+                    tell(&shell, cx, |shell, cx| {
+                        shell.move_to_applications(false, cx)
+                    })
+                },
+            )
+            .into_any_element(),
+        };
+        div()
+            .mb(px(18.))
+            .rounded(px(12.))
+            .bg(theme.orange.opacity(0.12))
+            .border_1()
+            .border_color(theme.orange.opacity(0.35))
+            .child(item(
+                badge("icons/alert.svg", theme.orange, false),
+                t(
+                    "Move Agent Screen to Applications first",
+                    "请先将 Agent Screen 移至“应用程序”",
+                )
+                .into(),
+                detail.into(),
+                note,
+                action,
+                theme,
+            ))
+    }
+
     /// Notifications: optional, so setup is complete without them.
     fn notifications_row(&self, theme: &Theme) -> impl IntoElement {
         let shell = self.shell.clone();

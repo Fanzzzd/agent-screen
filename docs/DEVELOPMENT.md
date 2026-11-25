@@ -370,6 +370,7 @@ AGENTSCREEN_INSTANCE=e2e cargo e2e sound       # a recording has the sound of an
 
 # settings: the Settings window and permission setup
 AGENTSCREEN_INSTANCE=e2e E2E_NOW=1 cargo e2e settings  # the Settings window opens, fits a 13-inch screen and closes with Done; shows on your screen
+AGENTSCREEN_INSTANCE=e2e E2E_NOW=1 cargo e2e onboarding  # Settings on a first install: the Move to Applications banner at each step (captures setup-temp-location*.png), and debugMoveApp copying a quarantined copy of the test app into target/e2e/onboarding/Applications: the signature holds, quarantine is cleared on the copy only, the source stays, no hidden half copy is left, an existing copy is replaced only with replace, and the hook refuses Applications; shows on your screen; no display
 AGENTSCREEN_INSTANCE=e2e cargo e2e reportissue # report_issue through MCP to the app, with a mock GitHub API and a test opener that writes URLs to a file: a report waits on the Bug Report Card and nothing reads GitHub or opens before the click; Show Report grows the card; one Open on GitHub opens one form; later reports are checked and still wait; an open match is a duplicate; Turn Off reads nothing; fileReport refuses another repository's form; restarts the e2e instance with the mock and again without it; captures the card; no display
 AGENTSCREEN_INSTANCE=e2e cargo e2e spacescard  # the Spaces card through debugShow, in English and Chinese: it drops at the Help Card's width, both buttons fit, Not Now hides it and a preview marks nothing as seen; it never opens System Settings; no display, the card shows on your screen for a few seconds; captures it under target/e2e
 
@@ -638,6 +639,7 @@ The control socket accepts these methods in debug builds. `AGENTSCREEN_DEBUG=1` 
 | `debugWebPreview` | Returns the loopback web server's `port`, `activeClients`, `activeFeeds`, `feedGeneration`, `encodedFrames` and `mainThreadEncodes`. |
 | `debugRegather` | Returns the latest display change's regather: its `generation` and whether it is still `running` (#291). |
 | `debugPanic` | Panics on the main thread after replying. This aborts the test app. |
+| `debugMoveApp` | Move to Applications as the banner's button runs it, from the bundle `from` into the folder `to`, without opening the copy: `{moved}`, `{exists}` when `replace` is false and a copy is there, or `{error}`. `AGENTSCREEN_INSTANCE=e2e` only, and never into an Applications folder. |
 | `debugQuit` | Quits the test app after replying. |
 
 `debugShow` accepts these surfaces:
@@ -673,6 +675,7 @@ The control socket accepts these methods in debug builds. `AGENTSCREEN_DEBUG=1` 
 | `spaces-card`, `spaces-card-later` | Show the Spaces card, as when every display first shares one macOS Space ("Displays have separate Spaces" off), and its row in Settings, or press its Not Now. A preview marks nothing as seen, so the real card still shows once. Its Open Desktop & Dock (`debugCard` button `spaces-open`) opens System Settings on your screen, so no surface presses it. |
 | `report-card-off`, `report-card-on` | Turn agents' bug reports off, as the card's Turn Off does, or on again. |
 | `recordings`, `recordings-close` | Open or close the independent recording library/player. No display is required. A debug build can use `AGENTSCREEN_PLAYBACK_DIR` for owned synthetic MP4/sidecar fixtures instead of the user's recording directory. |
+| `setup-temp-location`, `setup-temp-location-replace`, `setup-temp-location-copying`, `setup-temp-location-failed` | Open Settings with the Move to Applications banner as from the disk image: idle, asking to replace a copy already in Applications, copying, and failed. Its buttons only change the preview's step; nothing is copied. Done ends the preview. |
 | `settings`, `setup`, `setup-close`, `setup-waiting`, `setup-still-off`, `setup-tab` | Open Settings, close it, or preview its waiting state with both permissions missing; `setup-still-off` adds the note for a switch that is on while macOS still says no; `setup-tab` moves the keyboard to the next button, as Tab does. `settings` and `setup` are aliases. |
 | `assist-screen`, `assist-ax` | Open the Screen Recording or Accessibility pane and its helper. |
 | `grant-screen`, `grant-ax` | Press the setup window's Turn On for Screen Recording or Accessibility: ask macOS, which lists Agent Screen, then open the pane and its helper. |

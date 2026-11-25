@@ -354,6 +354,13 @@ pub struct Shell {
     /// Clients whose config runs this copy of Agent Screen, read when the
     /// setup window opens and after a Connect: not on every tick.
     registered: Vec<&'static str>,
+    /// Where the bundle runs from, read at launch: a temporary place shows
+    /// the Move to Applications banner.
+    location: agent_screen_model::location::Location,
+    /// `debugShow setup-temp-location…`: the banner as from the disk
+    /// image, without moving anything.
+    location_preview: bool,
+    moving: setup::MoveStep,
 }
 
 /// Pixel size a thumbnail needs: twice its width in points, for Retina.
@@ -902,6 +909,9 @@ impl Shell {
             connecting: false,
             rechecking: false,
             registered: Vec::new(),
+            location: crate::mac::relocate::location(),
+            location_preview: false,
+            moving: setup::MoveStep::Idle,
         }
     }
     fn native(&mut self, event: Native, cx: &mut Context<Self>) {
@@ -2941,6 +2951,26 @@ impl Shell {
             // The open setup window as with both permissions missing, the
             // first row explaining what to do in System Settings: the
             // tallest it gets.
+            // The Move to Applications banner as from the disk image, at
+            // each of its steps. Its buttons never copy in a preview.
+            "setup-temp-location"
+            | "setup-temp-location-replace"
+            | "setup-temp-location-copying"
+            | "setup-temp-location-failed" => {
+                self.location_preview = true;
+                self.moving = match surface {
+                    "setup-temp-location-replace" => setup::MoveStep::AskReplace,
+                    "setup-temp-location-copying" => setup::MoveStep::Copying,
+                    "setup-temp-location-failed" => setup::MoveStep::Failed(
+                        t("You can't write to Applications", "你无权写入“应用程序”").into(),
+                    ),
+                    _ => setup::MoveStep::Idle,
+                };
+                if self.setup.is_none() {
+                    self.open_setup(cx);
+                }
+                self.push_setup(cx);
+            }
             "setup-waiting" | "setup-still-off" => {
                 self.setup_preview = true;
                 self.preview_still_off = surface == "setup-still-off";
@@ -4424,6 +4454,10 @@ impl Shell {
         }
         self.waiting = None;
         self.setup_preview = false;
+        if self.location_preview {
+            self.location_preview = false;
+            self.moving = setup::MoveStep::Idle;
+        }
         assist::hide();
         if self.recordings.is_none() {
             leave_dock(cx);
@@ -4629,6 +4663,59 @@ impl Shell {
         self.quit(cx);
     }
 
+    /// Move to Applications: copy the bundle there off the main thread,
+    /// then open the copy at Settings and quit. With an Agent Screen there
+    /// already, the banner asks first; `replace` is its answer.
+    pub fn move_to_applications(&mut self, replace: bool, cx: &mut Context<Self>) {
+        use crate::mac::relocate::{self, MoveError};
+        if self.moving == setup::MoveStep::Copying {
+            return;
+        }
+        // A preview never copies: the test app is a development build.
+        if self.location_preview || self.location.temporary().is_none() {
+            self.moving = if replace {
+                setup::MoveStep::Copying
+            } else {
+                setup::MoveStep::AskReplace
+            };
+            self.push_setup(cx);
+            return;
+        }
+        let Some(source) = relocate::bundle() else {
+            return;
+        };
+        self.moving = setup::MoveStep::Copying;
+        self.push_setup(cx);
+        cx.spawn(async move |shell, cx| {
+            let moved = cx
+                .background_spawn(async move {
+                    relocate::move_to(&source, std::path::Path::new("/Applications"), replace)
+                })
+                .await;
+            let _ = shell.update(cx, |shell, cx| match moved {
+                Ok(dest) => {
+                    permissions::relaunch_bundle(&dest);
+                    shell.quit(cx);
+                }
+                Err(MoveError::Exists(_)) => {
+                    shell.moving = setup::MoveStep::AskReplace;
+                    shell.push_setup(cx);
+                }
+                Err(MoveError::Failed(error)) => {
+                    log::warn!("move to Applications: {error}");
+                    shell.moving = setup::MoveStep::Failed(error);
+                    shell.push_setup(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    pub fn cancel_move(&mut self, cx: &mut Context<Self>) {
+        self.moving = setup::MoveStep::Idle;
+        self.push_setup(cx);
+    }
+
     /// Register the MCP server with every agent client on this Mac, and
     /// say how it went.
     pub fn connect_agents(&mut self, cx: &mut Context<Self>) {
@@ -4816,6 +4903,12 @@ impl Shell {
         let wallpaper = crate::mac::app::custom_wallpaper();
         let reports_on = self.reports.automatic;
         let spaces_shared = self.spaces_shared || self.spaces_preview;
+        let temporary = if self.location_preview {
+            Some(agent_screen_model::location::Temporary::DiskImage)
+        } else {
+            self.location.temporary()
+        };
+        let moving = self.moving.clone();
         if handle
             .update(cx, |setup, _, cx| {
                 setup.aerospace = aerospace;
@@ -4823,6 +4916,8 @@ impl Shell {
                 setup.wallpaper = wallpaper;
                 setup.reports_on = reports_on;
                 setup.spaces_shared = spaces_shared;
+                setup.temporary = temporary;
+                setup.moving = moving;
                 setup.status = status;
                 setup.notifications = notifications;
                 (setup.colorsync, setup.colorsync_busy, setup.colorsync_error) = colorsync;

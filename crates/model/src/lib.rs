@@ -22,6 +22,7 @@ pub mod key_window;
 pub mod keychord;
 pub mod landing;
 pub mod launch;
+pub mod location;
 pub mod mcp_process;
 pub mod menu_press;
 pub mod model;
