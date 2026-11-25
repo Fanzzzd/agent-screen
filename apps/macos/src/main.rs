@@ -265,7 +265,12 @@ const USAGE: &str = "Agent Screen gives AI agents their own virtual displays.
 Usage:
   AgentScreen               start the menu bar app (open Agent Screen.app instead)
   AgentScreen mcp           the MCP server's pipe into the app, started by an agent client over stdio
-  AgentScreen mcp install   register the MCP server with Claude Code and Codex
+  AgentScreen mcp status [--json]
+                          which agent clients this Mac has and whether they run this copy
+  AgentScreen mcp install [--client <id,...>] [--no-skill] [--dry-run] [--json]
+                          register the MCP server with every client found, or the ones named
+  AgentScreen mcp uninstall [--client <id,...>] [--dry-run] [--json]
+                          remove the server's entry, leaving other servers and settings
   AgentScreen colorsync     whether the helper that keeps macOS's display list short is set up
   AgentScreen colorsync setup | remove | reclaim
                           set it up or remove it (asks for an administrator password),
@@ -368,43 +373,25 @@ fn main() {
         }
         _ => {}
     }
-    // `AgentScreen mcp`: the pipe a client starts over stdio. It forwards
-    // the client's lines to the MCP host in the running app (ADR 0021).
+    // `AgentScreen mcp status | install | uninstall`: the agent clients'
+    // configs, read and edited by the registry in `install`.
     if std::env::args().nth(1).as_deref() == Some("mcp")
-        && std::env::args().nth(2).as_deref() == Some("install")
+        && let Some(command) = std::env::args().nth(2)
     {
         let exe = std::env::current_exe().unwrap_or_default();
-        for outcome in agent_screen_mcp::install::install(&exe) {
-            match outcome.result {
-                None => println!("{}: not installed", outcome.client),
-                Some(Ok(done)) => println!("{}: {done}", outcome.client),
-                Some(Err(error)) => println!("{}: failed: {error}", outcome.client),
+        let rest: Vec<String> = std::env::args().skip(3).collect();
+        let env = agent_screen_mcp::install::Env::current();
+        if let Some(out) = agent_screen_mcp::install::cli::run(&command, &rest, &exe, &env) {
+            if out.code == 2 {
+                eprint!("{}", out.text);
+            } else {
+                print!("{}", out.text);
             }
-            use agent_screen_mcp::install::Skill;
-            match outcome.skill {
-                None => {}
-                Some(Ok(Skill::Written(path))) => {
-                    println!("{}: skill written to {}", outcome.client, path.display())
-                }
-                Some(Ok(Skill::Current(path))) => {
-                    println!("{}: skill up to date in {}", outcome.client, path.display())
-                }
-                Some(Ok(Skill::Linked(path))) => println!(
-                    "{}: skill in {} is another installer's, left alone",
-                    outcome.client,
-                    path.display()
-                ),
-                Some(Ok(Skill::Plugin)) => {
-                    println!(
-                        "{}: skill comes from the agent-screen plugin",
-                        outcome.client
-                    )
-                }
-                Some(Err(error)) => println!("{}: skill failed: {error}", outcome.client),
-            }
+            std::process::exit(out.code);
         }
-        return;
     }
+    // `AgentScreen mcp`: the pipe a client starts over stdio. It forwards
+    // the client's lines to the MCP host in the running app (ADR 0021).
     if std::env::args().nth(1).as_deref() == Some("mcp") {
         // `--v1` serves the tools in this process, as before the pipe: for
         // the v1 compatibility test only.
@@ -604,6 +591,11 @@ mod cli_tests {
             agent_screen_mcp::diagnostics::cli(&["--help".into()], env!("CARGO_PKG_VERSION"))
                 .unwrap();
         assert!(help.contains("REPORTING_BUGS.md"));
+    }
+
+    #[test]
+    fn help_lists_the_mcp_commands() {
+        assert!(super::USAGE.contains(agent_screen_mcp::install::cli::USAGE));
     }
 }
 

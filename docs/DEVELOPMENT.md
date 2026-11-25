@@ -6,6 +6,7 @@
 apps/macos/        the app: GPUI UI, control socket and the MCP hosts, `AgentScreen mcp`
 apps/website/      agentscreen.app, a Cloudflare Worker with static assets
 crates/mcp/        the pipe (`AgentScreen mcp`) and the MCP host with the tools (rmcp), built into the app binary (ADR 0021)
+                   and `install/`, the client registry behind `mcp status | install | uninstall` and Settings' Connect
 crates/model/      domain rules with no OS calls: displays, windows, key chords
 crates/colorsync/  the root helper that keeps ColorSync's display registry short (ADR 0009)
 tests/e2e/         MCP scripts, user-side e2e tests and the README demo recorder
@@ -183,6 +184,7 @@ cargo test -p agent-screen-mcp --test queue_adapter # actual app coordinator, co
 cargo test -p agent-screen-mcp --test input_queue_protocol # queue/drag MCP statuses and no fallback after input_pending; mock socket only
 cargo test -p agent-screen-mcp --test pipe # the pipe's hello carries the client's session to an MCP host, and the pipe ends with its parent; no app
 cargo test -p agent-screen-mcp --test clients # the pipe driven as Claude Code, Codex, Gemini CLI and bare clients: each gets its own session by the rules in docs/clients.md, and each MCP version from 2024-11-05 to 2026-07-28 its own wire shape; no app
+cargo test -p agent-screen-mcp --lib install # the client registry: every client's config in a temporary home, JSONC, YAML and TOML edits, skills, the mcp status | install | uninstall output; never your own configs
 cargo test -p agent-screen --bin AgentScreen control::server # the app's socket side with macOS faked: a pipe gets a host whose connections close with it, adoption skips a reused pid, the orphan sweep ends only an MCP peer launchd adopted that is still the same process, and another user is refused; no app
 cargo test -p agent-screen-model input_queue # lifecycle, FIFO, withdrawal, approval generations and expiry
 cargo test -p agent-screen-model substitute # slider direction inference and numeric guards
@@ -191,6 +193,8 @@ cargo test -p agent-screen-model numbers # full versus partial reads preserve st
 cargo test -p agent-screen-model watch # wait_for_change: conditions, counting appearances by content, timeout default and cap, poll gap
 cargo test -p agent-screen-model screen_edge # the Input Grant edge's outline: smoothed corners, notch, panels with measured shapes, and the outline against points of Apple's bezel art (crates/model/testdata)
 ```
+
+`mcp install` and Settings' Connect write the real clients' configs in your home folder. To try a change by hand, run the CLI with a temporary home, which keeps every config path inside it: `env -i HOME=$(mktemp -d) PATH=/usr/bin:/bin target/debug/AgentScreen mcp install --client cursor,goose`. No e2e script runs either.
 
 End-to-end scripts drive the real app. Each is one file in `tests/e2e/src/bin`, run with `cargo e2e NAME`. `tests/e2e/src/manifest.rs` lists them all: the areas each covers, its tier, how it drives the app, whether you must keep your hands off the Mac while it runs, and the most displays it makes. A unit test fails when a script has no entry there, or when its line below sits under another area than its first.
 
@@ -674,7 +678,7 @@ The control socket accepts these methods in debug builds. `AGENTSCREEN_DEBUG=1` 
 | `grant-screen`, `grant-ax` | Press the setup window's Turn On for Screen Recording or Accessibility: ask macOS, which lists Agent Screen, then open the pane and its helper. |
 | `assist-preview`, `assist-preview-unlisted`, `assist-preview-still-off`, `assist-hide` | Show the helper preview, preview an app absent from the permission list or one whose switch is on while macOS still says no, or hide the helper. |
 | `pretend-screen-off`, `pretend-ax-off`, `pretend-clear` | Make the UI act as if Screen Recording or Accessibility were off, without changing the grant, or stop pretending. |
-| `connect`, `wallpaper`, `quit` | Run Connect Claude Code and Codex, open Settings' wallpaper picker, or quit. |
+| `connect`, `wallpaper`, `quit` | Run Settings' Connect, which registers the MCP server with every agent client found in the real home folder, open Settings' wallpaper picker, or quit. |
 | `stage` | Select the test display that stands in for the user's screen. `displayId` 0 clears the selection. |
 | `userStage` | Supply the selected stage's user-display role to window ownership rules. Only debug-assertion builds compile this surface. |
 
