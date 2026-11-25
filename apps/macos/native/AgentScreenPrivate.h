@@ -75,5 +75,17 @@ bool SSAXWindowID(AXUIElementRef element, CGWindowID *outWindowID);
 
 /// SLSCopySpacesForWindows: how many Spaces hold a window, -1 if unknown.
 int SSWindowSpaceCount(CGWindowID windowID);
+/// As SSWindowSpaceCount, with how many of those Spaces no display shows
+/// into `unshown`, -1 if unknown.
+int SSWindowSpaces(CGWindowID windowID, int *unshown);
+
+/// SLSGetSpaceManagementMode: 1 with separate Spaces per display, 0 with
+/// one Space across all, -1 if unknown.
+int SSSpaceManagementMode(void);
+/// SLSCopyManagedDisplaySpaces: each entry's display identifier, one per
+/// line, into `out`; the number of entries, -1 if unknown.
+int SSManagedDisplayIdentifiers(char *out, int size);
+/// com.apple.spaces spans-displays: 1, 0, or -1 when unset.
+int SSSpansDisplaysSetting(void);
 
 NS_ASSUME_NONNULL_END

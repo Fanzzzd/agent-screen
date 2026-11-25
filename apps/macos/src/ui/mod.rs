@@ -10,6 +10,7 @@ pub mod reply_field;
 pub mod report_card;
 pub mod setup;
 pub mod shell;
+pub mod spaces_card;
 pub mod status;
 pub mod stream;
 pub mod theme;
