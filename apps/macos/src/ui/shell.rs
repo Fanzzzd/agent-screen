@@ -4629,85 +4629,102 @@ impl Shell {
         self.quit(cx);
     }
 
-    /// Register the MCP server with Claude Code and Codex, and say how it went.
+    /// Register the MCP server with every agent client on this Mac, and
+    /// say how it went.
     pub fn connect_agents(&mut self, cx: &mut Context<Self>) {
-        // Finding the user's PATH and running the CLI takes seconds; a second
-        // press would race the first.
+        // Editing the clients' configs takes a moment; a second press would
+        // race the first.
         if self.connecting {
             return;
         }
         self.connecting = true;
         self.push_setup(cx);
         let install = cx.background_spawn(async {
+            use agent_screen_mcp::install::{Env, Options, install};
             let exe = std::env::current_exe().unwrap_or_default();
-            agent_screen_mcp::install::install(&exe)
+            install(&exe, &Env::current(), &Options::default())
         });
         cx.spawn(async move |shell, cx| {
             use agent_screen_mcp::install::{Done, Skill};
-            let outcomes = install.await;
-            let skill_lines = outcomes.iter().filter_map(|o| {
-                Some(match o.skill.as_ref()? {
-                    Ok(Skill::Written(path)) => tf!(
-                        "{}: skill written to {}",
-                        "{}：技能已写入 {}",
-                        o.client,
+            let report = install.await;
+            let skill_line = |who: &str, skill: &Result<Skill, String>| match skill {
+                Ok(Skill::Written(path)) => tf!(
+                    "{}: skill written to {}",
+                    "{}：技能已写入 {}",
+                    who,
+                    path.display()
+                ),
+                Ok(Skill::Current(_)) => tf!("{}: skill up to date", "{}：技能已是最新", who),
+                Ok(Skill::Linked(path)) => tf!(
+                    "{}: skill in {} is another installer's, left alone",
+                    "{}：{} 中的技能由其他安装工具管理，未改动",
+                    who,
+                    path.display()
+                ),
+                Ok(Skill::Shared(path)) => tf!(
+                    "{}: reads the shared skill in {}",
+                    "{}：读取 {} 中的共享技能",
+                    who,
+                    path.display()
+                ),
+                Ok(Skill::Plugin) => tf!(
+                    "{}: skill comes from the agent-screen plugin",
+                    "{}：技能由 agent-screen 插件提供",
+                    who
+                ),
+                Err(error) => tf!("{}: skill failed. {}", "{}：技能写入失败。{}", who, error),
+            };
+            let mut lines: Vec<String> = Vec::new();
+            for o in &report.outcomes {
+                let client = o.client.name;
+                lines.push(match &o.result {
+                    Ok(Done::Already) => tf!("{}: already connected", "{}：已接入", client),
+                    Ok(Done::AddedTo(path)) if o.client.restart => tf!(
+                        "{}: added to {}. Quit it and open it again",
+                        "{}：已写入 {}。请退出后重新打开",
+                        client,
                         path.display()
                     ),
-                    Ok(Skill::Current(_)) => {
-                        tf!("{}: skill up to date", "{}：技能已是最新", o.client)
-                    }
-                    Ok(Skill::Linked(path)) => tf!(
-                        "{}: skill in {} is another installer's, left alone",
-                        "{}：{} 中的技能由其他安装工具管理，未改动",
-                        o.client,
-                        path.display()
-                    ),
-                    Ok(Skill::Plugin) => tf!(
-                        "{}: skill comes from the agent-screen plugin",
-                        "{}：技能由 agent-screen 插件提供",
-                        o.client
-                    ),
-                    Err(error) => tf!("{}: skill failed. {}", "{}：技能写入失败。{}", o.client, error),
-                })
-            });
-            let lines: Vec<String> = outcomes
-                .iter()
-                .map(|o| match &o.result {
-                    None => tf!("{}: not installed", "{}：未安装", o.client),
-                    Some(Ok(Done::Already)) => {
-                        tf!("{}: already connected", "{}：已接入", o.client)
-                    }
-                    Some(Ok(Done::Connected)) => tf!(
-                        "{}: connected for all projects",
-                        "{}：已接入，所有项目都能用",
-                        o.client
-                    ),
-                    Some(Ok(Done::AddedTo(path))) => tf!(
+                    Ok(Done::AddedTo(path)) => tf!(
                         "{}: added to {}",
                         "{}：已写入 {}",
-                        o.client,
+                        client,
                         path.display()
                     ),
-                    Some(Err(error)) => {
-                        tf!("{}: failed. {}", "{}：失败。{}", o.client, error)
-                    }
-                })
-                .chain(skill_lines)
-                .collect();
+                    Ok(Done::Repointed { config, .. }) => tf!(
+                        "{}: now runs this copy, in {}",
+                        "{}：已改为运行此副本，见 {}",
+                        client,
+                        config.display()
+                    ),
+                    Ok(Done::Updated(path)) => tf!(
+                        "{}: updated in {}",
+                        "{}：已更新 {}",
+                        client,
+                        path.display()
+                    ),
+                    Err(error) => tf!("{}: failed. {}", "{}：失败。{}", client, error),
+                });
+                if let Some(skill) = &o.skill {
+                    lines.push(skill_line(client, skill));
+                }
+            }
+            if let Some(skill) = &report.shared_skill {
+                lines.push(skill_line(t("Shared", "共享"), skill));
+            }
             let exe = std::env::current_exe().unwrap_or_default();
-            let failed = outcomes.iter().any(|o| matches!(o.result, Some(Err(_))));
-            let none = outcomes.iter().all(|o| o.result.is_none());
+            let failed = report.outcomes.iter().any(|o| o.result.is_err());
+            let none = report.outcomes.is_empty();
             let next = if none {
                 tf!(
-                    "For another MCP client, add a stdio server with command\n{}\nand arguments [\"mcp\"]. If Claude Code is installed, run in Terminal:\n\"{}\" mcp install",
-                    "其他 MCP 客户端：添加一个 stdio 服务器，命令为\n{}\n参数为 [\"mcp\"]。若已安装 Claude Code，请在终端中运行：\n\"{}\" mcp install",
-                    exe.display(),
+                    "No agent client found on this Mac. For another MCP client, add a stdio server with command\n{}\nand arguments [\"mcp\"].",
+                    "未在这台 Mac 上找到 agent 客户端。其他 MCP 客户端：添加一个 stdio 服务器，命令为\n{}\n参数为 [\"mcp\"]。",
                     exe.display()
                 )
             } else if failed {
                 tf!(
-                    "To try in Terminal, where your agents' PATH is set:\n\"{}\" mcp install",
-                    "可在终端中重试，终端里有 agent 所需的 PATH：\n\"{}\" mcp install",
+                    "To see each client's state in Terminal:\n\"{}\" mcp status",
+                    "可在终端中查看各客户端的状态：\n\"{}\" mcp status",
                     exe.display()
                 )
             } else {
@@ -4727,8 +4744,8 @@ impl Shell {
             });
             let title = t("Agent Screen and your agents", "Agent Screen 与 agent");
             let text = format!("{}\n\n{next}", lines.join("\n"));
-            // Without Claude Code or Codex the user sets up another client
-            // by hand: give them the command to paste.
+            // With no client found the user sets up another one by hand:
+            // give them the entry to paste.
             if none {
                 if native::confirm(title, &text, t("Copy Config", "复制配置")) {
                     native::copy(&super::setup::mcp_config());

@@ -736,7 +736,7 @@ impl Setup {
     }
 
     /// Connecting agents, the step after the permissions: Connect sets up
-    /// Claude Code and Codex, and any other MCP client takes the command.
+    /// the clients the registry finds, and any other takes the command.
     fn agent_row(&self, theme: &Theme, this: WeakEntity<Setup>) -> impl IntoElement {
         let shell = self.shell.clone();
         let loaded = self.agent.is_some();
@@ -767,8 +767,8 @@ impl Setup {
                 "{client} 上次于 {day}加载工具"
             ),
             (None, None, []) => t(
-                "Connect sets up Claude Code and Codex",
-                "“接入”会配置 Claude Code 和 Codex",
+                "Connect sets up the agent clients on this Mac",
+                "“接入”会配置这台 Mac 上的 agent 客户端",
             )
             .to_string(),
             (None, None, clients) => tf!(
