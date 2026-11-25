@@ -17,7 +17,7 @@ use std::time::Duration;
 
 /// Test hooks: in debug builds, or with `AGENTSCREEN_DEBUG=1` for measuring a
 /// release build.
-pub(super) fn enabled() -> bool {
+pub(crate) fn enabled() -> bool {
     cfg!(debug_assertions) || std::env::var_os("AGENTSCREEN_DEBUG").is_some_and(|v| v == "1")
 }
 

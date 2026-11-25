@@ -165,6 +165,59 @@ pub fn reset_commands(
     })
 }
 
+/// The programs a reset uses. Stand-ins (`tccutil`, `open`, from
+/// AGENTSCREEN_TCCUTIL and AGENTSCREEN_OPEN) count only in a build with
+/// test hooks; a release build always runs macOS's own. A named instance
+/// with test hooks, a test's, must name a tccutil stand-in, so a test
+/// never reaches the real privacy database.
+pub fn tools_for(
+    instance: bool,
+    hooks: bool,
+    tccutil: Option<PathBuf>,
+    open: Option<PathBuf>,
+) -> Result<Tools, String> {
+    let mut tools = Tools::default();
+    if !hooks || !instance {
+        return Ok(tools);
+    }
+    tools.tccutil = tccutil.ok_or("a named instance resets nothing without AGENTSCREEN_TCCUTIL")?;
+    if let Some(open) = open {
+        tools.open = open;
+    }
+    Ok(tools)
+}
+
+/// What the running app does with `resetPermissions` from its control
+/// socket. Any local process can reach the socket, so the app acts only
+/// on a request that says the user confirmed in Terminal, and even then
+/// asks again in its own Settings, except in a build with test hooks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SocketReset {
+    /// Show Settings' own confirmation; nothing runs until the user
+    /// presses Reset & Reopen there.
+    Ask,
+    /// Run the helper and quit: test builds only.
+    Run,
+    Refuse,
+}
+
+pub fn socket_reset(confirmed_in_terminal: bool, debug_methods: bool) -> SocketReset {
+    match (confirmed_in_terminal, debug_methods) {
+        (false, _) => SocketReset::Refuse,
+        (true, true) => SocketReset::Run,
+        (true, false) => SocketReset::Ask,
+    }
+}
+
+/// Whether `AgentScreen permissions reset` may run the helper itself,
+/// with no app to hand it to: only when the app's socket is gone (no
+/// file, or nothing listening) and no process of the bundle but this one
+/// runs. Otherwise the helper would wait for the wrong process and reset
+/// under a live app.
+pub fn may_run_without_app(socket_gone: bool, running: &[u32], own: u32) -> bool {
+    socket_gone && running.iter().all(|pid| *pid == own)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,5 +396,40 @@ mod tests {
         .unwrap();
         assert_eq!(script.steps[0][0], "/tmp/fake-tccutil");
         assert_eq!(script.steps[3][0], "/tmp/fake-open");
+    }
+
+    #[test]
+    fn the_socket_resets_only_after_a_confirmation_and_asks_again() {
+        assert_eq!(socket_reset(false, false), SocketReset::Refuse);
+        assert_eq!(socket_reset(false, true), SocketReset::Refuse);
+        assert_eq!(socket_reset(true, false), SocketReset::Ask);
+        assert_eq!(socket_reset(true, true), SocketReset::Run);
+    }
+
+    #[test]
+    fn the_cli_runs_the_helper_only_with_no_app_alive() {
+        assert!(may_run_without_app(true, &[], 50));
+        assert!(may_run_without_app(true, &[50], 50));
+        // The app runs but its socket doesn't answer.
+        assert!(!may_run_without_app(true, &[40], 50));
+        assert!(!may_run_without_app(true, &[40, 50], 50));
+        // The socket is there but refused for another reason.
+        assert!(!may_run_without_app(false, &[], 50));
+    }
+
+    #[test]
+    fn a_release_build_never_runs_stand_ins() {
+        let fake = || Some(PathBuf::from("/tmp/fake"));
+        assert_eq!(tools_for(true, false, fake(), fake()), Ok(Tools::default()));
+        assert_eq!(
+            tools_for(false, false, fake(), fake()),
+            Ok(Tools::default())
+        );
+        assert_eq!(tools_for(false, true, fake(), fake()), Ok(Tools::default()));
+        // A test instance must name its tccutil stand-in.
+        assert!(tools_for(true, true, None, fake()).is_err());
+        let tools = tools_for(true, true, fake(), None).unwrap();
+        assert_eq!(tools.tccutil, PathBuf::from("/tmp/fake"));
+        assert_eq!(tools.open, PathBuf::from(OPEN));
     }
 }

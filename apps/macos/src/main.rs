@@ -349,24 +349,53 @@ fn permissions_cli(args: &[String]) -> i32 {
             return 1;
         }
     }
-    #[cfg(unix)]
-    if let Ok(mut socket) =
-        std::os::unix::net::UnixStream::connect(agent_screen_mcp::endpoint::socket_path())
-    {
-        let request = serde_json::json!({ "id": 1, "method": "resetPermissions", "params": {} });
-        let mut line = String::new();
-        let replied = writeln!(socket, "{request}")
-            .and_then(|()| std::io::BufReader::new(&socket).read_line(&mut line));
-        let reply: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
-        if replied.is_err() || reply.get("error").is_some_and(|e| !e.is_null()) {
-            eprintln!(
-                "Agent Screen permissions: the running app refused: {}",
-                reply["error"]["message"].as_str().unwrap_or("no reply")
-            );
-            return 1;
-        }
-        println!("Agent Screen quits, resets its permissions and opens Settings.");
-        return 0;
+    // The user confirmed above; the running app asks again in its own
+    // Settings, so another process on the socket can't reset alone.
+    let socket_gone =
+        match std::os::unix::net::UnixStream::connect(agent_screen_mcp::endpoint::socket_path()) {
+            Ok(mut socket) => {
+                let request = serde_json::json!({
+                    "id": 1,
+                    "method": "resetPermissions",
+                    "params": { "confirmed": true },
+                });
+                let mut line = String::new();
+                let replied = writeln!(socket, "{request}")
+                    .and_then(|()| std::io::BufReader::new(&socket).read_line(&mut line));
+                let reply: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
+                if replied.is_err() || reply.get("error").is_some_and(|e| !e.is_null()) {
+                    eprintln!(
+                        "Agent Screen permissions: the running app refused: {}",
+                        reply["error"]["message"].as_str().unwrap_or("no reply")
+                    );
+                    return 1;
+                }
+                if reply["result"]["status"] == "confirm" {
+                    println!(
+                        "Agent Screen's Settings asks too: press Reset & Reopen there to reset."
+                    );
+                } else {
+                    println!("Agent Screen quits, resets its permissions and opens Settings.");
+                }
+                return 0;
+            }
+            Err(e) => matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            ),
+        };
+    // No app answers: this process runs the helper, which waits for it,
+    // only when no copy of the app is alive, or it would reset under it.
+    let running = mac::permissions::running_pids(&mac::permissions::bundle_id());
+    if !agent_screen_model::tcc_reset::may_run_without_app(
+        socket_gone,
+        &running,
+        std::process::id(),
+    ) {
+        eprintln!(
+            "Agent Screen permissions: Agent Screen is running but doesn't answer (pid {running:?}). Quit it, open Agent Screen first, then try again."
+        );
+        return 1;
     }
     match mac::permissions::reset_and_relaunch() {
         Ok(()) => {

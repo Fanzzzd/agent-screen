@@ -72,14 +72,26 @@ pub fn classify(bundle: &Path, home: &Path, instance: bool) -> Location {
 pub const BUNDLE_NAME: &str = "Agent Screen.app";
 
 /// The paths a move into `dir` uses: the copy goes to `staging` first and
-/// is renamed to `dest` only once complete, so a failed copy never leaves a
-/// half app where Finder and macOS look; an existing `dest` steps aside to
-/// `aside` until the new one is in place.
+/// takes `dest`'s place only once complete and verified, so a failed copy
+/// never leaves a half app where Finder and macOS look. An existing
+/// `dest` is swapped with it in one step, and ends up at `staging`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MovePlan {
     pub dest: PathBuf,
     pub staging: PathBuf,
-    pub aside: PathBuf,
+}
+
+/// Whether a staged copy may take `dest`'s place: one whose signature
+/// verifies always may; one that doesn't never replaces an Agent Screen
+/// already there.
+pub fn may_promote(staged_verifies: bool, existing: bool) -> Result<(), &'static str> {
+    if staged_verifies || !existing {
+        Ok(())
+    } else {
+        Err(
+            "the copy's code signature doesn't verify, so the Agent Screen in Applications was left as it is",
+        )
+    }
 }
 
 /// The paths for moving a bundle into `dir`. `tag` keeps two attempts'
@@ -88,7 +100,6 @@ pub fn move_plan(dir: &Path, tag: u32) -> MovePlan {
     MovePlan {
         dest: dir.join(BUNDLE_NAME),
         staging: dir.join(format!(".Agent Screen.app.moving-{tag}")),
-        aside: dir.join(format!(".Agent Screen.app.replaced-{tag}")),
     }
 }
 
@@ -198,13 +209,24 @@ mod tests {
     fn a_move_stages_beside_its_destination() {
         let plan = move_plan(Path::new("/Applications"), 42);
         assert_eq!(plan.dest, Path::new("/Applications/Agent Screen.app"));
+        // Beside it, so the swap stays on one volume, and hidden, so
+        // Finder and Launchpad don't show a half copy.
         assert_eq!(plan.staging.parent(), Some(Path::new("/Applications")));
-        assert_eq!(plan.aside.parent(), Some(Path::new("/Applications")));
-        assert_ne!(plan.staging, plan.aside);
-        // Hidden, so Finder and Launchpad don't show a half copy.
-        for p in [&plan.staging, &plan.aside] {
-            assert!(p.file_name().unwrap().to_string_lossy().starts_with('.'));
-        }
+        assert!(
+            plan.staging
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with('.')
+        );
+    }
+
+    #[test]
+    fn a_copy_that_doesnt_verify_never_replaces_an_install() {
+        assert_eq!(may_promote(true, true), Ok(()));
+        assert_eq!(may_promote(true, false), Ok(()));
+        assert_eq!(may_promote(false, false), Ok(()));
+        assert!(may_promote(false, true).is_err());
     }
 
     #[test]

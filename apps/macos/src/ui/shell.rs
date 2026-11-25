@@ -104,16 +104,38 @@ pub fn shown_client(name: &str) -> String {
 /// `Shell::agents_busy` for a Connect of every detected client.
 const ALL_CLIENTS: &str = "all";
 
-/// Where the Agents section reads and writes clients' configs: this
-/// user's, or, in a named instance, the home AGENTSCREEN_AGENTS_HOME
-/// names, so a test never touches the user's configs.
+/// Where the Agents section reads and writes clients' configs: the home
+/// AGENTSCREEN_AGENTS_HOME names in a build with test hooks, so a test
+/// never touches the user's configs; otherwise this user's.
 fn agents_env() -> agent_screen_mcp::install::Env {
     use agent_screen_mcp::install::Env;
-    let var = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty());
-    match (var("AGENTSCREEN_INSTANCE"), var("AGENTSCREEN_AGENTS_HOME")) {
-        (Some(_), Some(home)) => Env::for_home(std::path::PathBuf::from(home)),
-        _ => Env::current(),
+    match agents_test_home() {
+        Some(home) => Env::for_home(home),
+        None => Env::current(),
     }
+}
+
+fn agents_test_home() -> Option<std::path::PathBuf> {
+    agents_home_for(
+        crate::control::debug_methods(),
+        std::env::var_os("AGENTSCREEN_AGENTS_HOME"),
+    )
+}
+
+/// The registry clients whose sessions loaded the tools from this app
+/// process: "Live now". A time saved by an earlier run says nothing about
+/// a connection now.
+fn live_clients(agent_ready: &[String]) -> Vec<&'static str> {
+    agent_ready
+        .iter()
+        .filter_map(|name| agent_screen_mcp::install::client_for_info(name).map(|c| c.id))
+        .collect()
+}
+
+/// The test home: only with test hooks, and only a named, absolute one.
+fn agents_home_for(hooks: bool, home: Option<std::ffi::OsString>) -> Option<std::path::PathBuf> {
+    let home = std::path::PathBuf::from(home.filter(|h| !h.is_empty())?);
+    (hooks && home.is_absolute()).then_some(home)
 }
 
 pub fn current() -> Option<WeakEntity<Shell>> {
@@ -2935,6 +2957,13 @@ impl Shell {
         // A client row's button, as a click presses it:
         // `setup-agents-connect:<id>` or `setup-agents-disconnect:<id>`.
         // The e2e instance writes the configs under AGENTSCREEN_AGENTS_HOME.
+        if (surface == "connect"
+            || surface.starts_with("setup-agents-connect")
+            || surface.starts_with("setup-agents-disconnect"))
+            && agents_test_home().is_none()
+        {
+            return Err("Connect and Disconnect hooks write only under AGENTSCREEN_AGENTS_HOME: set it to a temporary home".into());
+        }
         if let Some((action, id)) = surface.split_once(':')
             && action.starts_with("setup-agents-")
         {
@@ -4843,6 +4872,13 @@ impl Shell {
         self.push_setup(cx);
     }
 
+    /// `AgentScreen permissions reset` from Terminal: Settings in front,
+    /// asking, as its own Reset Permissions… does.
+    pub fn ask_reset_in_settings(&mut self, cx: &mut Context<Self>) {
+        self.open_setup(cx);
+        self.ask_reset(cx);
+    }
+
     pub fn cancel_reset(&mut self, cx: &mut Context<Self>) {
         self.reset = setup::ResetStep::Idle;
         self.push_setup(cx);
@@ -4988,22 +5024,9 @@ impl Shell {
 
     /// The Agents section's rows, as the probe last read them, live or
     /// configured by whether one of the client's sessions loaded the tools
-    /// in this run or the last day.
+    /// from this app process.
     fn agent_rows(&self) -> Option<Vec<setup::AgentRow>> {
-        use agent_screen_mcp::install::client_for_info;
-        let recent = self.tools_last.as_ref().filter(|(_, at)| {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs_f64())
-                .unwrap_or_default();
-            now - at < 24.0 * 3600.0
-        });
-        let live: Vec<&'static str> = self
-            .agent_ready
-            .iter()
-            .chain(recent.map(|(client, _)| client))
-            .filter_map(|name| client_for_info(name).map(|c| c.id))
-            .collect();
+        let live = live_clients(&self.agent_ready);
         let rows = self
             .agents
             .as_ref()?
@@ -6698,3 +6721,32 @@ Agent Screen 0.1.41 (e3ac2970127c)
 ### MCP client and agent
 
 codex-mcp-client 0.50.0";
+
+#[cfg(test)]
+mod onboarding_tests {
+    use super::*;
+
+    #[test]
+    fn live_comes_only_from_this_runs_sessions() {
+        assert!(live_clients(&[]).is_empty());
+        assert_eq!(
+            live_clients(&["Claude Code".into(), "Agent".into(), "cursor-vscode".into()]),
+            vec!["claude-code", "cursor"]
+        );
+    }
+
+    #[test]
+    fn client_hooks_write_only_under_a_test_home() {
+        let home = || Some(std::ffi::OsString::from("/tmp/agents-home"));
+        assert_eq!(
+            agents_home_for(true, home()),
+            Some(std::path::PathBuf::from("/tmp/agents-home"))
+        );
+        // No hooks, no variable, empty or relative: the user's home, and
+        // the hooks refuse.
+        assert_eq!(agents_home_for(false, home()), None);
+        assert_eq!(agents_home_for(true, None), None);
+        assert_eq!(agents_home_for(true, Some("".into())), None);
+        assert_eq!(agents_home_for(true, Some("rel/home".into())), None);
+    }
+}

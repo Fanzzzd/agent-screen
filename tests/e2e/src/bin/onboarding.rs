@@ -205,10 +205,10 @@ fn stand_ins(dir: &Path) -> Result<(PathBuf, PathBuf)> {
     for name in ["tccutil", "open"] {
         let script = dir.join(format!("fake-{name}"));
         let log = dir.join(format!("{name}.log"));
-        std::fs::write(
-            &script,
-            format!("#!/bin/sh\necho \"$*\" >> '{}'\n", log.display()),
-        )?;
+        // Single-quoted for sh: a quote in the checkout's path closes the
+        // quote, adds an escaped one and reopens it.
+        let quoted = log.display().to_string().replace('\'', "'\\''");
+        std::fs::write(&script, format!("#!/bin/sh\necho \"$*\" >> '{quoted}'\n"))?;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))?;
         made.push(script);
     }

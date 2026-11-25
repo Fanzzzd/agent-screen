@@ -3,7 +3,7 @@
 //! copy at Settings. Where the bundle is counts as temporary by
 //! `agent_screen_model::location`.
 
-use agent_screen_model::location::{self, Location, move_plan, same_place};
+use agent_screen_model::location::{self, Location, may_promote, move_plan, same_place};
 use objc2_foundation::NSBundle;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -77,25 +77,26 @@ pub fn move_to(source: &Path, dir: &Path, replace: bool) -> Result<PathBuf, Move
             ],
         );
     }
-    // A signed source makes a copy whose signature still holds.
-    if signed(source) && !signed(&plan.staging) {
-        let _ = std::fs::remove_dir_all(&plan.staging);
-        return Err(fail("the copy's code signature didn't verify".into()));
-    }
+    // Checked on every copy: a damaged download never replaces a working
+    // install.
     let had = plan.dest.exists();
-    if had && let Err(e) = std::fs::rename(&plan.dest, &plan.aside) {
+    if let Err(why) = may_promote(signed(&plan.staging), had) {
         let _ = std::fs::remove_dir_all(&plan.staging);
-        return Err(fail(format!("{}: {e}", plan.dest.display())));
-    }
-    if let Err(e) = std::fs::rename(&plan.staging, &plan.dest) {
-        if had {
-            let _ = std::fs::rename(&plan.aside, &plan.dest);
-        }
-        let _ = std::fs::remove_dir_all(&plan.staging);
-        return Err(fail(format!("{}: {e}", plan.dest.display())));
+        return Err(fail(why.into()));
     }
     if had {
-        let _ = std::fs::remove_dir_all(&plan.aside);
+        // One step: the new copy takes the old one's place, and the old one
+        // lands at the staging name. A failure leaves the install as it was.
+        swap(&plan.staging, &plan.dest).map_err(|e| {
+            let _ = std::fs::remove_dir_all(&plan.staging);
+            fail(format!("{}: {e}", plan.dest.display()))
+        })?;
+        if let Err(e) = std::fs::remove_dir_all(&plan.staging) {
+            log::warn!("the replaced copy stays at {}: {e}", plan.staging.display());
+        }
+    } else if let Err(e) = std::fs::rename(&plan.staging, &plan.dest) {
+        let _ = std::fs::remove_dir_all(&plan.staging);
+        return Err(fail(format!("{}: {e}", plan.dest.display())));
     }
     log::info!(
         "copied {} to {} (quarantine cleared: {quarantined}, replaced: {had})",
@@ -128,4 +129,17 @@ fn run(program: &str, args: &[&std::ffi::OsStr]) -> Result<(), String> {
     } else {
         error.to_string()
     })
+}
+
+/// Swap two paths on one volume in one step (renamex_np, RENAME_SWAP).
+fn swap(a: &Path, b: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let a = std::ffi::CString::new(a.as_os_str().as_bytes())?;
+    let b = std::ffi::CString::new(b.as_os_str().as_bytes())?;
+    // SAFETY: both are NUL-terminated paths that live through the call.
+    if unsafe { libc::renamex_np(a.as_ptr(), b.as_ptr(), libc::RENAME_SWAP) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
 }

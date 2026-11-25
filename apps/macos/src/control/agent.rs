@@ -938,23 +938,43 @@ async fn handle_one(
                 Filed::TooMany => json!({ "status": "too_many" }),
             })
         }
-        // `AgentScreen permissions reset`, confirmed in Terminal: the same
-        // helper as Settings' Reset & Reopen, then quit. Refused, as for
-        // a copy without Agent Screen's bundle id, nothing happens.
+        // `AgentScreen permissions reset`, confirmed in Terminal. Any local
+        // process can reach this socket, so the app asks again in Settings
+        // (Reset & Reopen runs it) unless test hooks are on; a request
+        // without the Terminal's confirmation is refused. Checked first,
+        // as Settings' own reset is: a copy without Agent Screen's bundle
+        // id never gets this far.
         "resetPermissions" => {
+            use agent_screen_model::tcc_reset::{SocketReset, socket_reset};
+            let confirmed = p.0.get("confirmed").and_then(Value::as_bool) == Some(true);
             let script = crate::mac::permissions::reset_script().map_err(ControlError::failed)?;
-            let steps = script.steps.clone();
-            cx.spawn(async move |cx| {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(100))
-                    .await;
-                match crate::mac::permissions::spawn_reset(&script) {
-                    Ok(()) => cx.update(|cx| cx.quit()),
-                    Err(error) => log::warn!("reset permissions: {error}"),
+            match socket_reset(confirmed, super::debug_methods()) {
+                SocketReset::Refuse => {
+                    return Err(ControlError::invalid(
+                        "resetPermissions needs the user's confirmation",
+                    ));
                 }
-            })
-            .detach();
-            Ok(json!({ "pid": std::process::id(), "steps": steps }))
+                SocketReset::Ask => {
+                    if let Some(shell) = crate::ui::shell::current() {
+                        let _ = shell.update(cx, |shell, cx| shell.ask_reset_in_settings(cx));
+                    }
+                    Ok(json!({ "status": "confirm" }))
+                }
+                SocketReset::Run => {
+                    let steps = script.steps.clone();
+                    cx.spawn(async move |cx| {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(100))
+                            .await;
+                        match crate::mac::permissions::spawn_reset(&script) {
+                            Ok(()) => cx.update(|cx| cx.quit()),
+                            Err(error) => log::warn!("reset permissions: {error}"),
+                        }
+                    })
+                    .detach();
+                    Ok(json!({ "status": "resetting", "pid": std::process::id(), "steps": steps }))
+                }
+            }
         }
         // The MCP server of an agent session listed the tools.
         "agentReady" => {
@@ -2516,6 +2536,8 @@ fn needs_permissions(method: &str) -> bool {
             | "fileReport"
             | "inputQueue"
             | "cancelWaitForChange"
+            // The way out of a permission macOS won't turn on.
+            | "resetPermissions"
     ) && !method.starts_with("debug")
 }
 
@@ -9716,5 +9738,14 @@ mod handle_one_arm_tests {
             safety_timer_step(true, count_holds(id)),
             SafetyTimerStep::StopCounting
         );
+    }
+}
+
+#[cfg(test)]
+mod permission_tests {
+    #[test]
+    fn reset_permissions_works_without_the_permissions_it_resets() {
+        assert!(!super::needs_permissions("resetPermissions"));
+        assert!(super::needs_permissions("createDisplay"));
     }
 }

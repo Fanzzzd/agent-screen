@@ -222,23 +222,52 @@ pub fn bundle_id() -> String {
         .unwrap_or_default()
 }
 
-/// The programs Reset Permissions runs. A named instance (a test's)
-/// must swap tccutil for a stand-in with AGENTSCREEN_TCCUTIL, and may
-/// swap open with AGENTSCREEN_OPEN: a test proves the commands without
-/// touching the Mac's privacy database or opening an app.
+/// The programs Reset Permissions runs: macOS's own, or in a build with
+/// test hooks and a named instance the stand-ins AGENTSCREEN_TCCUTIL
+/// (required) and AGENTSCREEN_OPEN name (`tcc_reset::tools_for`).
 pub fn reset_tools() -> Result<Tools, String> {
     let var = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty());
-    let mut tools = Tools::default();
-    if var("AGENTSCREEN_INSTANCE").is_none() {
-        return Ok(tools);
+    agent_screen_model::tcc_reset::tools_for(
+        var("AGENTSCREEN_INSTANCE").is_some(),
+        crate::control::debug_methods(),
+        var("AGENTSCREEN_TCCUTIL").map(Into::into),
+        var("AGENTSCREEN_OPEN").map(Into::into),
+    )
+}
+
+/// The processes of this bundle that run as an app, other than the `mcp`
+/// pipes: what LaunchServices lists for `bundle_id`, and processes of the
+/// bundle's executable with no arguments or `--setup`.
+pub fn running_pids(bundle_id: &str) -> Vec<u32> {
+    use objc2_app_kit::NSRunningApplication;
+    let mut pids: Vec<u32> = if bundle_id.is_empty() {
+        Vec::new()
+    } else {
+        NSRunningApplication::runningApplicationsWithBundleIdentifier(
+            &objc2_foundation::NSString::from_str(bundle_id),
+        )
+        .iter()
+        .map(|app| app.processIdentifier() as u32)
+        .collect()
+    };
+    if let Ok(exe) = std::env::current_exe() {
+        let exe = exe.to_string_lossy();
+        for pattern in [format!("^{exe}$"), format!("^{exe} --setup$")] {
+            let out = std::process::Command::new("/usr/bin/pgrep")
+                .args(["-f", &pattern])
+                .output();
+            if let Ok(out) = out {
+                pids.extend(
+                    String::from_utf8_lossy(&out.stdout)
+                        .lines()
+                        .filter_map(|l| l.trim().parse::<u32>().ok()),
+                );
+            }
+        }
     }
-    tools.tccutil = var("AGENTSCREEN_TCCUTIL")
-        .ok_or("a named instance resets nothing without AGENTSCREEN_TCCUTIL")?
-        .into();
-    if let Some(open) = var("AGENTSCREEN_OPEN") {
-        tools.open = open.into();
-    }
-    Ok(tools)
+    pids.sort_unstable();
+    pids.dedup();
+    pids
 }
 
 /// The helper for this process: resets this bundle's Screen Recording,
