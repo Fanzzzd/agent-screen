@@ -1,9 +1,13 @@
 //! Settings on a first install. Move to Applications: the banner's steps,
 //! and the copy itself into a temporary folder, signature kept and
 //! quarantine cleared on the copy only, an existing copy replaced only
-//! when asked. Captures each state under target/e2e. Settings shows on
-//! the user's screen for a few seconds. Nothing is copied into
-//! Applications and no app is opened.
+//! when asked. Reset Permissions: the quiet link, the stuck row's button
+//! and the confirmation, and the helper's exact commands through stand-in
+//! tccutil and open scripts that log their arguments, from the hook and
+//! from `AgentScreen permissions reset`. Captures each state under
+//! target/e2e. Settings shows on the user's screen for a few seconds.
+//! Nothing is copied into Applications, the real tccutil never runs and
+//! no app is opened.
 //!
 //!     AGENTSCREEN_INSTANCE=e2e E2E_NOW=1 cargo e2e onboarding
 
@@ -27,7 +31,11 @@ fn main() -> ExitCode {
         std::fs::create_dir_all(&dir)?;
         // A test app started earlier has another environment.
         stop_test_app();
-        start_test_app(&[])?;
+        let (tccutil, open) = stand_ins(&dir)?;
+        start_test_app(&[
+            ("AGENTSCREEN_TCCUTIL", path(&tccutil)),
+            ("AGENTSCREEN_OPEN", path(&open)),
+        ])?;
         let result = test(&dir);
         stop_test_app();
         result
@@ -76,6 +84,178 @@ fn test(dir: &Path) -> Result<()> {
     check("Done closes it", window().is_none(), "");
 
     move_app(&control, dir)?;
+
+    control.call("debugShow", json!({ "surface": "settings" }))?;
+    for surface in [
+        "setup-still-off",
+        "setup-reset-confirm",
+        "setup-reset-failed",
+    ] {
+        control.call("debugShow", json!({ "surface": surface }))?;
+        shot(surface);
+    }
+    control.call("debugShow", json!({ "surface": "setup-close" }))?;
+    sleep_ms(400);
+    reset_helper(&control, dir)?;
+    Ok(())
+}
+
+/// Scripts standing in for tccutil and open: each appends its arguments
+/// to a log.
+fn stand_ins(dir: &Path) -> Result<(PathBuf, PathBuf)> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut made = Vec::new();
+    for name in ["tccutil", "open"] {
+        let script = dir.join(format!("fake-{name}"));
+        let log = dir.join(format!("{name}.log"));
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\necho \"$*\" >> '{}'\n", log.display()),
+        )?;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))?;
+        made.push(script);
+    }
+    Ok((made[0].clone(), made[1].clone()))
+}
+
+fn log_of(dir: &Path, name: &str) -> String {
+    std::fs::read_to_string(dir.join(format!("{name}.log"))).unwrap_or_default()
+}
+
+/// Wait up to 30 s for the open stand-in's line: the helper's last step.
+fn opened(dir: &Path) -> String {
+    // The app's quit, which the helper waits for, can take seconds.
+    for _ in 0..150 {
+        let line = log_of(dir, "open");
+        if !line.is_empty() {
+            return line;
+        }
+        sleep_ms(200);
+    }
+    String::new()
+}
+
+/// Reset Permissions' helper, with the stand-ins: the exact commands for
+/// a test bundle id, after the process it waits for has exited; refused
+/// for an empty id or another app's.
+fn reset_helper(control: &Control, dir: &Path) -> Result<()> {
+    let bundle = dir.join("Reset Test.app");
+    for id in ["", "com.apple.Safari", "app.agentscreen.e2e-a;b"] {
+        let refused = control.send(
+            "debugResetHelper",
+            json!({ "bundleId": id, "bundlePath": path(&bundle), "pid": std::process::id() }),
+        )?;
+        check(
+            &format!("the helper is refused for {id:?}"),
+            refused.error.is_some(),
+            format!("{:?}", refused.error),
+        );
+    }
+    let mut waited = std::process::Command::new("/bin/sleep").arg("1").spawn()?;
+    let helper = control.call(
+        "debugResetHelper",
+        json!({ "bundleId": "app.agentscreen.e2e-reset", "bundlePath": path(&bundle), "pid": waited.id() }),
+    )?;
+    sleep_ms(300);
+    check(
+        "it waits for the process to exit",
+        log_of(dir, "tccutil").is_empty(),
+        log_of(dir, "tccutil"),
+    );
+    waited.wait()?;
+    let open_line = opened(dir);
+    let resets = log_of(dir, "tccutil");
+    check(
+        "it resets Screen Recording, Accessibility and Input Monitoring for that id only",
+        resets
+            == "reset ScreenCapture app.agentscreen.e2e-reset\nreset Accessibility app.agentscreen.e2e-reset\nreset ListenEvent app.agentscreen.e2e-reset\n",
+        format!("{resets:?} {helper}"),
+    );
+    check(
+        "then opens the bundle at Settings",
+        open_line == format!("{} --args --setup\n", bundle.display()),
+        open_line.clone(),
+    );
+
+    // The CLI asks first; no answer, nothing.
+    let cli = agent_screen_tests::binary_of(&debug_app());
+    let (tccutil, open) = (dir.join("fake-tccutil"), dir.join("fake-open"));
+    let run_cli = |args: &[&str], input: &str| -> Result<std::process::Output> {
+        use std::io::Write;
+        let mut child = std::process::Command::new(&cli)
+            .args(args)
+            .env("AGENTSCREEN_TCCUTIL", &tccutil)
+            .env("AGENTSCREEN_OPEN", &open)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
+        child.stdin.take().unwrap().write_all(input.as_bytes())?;
+        Ok(child.wait_with_output()?)
+    };
+    std::fs::write(dir.join("tccutil.log"), "")?;
+    std::fs::write(dir.join("open.log"), "")?;
+    let declined = run_cli(&["permissions", "reset"], "n\n")?;
+    let said = String::from_utf8_lossy(&declined.stdout).to_string();
+    check(
+        "permissions reset asks first and says what it clears",
+        said.contains("Screen Recording, Accessibility and Input Monitoring")
+            && said.contains("ends any open Agent Displays")
+            && said.contains("Nothing was reset")
+            && declined.status.code() == Some(1),
+        said.clone(),
+    );
+    let bad = run_cli(&["permissions", "wipe"], "")?;
+    check(
+        "an unknown command exits 2",
+        bad.status.code() == Some(2),
+        "",
+    );
+    // --yes: the running test app runs the helper and quits.
+    let pid = debug_pid();
+    let yes = run_cli(&["permissions", "reset", "--yes"], "")?;
+    check(
+        "permissions reset --yes hands it to the running app",
+        yes.status.success(),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&yes.stdout),
+            String::from_utf8_lossy(&yes.stderr)
+        ),
+    );
+    // This script started the test app, so its exit leaves a zombie the
+    // helper's `kill -0` still sees until reaped; launchd reaps the real
+    // app at once.
+    if let Some(pid) = pid {
+        for _ in 0..150 {
+            // SAFETY: waitpid on our own child, without blocking.
+            let reaped = unsafe { libc::waitpid(pid as i32, std::ptr::null_mut(), libc::WNOHANG) };
+            if reaped != 0 {
+                break;
+            }
+            sleep_ms(200);
+        }
+    }
+    let open_line = opened(dir);
+    check(
+        "the test app quit first",
+        pid.is_some() && debug_pid() != pid,
+        format!("{pid:?} then {:?}", debug_pid()),
+    );
+    let id = "app.agentscreen.AgentScreen.dev";
+    check(
+        "the app quit, then its own id was reset through the stand-in",
+        log_of(dir, "tccutil")
+            == format!(
+                "reset ScreenCapture {id}\nreset Accessibility {id}\nreset ListenEvent {id}\n"
+            ),
+        log_of(dir, "tccutil"),
+    );
+    check(
+        "and its bundle opens at Settings",
+        open_line == format!("{} --args --setup\n", debug_app().display()),
+        open_line.clone(),
+    );
     Ok(())
 }
 

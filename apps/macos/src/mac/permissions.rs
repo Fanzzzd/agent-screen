@@ -10,6 +10,7 @@
 
 use super::cg;
 use crate::i18n::t;
+pub use agent_screen_model::tcc_reset::{Script, Tools, reset_commands};
 use objc2_core_graphics::{CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess};
 use std::ffi::{CString, c_void};
 use std::sync::OnceLock;
@@ -211,4 +212,62 @@ pub fn relaunch_bundle(bundle: &std::path::Path) {
         .args(["-c", &script])
         .arg(bundle)
         .spawn();
+}
+
+/// The running bundle's identifier, empty when macOS gives none.
+pub fn bundle_id() -> String {
+    objc2_foundation::NSBundle::mainBundle()
+        .bundleIdentifier()
+        .map(|id| id.to_string())
+        .unwrap_or_default()
+}
+
+/// The programs Reset Permissions runs. A named instance (a test's)
+/// must swap tccutil for a stand-in with AGENTSCREEN_TCCUTIL, and may
+/// swap open with AGENTSCREEN_OPEN: a test proves the commands without
+/// touching the Mac's privacy database or opening an app.
+pub fn reset_tools() -> Result<Tools, String> {
+    let var = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty());
+    let mut tools = Tools::default();
+    if var("AGENTSCREEN_INSTANCE").is_none() {
+        return Ok(tools);
+    }
+    tools.tccutil = var("AGENTSCREEN_TCCUTIL")
+        .ok_or("a named instance resets nothing without AGENTSCREEN_TCCUTIL")?
+        .into();
+    if let Some(open) = var("AGENTSCREEN_OPEN") {
+        tools.open = open.into();
+    }
+    Ok(tools)
+}
+
+/// The helper for this process: resets this bundle's Screen Recording,
+/// Accessibility and Input Monitoring entries once it has quit, then
+/// opens it at Settings.
+pub fn reset_script() -> Result<Script, String> {
+    let bundle = super::relocate::bundle().unwrap_or_default();
+    let tools = reset_tools()?;
+    reset_commands(&bundle_id(), &bundle, std::process::id(), &tools).map_err(|e| e.to_string())
+}
+
+/// Start `script` apart from this process, which it outlives.
+pub fn spawn_reset(script: &Script) -> Result<(), String> {
+    use std::os::unix::process::CommandExt;
+    log::info!("reset permissions after exit: {:?}", script.steps);
+    std::process::Command::new(&script.program)
+        .args(&script.args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        // Its own process group: quitting the app doesn't take it along.
+        .process_group(0)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// Reset Permissions: start the helper; the caller then quits, which
+/// ends every Agent Display.
+pub fn reset_and_relaunch() -> Result<(), String> {
+    spawn_reset(&reset_script()?)
 }

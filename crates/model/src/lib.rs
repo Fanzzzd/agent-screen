@@ -48,6 +48,7 @@ pub mod shared_app;
 pub mod spaces;
 pub mod spares;
 pub mod substitute;
+pub mod tcc_reset;
 pub mod tree;
 pub mod typing;
 pub mod viewer_keys;

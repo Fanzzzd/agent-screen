@@ -938,6 +938,24 @@ async fn handle_one(
                 Filed::TooMany => json!({ "status": "too_many" }),
             })
         }
+        // `AgentScreen permissions reset`, confirmed in Terminal: the same
+        // helper as Settings' Reset & Reopen, then quit. Refused, as for
+        // a copy without Agent Screen's bundle id, nothing happens.
+        "resetPermissions" => {
+            let script = crate::mac::permissions::reset_script().map_err(ControlError::failed)?;
+            let steps = script.steps.clone();
+            cx.spawn(async move |cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(100))
+                    .await;
+                match crate::mac::permissions::spawn_reset(&script) {
+                    Ok(()) => cx.update(|cx| cx.quit()),
+                    Err(error) => log::warn!("reset permissions: {error}"),
+                }
+            })
+            .detach();
+            Ok(json!({ "pid": std::process::id(), "steps": steps }))
+        }
         // The MCP server of an agent session listed the tools.
         "agentReady" => {
             // Stored and logged in English; `shell::shown_client` says it

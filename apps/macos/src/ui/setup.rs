@@ -26,6 +26,8 @@ pub const WIDTH: f32 = 520.;
 /// The height it opens at; it then fits its content, which grows by a
 /// line when a row explains what to do in System Settings.
 pub const HEIGHT: f32 = 640.;
+/// The tallest it gets; its content scrolls past that.
+pub const MAX_HEIGHT: f32 = 760.;
 
 pub struct Setup {
     shell: WeakEntity<Shell>,
@@ -34,6 +36,8 @@ pub struct Setup {
     focused: bool,
     /// Centered once its height fits the content.
     centered: std::rc::Rc<std::cell::Cell<bool>>,
+    /// The content's own height at the last paint, scrolled or not.
+    content_height: std::rc::Rc<std::cell::Cell<gpui::Pixels>>,
     pub status: Status,
     /// The permission whose pane the user was sent to.
     pub waiting: Option<Permission>,
@@ -76,7 +80,17 @@ pub struct Setup {
     /// copy: a banner asks to move it first.
     pub temporary: Option<Temporary>,
     pub moving: MoveStep,
+    pub reset: ResetStep,
     icon: Arc<gpui::Image>,
+}
+
+/// Reset Permissions: asked inline in the Permissions section first.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum ResetStep {
+    #[default]
+    Idle,
+    Confirm,
+    Failed(String),
 }
 
 /// Move to Applications, while the bundle runs from a temporary place.
@@ -105,6 +119,7 @@ impl Setup {
             focus: cx.focus_handle(),
             focused: false,
             centered: Default::default(),
+            content_height: std::rc::Rc::new(std::cell::Cell::new(px(HEIGHT))),
             status,
             waiting: None,
             still_off: false,
@@ -125,6 +140,7 @@ impl Setup {
             spaces_shared: false,
             temporary: None,
             moving: MoveStep::Idle,
+            reset: ResetStep::Idle,
             icon,
         }
     }
@@ -210,10 +226,11 @@ impl Render for Setup {
                         )),
                 )
         };
-        let mut permissions: Vec<AnyElement> = Permission::ALL
-            .map(|p| self.row(p, &theme).into_any_element())
-            .into_iter()
-            .collect();
+        let mut permissions: Vec<AnyElement> = Vec::new();
+        if self.reset != ResetStep::Idle {
+            permissions.push(self.reset_row(&theme).into_any_element());
+        }
+        permissions.extend(Permission::ALL.map(|p| self.row(p, &theme).into_any_element()));
         permissions.push(self.notifications_row(&theme).into_any_element());
         // Until setup is done, only what makes the Mac work well with agents.
         let mut displays = vec![self.colorsync_row(&theme).into_any_element()];
@@ -233,12 +250,26 @@ impl Render for Setup {
             .text_color(theme.label)
             .px(px(32.))
             .pt(px(if ready { 36. } else { 44. }))
-            .pb(px(24.))
+            .pb(px(6.))
             .when_some(self.temporary, |d, why| {
                 d.child(self.location_banner(why, &theme))
             })
             .child(header)
-            .child(section(t("Permissions", "权限"), permissions, &theme))
+            .child(section_with(
+                t("Permissions", "权限"),
+                Some({
+                    let shell = self.shell.clone();
+                    link(
+                        "setup-reset",
+                        t("Reset Permissions…", "重置权限…"),
+                        &theme,
+                        move |cx| tell(&shell, cx, |shell, cx| shell.ask_reset(cx)),
+                    )
+                    .into_any_element()
+                }),
+                permissions,
+                &theme,
+            ))
             .child(section(
                 t("Agents", "Agent"),
                 vec![
@@ -251,40 +282,40 @@ impl Render for Setup {
                 t("Agent Displays", "Agent 显示器"),
                 displays,
                 &theme,
-            ))
+            ));
+        let footer = div()
+            .px(px(32.))
+            .pt(px(12.))
+            .pb(px(20.))
+            .flex()
+            .items_center()
+            .gap(px(12.))
             .child(
                 div()
-                    .mt(px(18.))
-                    .flex()
-                    .items_center()
-                    .gap(px(12.))
-                    .child(
-                        div()
-                            .flex_1()
-                            // Wraps instead of pushing the button out.
-                            .min_w_0()
-                            .text_size(px(11.))
-                            .text_color(theme.secondary)
-                            .child(t(
-                                "Used only on this Mac. Turn off anytime in System Settings.",
-                                "权限仅在本机使用，可随时在系统设置中关闭。",
-                            )),
-                    )
-                    .child(key_button(
-                        "setup-close",
-                        if ready {
-                            t("Done", "完成")
-                        } else {
-                            t("Later", "稍后")
-                        }
-                        .into(),
-                        // Connect is the next step until an agent loads the tools.
-                        (ready && (self.agent.is_some() || !self.registered.is_empty()))
-                            .then_some(theme.accent),
-                        &theme,
-                        move |cx| tell(&shell, cx, |shell, cx| shell.close_setup(cx)),
+                    .flex_1()
+                    // Wraps instead of pushing the button out.
+                    .min_w_0()
+                    .text_size(px(11.))
+                    .text_color(theme.secondary)
+                    .child(t(
+                        "Used only on this Mac. Turn off anytime in System Settings.",
+                        "权限仅在本机使用，可随时在系统设置中关闭。",
                     )),
-            );
+            )
+            .child(key_button(
+                "setup-close",
+                if ready {
+                    t("Done", "完成")
+                } else {
+                    t("Later", "稍后")
+                }
+                .into(),
+                // Connect is the next step until an agent loads the tools.
+                (ready && (self.agent.is_some() || !self.registered.is_empty()))
+                    .then_some(theme.accent),
+                &theme,
+                move |cx| tell(&shell, cx, |shell, cx| shell.close_setup(cx)),
+            ));
         let close = self.shell.clone();
         div()
             .track_focus(&self.focus)
@@ -303,11 +334,14 @@ impl Render for Setup {
             .bg(theme.card)
             .on_children_prepainted({
                 let centered = self.centered.clone();
+                let tall = self.content_height.clone();
                 move |bounds, window, _| {
-                    let Some(content) = bounds.first() else {
+                    let Some(footer) = bounds.get(1) else {
                         return;
                     };
-                    let height = content.size.height.ceil();
+                    // Content and footer, up to the most that fits a
+                    // 13-inch screen: past that the content scrolls.
+                    let height = (tall.get() + footer.size.height).min(px(MAX_HEIGHT)).ceil();
                     if (window.viewport_size().height - height).abs() > px(1.) {
                         window.resize(gpui::size(px(WIDTH), height));
                         return;
@@ -319,7 +353,23 @@ impl Render for Setup {
                     }
                 }
             })
-            .child(content)
+            .child(
+                div()
+                    .on_children_prepainted({
+                        let tall = self.content_height.clone();
+                        move |bounds, _, _| {
+                            if let Some(content) = bounds.first() {
+                                tall.set(content.size.height);
+                            }
+                        }
+                    })
+                    .id("setup-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(content),
+            )
+            .child(footer)
     }
 }
 
@@ -344,6 +394,16 @@ fn green() -> Hsla {
 
 /// A titled group of rows.
 fn section(title: &str, rows: Vec<AnyElement>, theme: &Theme) -> impl IntoElement {
+    section_with(title, None, rows, theme)
+}
+
+/// A titled group of rows with a quiet action at the title's right.
+fn section_with(
+    title: &str,
+    trailing: Option<AnyElement>,
+    rows: Vec<AnyElement>,
+    theme: &Theme,
+) -> impl IntoElement {
     div()
         .mt(px(16.))
         .flex()
@@ -352,10 +412,17 @@ fn section(title: &str, rows: Vec<AnyElement>, theme: &Theme) -> impl IntoElemen
             div()
                 .px(px(4.))
                 .pb(px(5.))
-                .text_size(px(11.5))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.secondary)
-                .child(title.to_string()),
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .text_size(px(11.5))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.secondary)
+                        .child(title.to_string()),
+                )
+                .children(trailing),
         )
         .child(
             div()
@@ -470,6 +537,48 @@ fn item_with(
         .child(action)
 }
 
+/// A row whose text takes the full width, with its buttons under it at
+/// the right: for a question or a warning that needs a sentence.
+fn stacked(
+    lead: impl IntoElement,
+    title: SharedString,
+    detail: SharedString,
+    note: Option<(String, Hsla)>,
+    actions: AnyElement,
+    theme: &Theme,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .gap(px(12.))
+        .px(px(14.))
+        .py(px(10.))
+        .child(lead)
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.5))
+                        .text_color(theme.secondary)
+                        .child(detail),
+                )
+                .when_some(note, |d, (text, color)| {
+                    d.child(div().text_size(px(11.)).text_color(color).child(text))
+                })
+                .child(div().mt(px(6.)).flex().justify_end().child(actions)),
+        )
+}
+
 /// A text button under a row's detail.
 fn link(
     id: &'static str,
@@ -518,23 +627,23 @@ impl Setup {
         let shell = self.shell.clone();
         let detail = match why {
             Temporary::DiskImage => t(
-                "It runs from the disk image. Permissions and agent connections set up here stop working once it moves.",
-                "当前从磁盘映像运行。在此授予的权限和 agent 接入在移动后会失效。",
+                "Running from the disk image: permissions and agents set up here break once it moves",
+                "当前从磁盘映像运行，移动后此处设置的权限和 agent 会失效",
             ),
             Temporary::Downloads => t(
-                "It runs from Downloads. Permissions and agent connections set up here stop working once it moves.",
-                "当前从“下载”运行。在此授予的权限和 agent 接入在移动后会失效。",
+                "Running from Downloads: permissions and agents set up here break once it moves",
+                "当前从“下载”运行，移动后此处设置的权限和 agent 会失效",
             ),
             Temporary::Translocated => t(
-                "macOS runs it from a temporary copy. Permissions and agent connections set up here stop working.",
-                "macOS 正从临时副本运行它。在此授予的权限和 agent 接入会失效。",
+                "macOS runs a temporary copy: permissions and agents set up here won't last",
+                "macOS 正在运行临时副本，此处设置的权限和 agent 不会保留",
             ),
         };
         let note = match &self.moving {
             MoveStep::AskReplace => Some((
                 t(
-                    "Applications already has Agent Screen. Replace it?",
-                    "“应用程序”中已有 Agent Screen，是否替换？",
+                    "Replace the Agent Screen in Applications?",
+                    "替换“应用程序”中的 Agent Screen？",
                 )
                 .to_string(),
                 theme.label,
@@ -597,13 +706,9 @@ impl Setup {
             .bg(theme.orange.opacity(0.12))
             .border_1()
             .border_color(theme.orange.opacity(0.35))
-            .child(item(
+            .child(stacked(
                 badge("icons/alert.svg", theme.orange, false),
-                t(
-                    "Move Agent Screen to Applications first",
-                    "请先将 Agent Screen 移至“应用程序”",
-                )
-                .into(),
+                t("Move to Applications First", "请先移至“应用程序”").into(),
                 detail.into(),
                 note,
                 action,
@@ -978,6 +1083,49 @@ impl Setup {
         )
     }
 
+    /// Reset Permissions, asked before it runs: what it clears, that it
+    /// ends open Agent Displays, and that Settings opens again.
+    fn reset_row(&self, theme: &Theme) -> impl IntoElement {
+        let cancel = self.shell.clone();
+        let go = self.shell.clone();
+        let note = match &self.reset {
+            ResetStep::Failed(error) => {
+                Some((tf!("Didn't work: {error}", "未成功：{error}"), theme.orange))
+            }
+            _ => None,
+        };
+        let action = div()
+            .flex()
+            .gap(px(8.))
+            .child(key_button(
+                "setup-reset-cancel",
+                t("Cancel", "取消").into(),
+                None,
+                theme,
+                move |cx| tell(&cancel, cx, |shell, cx| shell.cancel_reset(cx)),
+            ))
+            .child(key_button(
+                "setup-reset-go",
+                t("Reset & Reopen", "重置并重启").into(),
+                Some(theme.orange),
+                theme,
+                move |cx| tell(&go, cx, |shell, cx| shell.reset_permissions(cx)),
+            ))
+            .into_any_element();
+        div().bg(theme.orange.opacity(0.08)).child(stacked(
+            badge("icons/alert.svg", theme.orange, false),
+            t("Reset Agent Screen's Permissions?", "重置 Agent Screen 的权限？").into(),
+            t(
+                "Clears only its Screen Recording, Accessibility and Input Monitoring entries, ends open Agent Displays, then reopens Settings",
+                "仅清除它的录屏、辅助功能和输入监控条目，结束已打开的 Agent 显示器，然后重新打开设置",
+            )
+            .into(),
+            note,
+            action,
+            theme,
+        ))
+    }
+
     fn row(&self, p: Permission, theme: &Theme) -> impl IntoElement {
         let granted = self.status.has(p);
         let (icon, detail) = match p {
@@ -999,7 +1147,18 @@ impl Setup {
         let shell = self.shell.clone();
         let restart_here = p == Permission::ScreenRecording && granted && self.restart;
         let waiting = self.waiting == Some(p) && !granted;
-        let action = if restart_here {
+        let stuck = waiting && self.still_off;
+        let action = if stuck {
+            let reset = shell.clone();
+            key_button(
+                "setup-reset-still-off",
+                t("Reset & Reopen…", "重置并重启…").into(),
+                Some(theme.accent),
+                theme,
+                move |cx| tell(&reset, cx, |shell, cx| shell.ask_reset(cx)),
+            )
+            .into_any_element()
+        } else if restart_here {
             key_button(
                 "setup-restart",
                 t("Reopen Agent Screen", "重新打开 Agent Screen").into(),
@@ -1038,11 +1197,11 @@ impl Setup {
                 .to_string(),
                 theme.orange,
             ))
-        } else if waiting && self.still_off {
+        } else if stuck {
             Some((
                 t(
-                    "Already on? Remove with −, then re-add",
-                    "已开启仍无效？点 − 移除后重新添加",
+                    "Already on? Reset clears the old entry",
+                    "已开启仍无效？重置可清除旧条目",
                 )
                 .to_string(),
                 theme.orange,
@@ -1060,11 +1219,25 @@ impl Setup {
             None
         };
         let color = if granted { green() } else { theme.accent };
-        item(
+        let again = stuck.then(|| {
+            let shell = self.shell.clone();
+            link(
+                match p {
+                    Permission::ScreenRecording => "setup-grant-screen",
+                    Permission::Accessibility => "setup-grant-ax",
+                },
+                t("Open Settings Again", "重新打开设置"),
+                theme,
+                move |cx| tell(&shell, cx, move |shell, cx| shell.grant(p, cx)),
+            )
+            .into_any_element()
+        });
+        item_with(
             badge(icon, color, granted),
             p.name().into(),
             detail.into(),
             note,
+            again,
             action,
             theme,
         )

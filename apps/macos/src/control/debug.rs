@@ -326,6 +326,30 @@ pub(super) async fn handle(
                 Err(MoveError::Failed(error)) => json!({ "error": error }),
             })
         }
+        // Test hook: Reset Permissions' helper for `bundleId` and
+        // `bundlePath`, waiting for `pid`, with the stand-ins the e2e
+        // instance names in AGENTSCREEN_TCCUTIL and AGENTSCREEN_OPEN. The
+        // app doesn't quit. Refused without both stand-ins.
+        "debugResetHelper" => {
+            use crate::mac::permissions::{reset_commands, reset_tools, spawn_reset};
+            let stand_ins = std::env::var_os("AGENTSCREEN_TCCUTIL").is_some()
+                && std::env::var_os("AGENTSCREEN_OPEN").is_some();
+            if agent_screen_mcp::endpoint::instance().as_deref() != Some("e2e") || !stand_ins {
+                return Some(Err(ControlError::invalid(
+                    "debugResetHelper needs the e2e instance with AGENTSCREEN_TCCUTIL and AGENTSCREEN_OPEN",
+                )));
+            }
+            let id = p.string("bundleId").unwrap_or_default();
+            let bundle = std::path::PathBuf::from(p.string("bundlePath").unwrap_or_default());
+            let pid = p.int("pid").unwrap_or(0) as u32;
+            reset_tools()
+                .and_then(|tools| {
+                    reset_commands(&id, &bundle, pid, &tools).map_err(|e| e.to_string())
+                })
+                .and_then(|script| spawn_reset(&script).map(|()| script.steps))
+                .map(|steps| json!({ "steps": steps }))
+                .map_err(ControlError::invalid)
+        }
         "debugInputObserver" => debug_input_observer(p, cx),
         // The Help Card's width and its buttons' bounds at the last paint.
         "debugCard" => debug_card(cx),

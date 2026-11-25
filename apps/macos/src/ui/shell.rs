@@ -361,6 +361,9 @@ pub struct Shell {
     /// image, without moving anything.
     location_preview: bool,
     moving: setup::MoveStep,
+    reset: setup::ResetStep,
+    /// `debugShow setup-reset-…`: Reset & Reopen does nothing.
+    reset_preview: bool,
 }
 
 /// Pixel size a thumbnail needs: twice its width in points, for Retina.
@@ -912,6 +915,8 @@ impl Shell {
             location: crate::mac::relocate::location(),
             location_preview: false,
             moving: setup::MoveStep::Idle,
+            reset: setup::ResetStep::Idle,
+            reset_preview: false,
         }
     }
     fn native(&mut self, event: Native, cx: &mut Context<Self>) {
@@ -2971,6 +2976,20 @@ impl Shell {
                 }
                 self.push_setup(cx);
             }
+            // Reset Permissions asking first, or after it failed. Reset &
+            // Reopen does nothing in a preview.
+            "setup-reset-confirm" | "setup-reset-failed" => {
+                self.reset_preview = true;
+                self.reset = if surface == "setup-reset-failed" {
+                    setup::ResetStep::Failed("this copy has no bundle id; nothing was reset".into())
+                } else {
+                    setup::ResetStep::Confirm
+                };
+                if self.setup.is_none() {
+                    self.open_setup(cx);
+                }
+                self.push_setup(cx);
+            }
             "setup-waiting" | "setup-still-off" => {
                 self.setup_preview = true;
                 self.preview_still_off = surface == "setup-still-off";
@@ -4458,6 +4477,8 @@ impl Shell {
             self.location_preview = false;
             self.moving = setup::MoveStep::Idle;
         }
+        self.reset_preview = false;
+        self.reset = setup::ResetStep::Idle;
         assist::hide();
         if self.recordings.is_none() {
             leave_dock(cx);
@@ -4711,6 +4732,36 @@ impl Shell {
         .detach();
     }
 
+    /// Reset Permissions… or the stuck row's button: ask first, in the
+    /// Permissions section.
+    pub fn ask_reset(&mut self, cx: &mut Context<Self>) {
+        self.reset = setup::ResetStep::Confirm;
+        self.push_setup(cx);
+    }
+
+    pub fn cancel_reset(&mut self, cx: &mut Context<Self>) {
+        self.reset = setup::ResetStep::Idle;
+        self.push_setup(cx);
+    }
+
+    /// Reset & Reopen: start the helper that clears this bundle's privacy
+    /// entries once the app has quit and opens it at Settings, then quit,
+    /// which ends every Agent Display. A preview never resets.
+    pub fn reset_permissions(&mut self, cx: &mut Context<Self>) {
+        if self.reset_preview || self.setup_preview || self.location_preview {
+            log::info!("reset permissions: preview, nothing reset");
+            return;
+        }
+        match permissions::reset_and_relaunch() {
+            Ok(()) => self.quit(cx),
+            Err(error) => {
+                log::warn!("reset permissions: {error}");
+                self.reset = setup::ResetStep::Failed(error);
+                self.push_setup(cx);
+            }
+        }
+    }
+
     pub fn cancel_move(&mut self, cx: &mut Context<Self>) {
         self.moving = setup::MoveStep::Idle;
         self.push_setup(cx);
@@ -4909,6 +4960,7 @@ impl Shell {
             self.location.temporary()
         };
         let moving = self.moving.clone();
+        let reset = self.reset.clone();
         if handle
             .update(cx, |setup, _, cx| {
                 setup.aerospace = aerospace;
@@ -4918,6 +4970,7 @@ impl Shell {
                 setup.spaces_shared = spaces_shared;
                 setup.temporary = temporary;
                 setup.moving = moving;
+                setup.reset = reset;
                 setup.status = status;
                 setup.notifications = notifications;
                 (setup.colorsync, setup.colorsync_busy, setup.colorsync_error) = colorsync;
