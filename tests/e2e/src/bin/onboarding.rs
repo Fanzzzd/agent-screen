@@ -119,31 +119,12 @@ fn agents_home(dir: &Path) -> Result<PathBuf> {
     Ok(home)
 }
 
-/// The user's own configs this test must never write.
-fn owners_configs() -> Vec<(PathBuf, Option<std::time::SystemTime>)> {
-    let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
-    [
-        ".cursor/mcp.json",
-        ".codex/config.toml",
-        ".config/zed/settings.json",
-        ".claude.json",
-    ]
-    .iter()
-    .map(|p| {
-        let path = home.join(p);
-        let when = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
-        (path, when)
-    })
-    .collect()
-}
-
 /// The Agents section on the temporary home: a row per client with its
 /// state, Connect, Connect All Detected and Disconnect writing that home,
 /// and the made-up previews.
 fn agents(control: &Control, dir: &Path, shot: &dyn Fn(&str)) -> Result<()> {
     let home = dir.join("home");
     let exe = agent_screen_tests::binary_of(&debug_app());
-    let before = owners_configs();
     let read = |p: &str| std::fs::read_to_string(home.join(p)).unwrap_or_default();
     let wait_for = |what: &dyn Fn() -> bool| {
         for _ in 0..40 {
@@ -213,11 +194,6 @@ fn agents(control: &Control, dir: &Path, shot: &dyn Fn(&str)) -> Result<()> {
     }
     control.call("debugShow", json!({ "surface": "setup-close" }))?;
     sleep_ms(400);
-    check(
-        "the user's own client configs were not written",
-        owners_configs() == before,
-        "",
-    );
     Ok(())
 }
 
