@@ -101,6 +101,43 @@ pub fn shown_client(name: &str) -> String {
     }
 }
 
+/// `Shell::agents_busy` for a Connect of every detected client.
+const ALL_CLIENTS: &str = "all";
+
+/// Where the Agents section reads and writes clients' configs: the home
+/// AGENTSCREEN_AGENTS_HOME names in a build with test hooks, so a test
+/// never touches the user's configs; otherwise this user's.
+fn agents_env() -> agent_screen_mcp::install::Env {
+    use agent_screen_mcp::install::Env;
+    match agents_test_home() {
+        Some(home) => Env::for_home(home),
+        None => Env::current(),
+    }
+}
+
+fn agents_test_home() -> Option<std::path::PathBuf> {
+    agents_home_for(
+        crate::control::debug_methods(),
+        std::env::var_os("AGENTSCREEN_AGENTS_HOME"),
+    )
+}
+
+/// The registry clients whose sessions loaded the tools from this app
+/// process: "Live now". A time saved by an earlier run says nothing about
+/// a connection now.
+fn live_clients(agent_ready: &[String]) -> Vec<&'static str> {
+    agent_ready
+        .iter()
+        .filter_map(|name| agent_screen_mcp::install::client_for_info(name).map(|c| c.id))
+        .collect()
+}
+
+/// The test home: only with test hooks, and only a named, absolute one.
+fn agents_home_for(hooks: bool, home: Option<std::ffi::OsString>) -> Option<std::path::PathBuf> {
+    let home = std::path::PathBuf::from(home.filter(|h| !h.is_empty())?);
+    (hooks && home.is_absolute()).then_some(home)
+}
+
 pub fn current() -> Option<WeakEntity<Shell>> {
     CURRENT.with(|c| c.borrow().as_ref().map(Entity::downgrade))
 }
@@ -344,8 +381,29 @@ pub struct Shell {
     preview_still_off: bool,
     /// Screen Recording came on while running and capture still fails.
     restart: bool,
-    /// A Connect is running.
-    connecting: bool,
+    /// Every agent client found on this Mac, or with Agent Screen in its
+    /// config, and its state; None until the first probe.
+    agents: Option<
+        Vec<(
+            &'static agent_screen_mcp::install::Client,
+            agent_screen_mcp::install::State,
+        )>,
+    >,
+    /// The client a Connect or Disconnect runs for, or `ALL_CLIENTS`.
+    agents_busy: Option<&'static str>,
+    /// The last failure of each client's Connect or Disconnect.
+    agent_errors: Vec<(&'static str, String)>,
+    /// The menu's Connect Agents waits for the probe.
+    connect_after_probe: bool,
+    /// `debugShow setup-agents-…`: rows made up for the surface named.
+    agents_preview: Option<&'static str>,
+    snippet_copied: Option<agent_screen_mcp::install::Snippet>,
+    prompt_copied: bool,
+    /// The test prompt showed in this run: it turns green, not away, once
+    /// an agent loads the tools.
+    prompt_shown: bool,
+    /// No agent had loaded the tools before this run.
+    tools_never: bool,
     /// A late check of Screen Recording is pending.
     rechecking: bool,
     /// The missing permissions and reopen state an agent's call last
@@ -354,6 +412,16 @@ pub struct Shell {
     /// Clients whose config runs this copy of Agent Screen, read when the
     /// setup window opens and after a Connect: not on every tick.
     registered: Vec<&'static str>,
+    /// Where the bundle runs from, read at launch: a temporary place shows
+    /// the Move to Applications banner.
+    location: agent_screen_model::location::Location,
+    /// `debugShow setup-temp-location…`: the banner as from the disk
+    /// image, without moving anything.
+    location_preview: bool,
+    moving: setup::MoveStep,
+    reset: setup::ResetStep,
+    /// `debugShow setup-reset-…`: Reset & Reopen does nothing.
+    reset_preview: bool,
 }
 
 /// Pixel size a thumbnail needs: twice its width in points, for Retina.
@@ -899,9 +967,22 @@ impl Shell {
             restart: false,
             debug_menu_at: None,
             setup_shown_for: None,
-            connecting: false,
+            agents: None,
+            agents_busy: None,
+            agent_errors: Vec::new(),
+            connect_after_probe: false,
+            agents_preview: None,
+            snippet_copied: None,
+            prompt_copied: false,
+            prompt_shown: false,
+            tools_never: native::tools_last_loaded().is_none(),
             rechecking: false,
             registered: Vec::new(),
+            location: crate::mac::relocate::location(),
+            location_preview: false,
+            moving: setup::MoveStep::Idle,
+            reset: setup::ResetStep::Idle,
+            reset_preview: false,
         }
     }
     fn native(&mut self, event: Native, cx: &mut Context<Self>) {
@@ -2873,6 +2954,29 @@ impl Shell {
         id: DisplayId,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
+        // A client row's button, as a click presses it:
+        // `setup-agents-connect:<id>` or `setup-agents-disconnect:<id>`.
+        // The e2e instance writes the configs under AGENTSCREEN_AGENTS_HOME.
+        if (surface == "connect"
+            || surface.starts_with("setup-agents-connect")
+            || surface.starts_with("setup-agents-disconnect"))
+            && agents_test_home().is_none()
+        {
+            return Err("Connect and Disconnect hooks write only under AGENTSCREEN_AGENTS_HOME: set it to a temporary home".into());
+        }
+        if let Some((action, id)) = surface.split_once(':')
+            && action.starts_with("setup-agents-")
+        {
+            let client = agent_screen_mcp::install::client(id)
+                .ok_or_else(|| format!("no client {id}"))?
+                .id;
+            match action {
+                "setup-agents-connect" => self.connect_client(Some(client), cx),
+                "setup-agents-disconnect" => self.disconnect_client(client, cx),
+                _ => return Err(format!("unknown surface {surface}")),
+            }
+            return Ok(());
+        }
         match surface {
             "pretend-screen-off" | "pretend-ax-off" | "pretend-clear" => {
                 use std::sync::atomic::Ordering;
@@ -2941,6 +3045,56 @@ impl Shell {
             // The open setup window as with both permissions missing, the
             // first row explaining what to do in System Settings: the
             // tallest it gets.
+            // The Move to Applications banner as from the disk image, at
+            // each of its steps. Its buttons never copy in a preview.
+            "setup-temp-location"
+            | "setup-temp-location-replace"
+            | "setup-temp-location-copying"
+            | "setup-temp-location-failed" => {
+                self.location_preview = true;
+                self.moving = match surface {
+                    "setup-temp-location-replace" => setup::MoveStep::AskReplace,
+                    "setup-temp-location-copying" => setup::MoveStep::Copying,
+                    "setup-temp-location-failed" => setup::MoveStep::Failed(
+                        t("You can't write to Applications", "你无权写入“应用程序”").into(),
+                    ),
+                    _ => setup::MoveStep::Idle,
+                };
+                if self.setup.is_none() {
+                    self.open_setup(cx);
+                }
+                self.push_setup(cx);
+            }
+            // Reset Permissions asking first, or after it failed. Reset &
+            // Reopen does nothing in a preview.
+            "setup-reset-confirm" | "setup-reset-failed" => {
+                self.reset_preview = true;
+                self.reset = if surface == "setup-reset-failed" {
+                    setup::ResetStep::Failed("this copy has no bundle id; nothing was reset".into())
+                } else {
+                    setup::ResetStep::Confirm
+                };
+                if self.setup.is_none() {
+                    self.open_setup(cx);
+                }
+                self.push_setup(cx);
+            }
+            // The Agents section with made-up rows: one of each state
+            // (`mixed`), and the test prompt waiting or done. Its buttons
+            // write nothing in a preview.
+            "setup-agents-mixed" | "setup-agents-prompt" | "setup-agents-prompt-done" => {
+                self.agents_preview = Some(match surface {
+                    "setup-agents-mixed" => "setup-agents-mixed",
+                    "setup-agents-prompt" => "setup-agents-prompt",
+                    _ => "setup-agents-prompt-done",
+                });
+                if self.setup.is_none() {
+                    self.open_setup(cx);
+                }
+                self.push_setup(cx);
+            }
+            // Connect All Detected, as a click presses it.
+            "setup-agents-connect-all" => self.connect_client(None, cx),
             "setup-waiting" | "setup-still-off" => {
                 self.setup_preview = true;
                 self.preview_still_off = surface == "setup-still-off";
@@ -3487,7 +3641,14 @@ impl Shell {
                 }
             }
             MenuAction::IgnoreInAeroSpace => self.ignore_in_aerospace(cx),
-            MenuAction::ConnectAgents => self.connect_agents(cx),
+            MenuAction::ConnectAgents => {
+                self.open_setup(cx);
+                if self.agents.is_some() {
+                    self.connect_client(None, cx);
+                } else {
+                    self.connect_after_probe = true;
+                }
+            }
             MenuAction::ChooseWallpaper => self.choose_wallpaper(cx),
             MenuAction::DefaultWallpaper => self.set_wallpaper(None, cx),
             MenuAction::Quit => self.quit(cx),
@@ -4342,7 +4503,7 @@ impl Shell {
             Ok(handle) => {
                 self.setup = Some(handle);
                 self.push_setup(cx);
-                self.read_registered(cx);
+                self.probe_agents(cx);
                 self.check_aerospace(cx);
                 cx.activate(true);
             }
@@ -4365,19 +4526,38 @@ impl Shell {
         }
     }
 
-    /// Which clients run this copy, off the main thread: Claude Code's
-    /// config holds every project's history and can be large.
-    fn read_registered(&mut self, cx: &mut Context<Self>) {
+    /// Every agent client's state, off the main thread: Claude Code's
+    /// config holds every project's history and can be large. Runs when
+    /// Settings opens and after each Connect or Disconnect.
+    fn probe_agents(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |shell, cx| {
-            let registered = cx
+            let probed = cx
                 .background_spawn(async {
                     let exe = std::env::current_exe().unwrap_or_default();
-                    agent_screen_mcp::install::registered(&exe)
+                    agent_screen_mcp::install::status(&exe, &agents_env())
+                        .into_iter()
+                        .map(|s| (s.client, s.detected, s.state))
+                        .collect::<Vec<_>>()
                 })
                 .await;
             let _ = shell.update(cx, |shell, cx| {
-                shell.registered = registered;
+                use agent_screen_mcp::install::State;
+                shell.registered = probed
+                    .iter()
+                    .filter(|(_, _, state)| *state == State::Connected)
+                    .map(|(client, _, _)| client.name)
+                    .collect();
+                shell.agents = Some(
+                    probed
+                        .into_iter()
+                        .filter(|(_, detected, state)| *detected || *state != State::NotConnected)
+                        .map(|(client, _, state)| (client, state))
+                        .collect(),
+                );
                 shell.push_setup(cx);
+                if std::mem::take(&mut shell.connect_after_probe) {
+                    shell.connect_client(None, cx);
+                }
             });
         })
         .detach();
@@ -4424,6 +4604,14 @@ impl Shell {
         }
         self.waiting = None;
         self.setup_preview = false;
+        if self.location_preview {
+            self.location_preview = false;
+            self.moving = setup::MoveStep::Idle;
+        }
+        self.reset_preview = false;
+        self.reset = setup::ResetStep::Idle;
+        self.agents_preview = None;
+        self.snippet_copied = None;
         assist::hide();
         if self.recordings.is_none() {
             leave_dock(cx);
@@ -4629,132 +4817,251 @@ impl Shell {
         self.quit(cx);
     }
 
-    /// Register the MCP server with every agent client on this Mac, and
-    /// say how it went.
-    pub fn connect_agents(&mut self, cx: &mut Context<Self>) {
-        // Editing the clients' configs takes a moment; a second press would
-        // race the first.
-        if self.connecting {
+    /// Move to Applications: copy the bundle there off the main thread,
+    /// then open the copy at Settings and quit. With an Agent Screen there
+    /// already, the banner asks first; `replace` is its answer.
+    pub fn move_to_applications(&mut self, replace: bool, cx: &mut Context<Self>) {
+        use crate::mac::relocate::{self, MoveError};
+        if self.moving == setup::MoveStep::Copying {
             return;
         }
-        self.connecting = true;
+        // A preview never copies: the test app is a development build.
+        if self.location_preview || self.location.temporary().is_none() {
+            self.moving = if replace {
+                setup::MoveStep::Copying
+            } else {
+                setup::MoveStep::AskReplace
+            };
+            self.push_setup(cx);
+            return;
+        }
+        let Some(source) = relocate::bundle() else {
+            return;
+        };
+        self.moving = setup::MoveStep::Copying;
         self.push_setup(cx);
-        let install = cx.background_spawn(async {
-            use agent_screen_mcp::install::{Env, Options, install};
-            let exe = std::env::current_exe().unwrap_or_default();
-            install(&exe, &Env::current(), &Options::default())
-        });
         cx.spawn(async move |shell, cx| {
-            use agent_screen_mcp::install::{Done, Skill};
-            let report = install.await;
-            let skill_line = |who: &str, skill: &Result<Skill, String>| match skill {
-                Ok(Skill::Written(path)) => tf!(
-                    "{}: skill written to {}",
-                    "{}：技能已写入 {}",
-                    who,
-                    path.display()
-                ),
-                Ok(Skill::Current(_)) => tf!("{}: skill up to date", "{}：技能已是最新", who),
-                Ok(Skill::Linked(path)) => tf!(
-                    "{}: skill in {} is another installer's, left alone",
-                    "{}：{} 中的技能由其他安装工具管理，未改动",
-                    who,
-                    path.display()
-                ),
-                Ok(Skill::Shared(path)) => tf!(
-                    "{}: reads the shared skill in {}",
-                    "{}：读取 {} 中的共享技能",
-                    who,
-                    path.display()
-                ),
-                Ok(Skill::Plugin) => tf!(
-                    "{}: skill comes from the agent-screen plugin",
-                    "{}：技能由 agent-screen 插件提供",
-                    who
-                ),
-                Err(error) => tf!("{}: skill failed. {}", "{}：技能写入失败。{}", who, error),
-            };
-            let mut lines: Vec<String> = Vec::new();
-            for o in &report.outcomes {
-                let client = o.client.name;
-                lines.push(match &o.result {
-                    Ok(Done::Already) => tf!("{}: already connected", "{}：已接入", client),
-                    Ok(Done::AddedTo(path)) if o.client.restart => tf!(
-                        "{}: added to {}. Quit it and open it again",
-                        "{}：已写入 {}。请退出后重新打开",
-                        client,
-                        path.display()
-                    ),
-                    Ok(Done::AddedTo(path)) => tf!(
-                        "{}: added to {}",
-                        "{}：已写入 {}",
-                        client,
-                        path.display()
-                    ),
-                    Ok(Done::Repointed { config, .. }) => tf!(
-                        "{}: now runs this copy, in {}",
-                        "{}：已改为运行此副本，见 {}",
-                        client,
-                        config.display()
-                    ),
-                    Ok(Done::Updated(path)) => tf!(
-                        "{}: updated in {}",
-                        "{}：已更新 {}",
-                        client,
-                        path.display()
-                    ),
-                    Err(error) => tf!("{}: failed. {}", "{}：失败。{}", client, error),
-                });
-                if let Some(skill) = &o.skill {
-                    lines.push(skill_line(client, skill));
-                }
-            }
-            if let Some(skill) = &report.shared_skill {
-                lines.push(skill_line(t("Shared", "共享"), skill));
-            }
-            let exe = std::env::current_exe().unwrap_or_default();
-            let failed = report.outcomes.iter().any(|o| o.result.is_err());
-            let none = report.outcomes.is_empty();
-            let next = if none {
-                tf!(
-                    "No agent client found on this Mac. For another MCP client, add a stdio server with command\n{}\nand arguments [\"mcp\"].",
-                    "未在这台 Mac 上找到 agent 客户端。其他 MCP 客户端：添加一个 stdio 服务器，命令为\n{}\n参数为 [\"mcp\"]。",
-                    exe.display()
-                )
-            } else if failed {
-                tf!(
-                    "To see each client's state in Terminal:\n\"{}\" mcp status",
-                    "可在终端中查看各客户端的状态：\n\"{}\" mcp status",
-                    exe.display()
-                )
-            } else {
-                t(
-                    "Start a new agent session to load the tools.",
-                    "新建 agent 会话即可加载这些工具。",
-                )
-                .to_string()
-            };
-            let registered = cx
-                .background_spawn(async move { agent_screen_mcp::install::registered(&exe) })
+            let moved = cx
+                .background_spawn(async move {
+                    relocate::move_to(&source, std::path::Path::new("/Applications"), replace)
+                })
                 .await;
-            let _ = shell.update(cx, |shell, cx| {
-                shell.connecting = false;
-                shell.registered = registered;
-                shell.push_setup(cx);
-            });
-            let title = t("Agent Screen and your agents", "Agent Screen 与 agent");
-            let text = format!("{}\n\n{next}", lines.join("\n"));
-            // With no client found the user sets up another one by hand:
-            // give them the entry to paste.
-            if none {
-                if native::confirm(title, &text, t("Copy Config", "复制配置")) {
-                    native::copy(&super::setup::mcp_config());
+            let _ = shell.update(cx, |shell, cx| match moved {
+                Ok(dest) => {
+                    permissions::relaunch_bundle(&dest);
+                    shell.quit(cx);
                 }
-            } else {
-                native::alert(title, &text);
-            }
+                Err(MoveError::Exists(_)) => {
+                    shell.moving = setup::MoveStep::AskReplace;
+                    shell.push_setup(cx);
+                }
+                Err(MoveError::Failed(error)) => {
+                    log::warn!("move to Applications: {error}");
+                    shell.moving = setup::MoveStep::Failed(error);
+                    shell.push_setup(cx);
+                }
+            });
         })
         .detach();
+    }
+
+    /// Reset Permissions… or the stuck row's button: ask first, in the
+    /// Permissions section.
+    pub fn ask_reset(&mut self, cx: &mut Context<Self>) {
+        self.reset = setup::ResetStep::Confirm;
+        self.push_setup(cx);
+    }
+
+    /// `AgentScreen permissions reset` from Terminal: Settings in front,
+    /// asking, as its own Reset Permissions… does.
+    pub fn ask_reset_in_settings(&mut self, cx: &mut Context<Self>) {
+        self.open_setup(cx);
+        self.ask_reset(cx);
+    }
+
+    pub fn cancel_reset(&mut self, cx: &mut Context<Self>) {
+        self.reset = setup::ResetStep::Idle;
+        self.push_setup(cx);
+    }
+
+    /// Reset & Reopen: start the helper that clears this bundle's privacy
+    /// entries once the app has quit and opens it at Settings, then quit,
+    /// which ends every Agent Display. A preview never resets.
+    pub fn reset_permissions(&mut self, cx: &mut Context<Self>) {
+        if self.reset_preview || self.setup_preview || self.location_preview {
+            log::info!("reset permissions: preview, nothing reset");
+            return;
+        }
+        match permissions::reset_and_relaunch() {
+            Ok(()) => self.quit(cx),
+            Err(error) => {
+                log::warn!("reset permissions: {error}");
+                self.reset = setup::ResetStep::Failed(error);
+                self.push_setup(cx);
+            }
+        }
+    }
+
+    pub fn cancel_move(&mut self, cx: &mut Context<Self>) {
+        self.moving = setup::MoveStep::Idle;
+        self.push_setup(cx);
+    }
+
+    /// Connect: register the MCP server with `id`'s client, or with
+    /// every detected client not connected yet, then read the states
+    /// again. A failure shows under its row; nothing asks in a modal.
+    pub fn connect_client(&mut self, id: Option<&'static str>, cx: &mut Context<Self>) {
+        use agent_screen_mcp::install::{self, Options, State};
+        if self.agents_busy.is_some() || self.agents_preview.is_some() {
+            return;
+        }
+        let clients: Vec<&'static install::Client> = match id {
+            Some(id) => install::client(id).into_iter().collect(),
+            None => self
+                .agents
+                .iter()
+                .flatten()
+                .filter(|(_, state)| matches!(state, State::NotConnected | State::StalePath(_)))
+                .map(|(client, _)| *client)
+                .collect(),
+        };
+        if clients.is_empty() {
+            return;
+        }
+        self.agents_busy = Some(id.unwrap_or(ALL_CLIENTS));
+        for c in &clients {
+            self.agent_errors.retain(|(id, _)| *id != c.id);
+        }
+        self.push_setup(cx);
+        cx.spawn(async move |shell, cx| {
+            let failed: Vec<(&'static str, String)> = cx
+                .background_spawn(async move {
+                    let exe = std::env::current_exe().unwrap_or_default();
+                    let options = Options {
+                        clients: Some(clients),
+                        ..Options::default()
+                    };
+                    let report = install::install(&exe, &agents_env(), &options);
+                    for o in &report.outcomes {
+                        match &o.result {
+                            Ok(done) => log::info!("{}: {done}", o.client.name),
+                            Err(error) => log::warn!("{}: {error}", o.client.name),
+                        }
+                    }
+                    report
+                        .outcomes
+                        .into_iter()
+                        .filter_map(|o| o.result.err().map(|e| (o.client.id, e)))
+                        .collect()
+                })
+                .await;
+            let _ = shell.update(cx, |shell, cx| {
+                shell.agents_busy = None;
+                shell.agent_errors.extend(failed);
+                shell.probe_agents(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Disconnect: take Agent Screen's entry out of `id`'s config.
+    pub fn disconnect_client(&mut self, id: &'static str, cx: &mut Context<Self>) {
+        use agent_screen_mcp::install;
+        if self.agents_busy.is_some() || self.agents_preview.is_some() {
+            return;
+        }
+        let Some(client) = install::client(id) else {
+            return;
+        };
+        self.agents_busy = Some(id);
+        self.agent_errors.retain(|(c, _)| *c != id);
+        self.push_setup(cx);
+        cx.spawn(async move |shell, cx| {
+            let failed: Vec<(&'static str, String)> = cx
+                .background_spawn(async move {
+                    let exe = std::env::current_exe().unwrap_or_default();
+                    install::uninstall(&exe, &agents_env(), Some(&[client]), false)
+                        .into_iter()
+                        .filter_map(|r| r.result.err().map(|e| (r.client.id, e)))
+                        .collect()
+                })
+                .await;
+            let _ = shell.update(cx, |shell, cx| {
+                shell.agents_busy = None;
+                shell.agent_errors.extend(failed);
+                shell.probe_agents(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Show the config file of a client whose config can't be read.
+    pub fn reveal_config(&self, id: &'static str) {
+        if let Some(client) = agent_screen_mcp::install::client(id) {
+            let _ = std::process::Command::new("/usr/bin/open")
+                .arg("-R")
+                .arg(client.config(&agents_env()))
+                .spawn();
+        }
+    }
+
+    pub fn copy_snippet(
+        &mut self,
+        kind: agent_screen_mcp::install::Snippet,
+        cx: &mut Context<Self>,
+    ) {
+        let exe = std::env::current_exe().unwrap_or_default();
+        native::copy(&agent_screen_mcp::install::snippet(kind, &exe));
+        self.snippet_copied = Some(kind);
+        self.push_setup(cx);
+    }
+
+    pub fn copy_test_prompt(&mut self, cx: &mut Context<Self>) {
+        native::copy(setup::TEST_PROMPT());
+        self.prompt_copied = true;
+        self.push_setup(cx);
+    }
+
+    /// The Agents section's rows, as the probe last read them, live or
+    /// configured by whether one of the client's sessions loaded the tools
+    /// from this app process.
+    fn agent_rows(&self) -> Option<Vec<setup::AgentRow>> {
+        let live = live_clients(&self.agent_ready);
+        let rows = self
+            .agents
+            .as_ref()?
+            .iter()
+            .map(|(client, state)| setup::AgentRow {
+                id: client.id,
+                name: client.name,
+                restart: client.restart,
+                pill: setup::Pill::of(state, live.contains(&client.id)),
+                error: self
+                    .agent_errors
+                    .iter()
+                    .rev()
+                    .find(|(id, _)| *id == client.id)
+                    .map(|(_, e)| e.clone()),
+            });
+        Some(rows.collect())
+    }
+
+    /// The test prompt: once permissions are ready and a client runs this
+    /// copy, until an agent loads the tools, then green for the rest of the
+    /// run.
+    fn test_prompt(&mut self, ready: bool, configured: bool) -> setup::Prompt {
+        if let Some(agent) = self.agents_ready()
+            && self.prompt_shown
+        {
+            return setup::Prompt::Done(agent);
+        }
+        if ready && configured && self.agent_ready.is_empty() && self.tools_never {
+            self.prompt_shown = true;
+            return setup::Prompt::Waiting {
+                copied: self.prompt_copied,
+            };
+        }
+        setup::Prompt::Hidden
     }
 
     pub fn last_agent_ready(&self) -> Option<String> {
@@ -4802,8 +5109,30 @@ impl Shell {
             .tools_last
             .as_ref()
             .map(|(client, at)| (shown_client(client), crate::i18n::day(*at)));
-        let connecting = self.connecting;
         let Some(handle) = self.setup else { return };
+        let ready = status.complete() && !restart;
+        let rows = match self.agents_preview {
+            Some(surface) => Some(setup::preview_rows(surface)),
+            None => self.agent_rows(),
+        };
+        let configured = rows
+            .iter()
+            .flatten()
+            .any(|r| matches!(r.pill, setup::Pill::Live | setup::Pill::Configured));
+        let prompt = match self.agents_preview {
+            Some("setup-agents-prompt") => setup::Prompt::Waiting {
+                copied: self.prompt_copied,
+            },
+            Some("setup-agents-prompt-done") => setup::Prompt::Done("Claude Code".into()),
+            Some(_) => setup::Prompt::Hidden,
+            None => self.test_prompt(ready, configured),
+        };
+        let agents = setup::Agents {
+            rows,
+            busy: self.agents_busy,
+            copied: self.snippet_copied,
+            prompt,
+        };
         let registered = self.registered.clone();
         let notifications = self.notifications;
         let colorsync = (
@@ -4816,6 +5145,13 @@ impl Shell {
         let wallpaper = crate::mac::app::custom_wallpaper();
         let reports_on = self.reports.automatic;
         let spaces_shared = self.spaces_shared || self.spaces_preview;
+        let temporary = if self.location_preview {
+            Some(agent_screen_model::location::Temporary::DiskImage)
+        } else {
+            self.location.temporary()
+        };
+        let moving = self.moving.clone();
+        let reset = self.reset.clone();
         if handle
             .update(cx, |setup, _, cx| {
                 setup.aerospace = aerospace;
@@ -4823,6 +5159,9 @@ impl Shell {
                 setup.wallpaper = wallpaper;
                 setup.reports_on = reports_on;
                 setup.spaces_shared = spaces_shared;
+                setup.temporary = temporary;
+                setup.moving = moving;
+                setup.reset = reset;
                 setup.status = status;
                 setup.notifications = notifications;
                 (setup.colorsync, setup.colorsync_busy, setup.colorsync_error) = colorsync;
@@ -4831,7 +5170,7 @@ impl Shell {
                 setup.restart = restart;
                 setup.agent = agent;
                 setup.earlier = earlier;
-                setup.connecting = connecting;
+                setup.agents = agents;
                 setup.registered = registered;
                 cx.notify();
             })
@@ -6382,3 +6721,32 @@ Agent Screen 0.1.41 (e3ac2970127c)
 ### MCP client and agent
 
 codex-mcp-client 0.50.0";
+
+#[cfg(test)]
+mod onboarding_tests {
+    use super::*;
+
+    #[test]
+    fn live_comes_only_from_this_runs_sessions() {
+        assert!(live_clients(&[]).is_empty());
+        assert_eq!(
+            live_clients(&["Claude Code".into(), "Agent".into(), "cursor-vscode".into()]),
+            vec!["claude-code", "cursor"]
+        );
+    }
+
+    #[test]
+    fn client_hooks_write_only_under_a_test_home() {
+        let home = || Some(std::ffi::OsString::from("/tmp/agents-home"));
+        assert_eq!(
+            agents_home_for(true, home()),
+            Some(std::path::PathBuf::from("/tmp/agents-home"))
+        );
+        // No hooks, no variable, empty or relative: the user's home, and
+        // the hooks refuse.
+        assert_eq!(agents_home_for(false, home()), None);
+        assert_eq!(agents_home_for(true, None), None);
+        assert_eq!(agents_home_for(true, Some("".into())), None);
+        assert_eq!(agents_home_for(true, Some("rel/home".into())), None);
+    }
+}

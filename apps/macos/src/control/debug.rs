@@ -17,7 +17,7 @@ use std::time::Duration;
 
 /// Test hooks: in debug builds, or with `AGENTSCREEN_DEBUG=1` for measuring a
 /// release build.
-pub(super) fn enabled() -> bool {
+pub(crate) fn enabled() -> bool {
     cfg!(debug_assertions) || std::env::var_os("AGENTSCREEN_DEBUG").is_some_and(|v| v == "1")
 }
 
@@ -299,6 +299,56 @@ pub(super) async fn handle(
             })
             .detach();
             Ok(json!({}))
+        }
+        // Test hook: Move to Applications from `from` into the folder `to`,
+        // as the banner's button runs it, without opening the copy. The
+        // e2e instance only, and never into an Applications folder.
+        "debugMoveApp" => {
+            let from = std::path::PathBuf::from(p.string("from").unwrap_or_default());
+            let to = std::path::PathBuf::from(p.string("to").unwrap_or_default());
+            let replace = p.0.get("replace").and_then(Value::as_bool).unwrap_or(false);
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            let applications = to.starts_with("/Applications")
+                || home.is_some_and(|h| to.starts_with(h.join("Applications")));
+            if agent_screen_mcp::endpoint::instance().as_deref() != Some("e2e")
+                || applications
+                || !to.is_absolute()
+                || !from.is_absolute()
+            {
+                return Some(Err(ControlError::invalid(
+                    "debugMoveApp needs the e2e instance and absolute paths outside Applications",
+                )));
+            }
+            use crate::mac::relocate::{MoveError, move_to};
+            Ok(match off(cx, move || move_to(&from, &to, replace)).await {
+                Ok(dest) => json!({ "moved": dest.display().to_string() }),
+                Err(MoveError::Exists(dest)) => json!({ "exists": dest.display().to_string() }),
+                Err(MoveError::Failed(error)) => json!({ "error": error }),
+            })
+        }
+        // Test hook: Reset Permissions' helper for `bundleId` and
+        // `bundlePath`, waiting for `pid`, with the stand-ins the e2e
+        // instance names in AGENTSCREEN_TCCUTIL and AGENTSCREEN_OPEN. The
+        // app doesn't quit. Refused without both stand-ins.
+        "debugResetHelper" => {
+            use crate::mac::permissions::{reset_commands, reset_tools, spawn_reset};
+            let stand_ins = std::env::var_os("AGENTSCREEN_TCCUTIL").is_some()
+                && std::env::var_os("AGENTSCREEN_OPEN").is_some();
+            if agent_screen_mcp::endpoint::instance().as_deref() != Some("e2e") || !stand_ins {
+                return Some(Err(ControlError::invalid(
+                    "debugResetHelper needs the e2e instance with AGENTSCREEN_TCCUTIL and AGENTSCREEN_OPEN",
+                )));
+            }
+            let id = p.string("bundleId").unwrap_or_default();
+            let bundle = std::path::PathBuf::from(p.string("bundlePath").unwrap_or_default());
+            let pid = p.int("pid").unwrap_or(0) as u32;
+            reset_tools()
+                .and_then(|tools| {
+                    reset_commands(&id, &bundle, pid, &tools).map_err(|e| e.to_string())
+                })
+                .and_then(|script| spawn_reset(&script).map(|()| script.steps))
+                .map(|steps| json!({ "steps": steps }))
+                .map_err(ControlError::invalid)
         }
         "debugInputObserver" => debug_input_observer(p, cx),
         // The Help Card's width and its buttons' bounds at the last paint.

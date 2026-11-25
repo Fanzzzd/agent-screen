@@ -327,6 +327,7 @@ pub const SCRIPTS: &[Script] = &[
     script("placebrowser", &[Windows, Browser], Full, Agent, 1),
     script("placeheld", &[Windows], Full, Agent, 2),
     script("placesize", &[Windows], Core, Agent, 1),
+    script("onboarding", &[Settings], Full, Hook, 0).hands_off().env(&[("E2E_NOW", "1")]),
     script("pointer", &[Viewer], Full, Hook, 2)
         .manual("it records the Agent Pointer to judge by eye and checks nothing"),
     script("realfront", &[InputQueue, AgentInput, Browser], Full, Real, 1).hands_off(),

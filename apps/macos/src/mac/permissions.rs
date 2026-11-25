@@ -10,6 +10,7 @@
 
 use super::cg;
 use crate::i18n::t;
+pub use agent_screen_model::tcc_reset::{Script, Tools, reset_commands};
 use objc2_core_graphics::{CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess};
 use std::ffi::{CString, c_void};
 use std::sync::OnceLock;
@@ -194,13 +195,14 @@ pub fn open_pane(p: Permission) {
 
 /// Start a fresh copy of the app once this one has quit, then quit.
 pub fn relaunch() {
-    let Some(bundle) = std::env::current_exe().ok().and_then(|exe| {
-        exe.ancestors()
-            .find(|p| p.extension().is_some_and(|e| e == "app"))
-            .map(|p| p.to_path_buf())
-    }) else {
-        return;
-    };
+    if let Some(bundle) = super::relocate::bundle() {
+        relaunch_bundle(&bundle);
+    }
+}
+
+/// Open `bundle` at Settings once this process has exited: the caller
+/// quits next.
+pub fn relaunch_bundle(bundle: &std::path::Path) {
     let pid = std::process::id();
     // --setup: the new process shows the setup window again, at the step
     // after the permissions.
@@ -210,4 +212,91 @@ pub fn relaunch() {
         .args(["-c", &script])
         .arg(bundle)
         .spawn();
+}
+
+/// The running bundle's identifier, empty when macOS gives none.
+pub fn bundle_id() -> String {
+    objc2_foundation::NSBundle::mainBundle()
+        .bundleIdentifier()
+        .map(|id| id.to_string())
+        .unwrap_or_default()
+}
+
+/// The programs Reset Permissions runs: macOS's own, or in a build with
+/// test hooks and a named instance the stand-ins AGENTSCREEN_TCCUTIL
+/// (required) and AGENTSCREEN_OPEN name (`tcc_reset::tools_for`).
+pub fn reset_tools() -> Result<Tools, String> {
+    let var = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty());
+    agent_screen_model::tcc_reset::tools_for(
+        var("AGENTSCREEN_INSTANCE").is_some(),
+        crate::control::debug_methods(),
+        var("AGENTSCREEN_TCCUTIL").map(Into::into),
+        var("AGENTSCREEN_OPEN").map(Into::into),
+    )
+}
+
+/// The processes of this bundle that run as an app, other than the `mcp`
+/// pipes: what LaunchServices lists for `bundle_id`, and processes of the
+/// bundle's executable with no arguments or `--setup`.
+pub fn running_pids(bundle_id: &str) -> Vec<u32> {
+    use objc2_app_kit::NSRunningApplication;
+    let mut pids: Vec<u32> = if bundle_id.is_empty() {
+        Vec::new()
+    } else {
+        NSRunningApplication::runningApplicationsWithBundleIdentifier(
+            &objc2_foundation::NSString::from_str(bundle_id),
+        )
+        .iter()
+        .map(|app| app.processIdentifier() as u32)
+        .collect()
+    };
+    if let Ok(exe) = std::env::current_exe() {
+        let exe = exe.to_string_lossy();
+        for pattern in [format!("^{exe}$"), format!("^{exe} --setup$")] {
+            let out = std::process::Command::new("/usr/bin/pgrep")
+                .args(["-f", &pattern])
+                .output();
+            if let Ok(out) = out {
+                pids.extend(
+                    String::from_utf8_lossy(&out.stdout)
+                        .lines()
+                        .filter_map(|l| l.trim().parse::<u32>().ok()),
+                );
+            }
+        }
+    }
+    pids.sort_unstable();
+    pids.dedup();
+    pids
+}
+
+/// The helper for this process: resets this bundle's Screen Recording,
+/// Accessibility and Input Monitoring entries once it has quit, then
+/// opens it at Settings.
+pub fn reset_script() -> Result<Script, String> {
+    let bundle = super::relocate::bundle().unwrap_or_default();
+    let tools = reset_tools()?;
+    reset_commands(&bundle_id(), &bundle, std::process::id(), &tools).map_err(|e| e.to_string())
+}
+
+/// Start `script` apart from this process, which it outlives.
+pub fn spawn_reset(script: &Script) -> Result<(), String> {
+    use std::os::unix::process::CommandExt;
+    log::info!("reset permissions after exit: {:?}", script.steps);
+    std::process::Command::new(&script.program)
+        .args(&script.args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        // Its own process group: quitting the app doesn't take it along.
+        .process_group(0)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// Reset Permissions: start the helper; the caller then quits, which
+/// ends every Agent Display.
+pub fn reset_and_relaunch() -> Result<(), String> {
+    spawn_reset(&reset_script()?)
 }

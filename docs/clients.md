@@ -6,7 +6,7 @@ Some calls wait for the user: `wait_for_control`, `request_help`, `request_contr
 
 ## Connect from the command line
 
-`AgentScreen mcp install` registers the server with every client below that this Mac has, by editing the client's own config file. Settings' **Connect…** does the same. After it, start a new session in the client; Claude Desktop needs a full quit and reopen.
+`AgentScreen mcp install` registers the server with every client below that this Mac has, by editing the client's own config file. Settings' **Connect All Detected** does the same, and its Agents list shows each client's state with a Connect, Fix Path or Disconnect button. After it, start a new session in the client; Claude Desktop needs a full quit and reopen.
 
 ```sh
 AS="/Applications/Agent Screen.app/Contents/MacOS/AgentScreen"

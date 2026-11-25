@@ -31,7 +31,7 @@ brew trust fanzzzd/agent-screen
 brew install --cask agent-screen
 ```
 
-macOS 15 (Sequoia) or later · Apple-notarized DMG also on [GitHub Releases](https://github.com/Fanzzzd/agent-screen/releases/latest) · Then open Agent Screen and press **Connect…** in Settings (or see [full install steps](#install)).
+macOS 15 (Sequoia) or later · Apple-notarized DMG also on [GitHub Releases](https://github.com/Fanzzzd/agent-screen/releases/latest) · Then open Agent Screen and press **Connect All Detected** in Settings (or see [full install steps](#install)).
 
 ![You work in your editor and spreadsheet while agents grab your pointer. Agent Screen moves each agent onto a display of its own, and your pointer stays put. One agent asks for help with a sign-in; you take over, sign in and hand it back.](docs/media/demo.gif)
 
@@ -76,8 +76,8 @@ Built-in computer use drives your real mouse and keyboard, so you stop working w
 
    Agent Screen updates itself. It downloads a new version in the background and installs it once no Agent Display is open, so it never ends an agent's work. **Restart to Update…** in the menu bar icon's menu installs it sooner, and **Check for Updates…** checks now.
 
-2. Open Agent Screen. Its Settings window asks for Screen & System Audio Recording and Accessibility. Both stay on this Mac. Settings works from the keyboard: Tab moves between buttons, Return or Space presses one, Escape closes it.
-3. Connect your agents. Press **Connect…** in Settings (right-click the menu bar icon and choose **Settings…**), or run:
+2. Open Agent Screen. Opened from the disk image or Downloads, Settings first asks you to move it: **Move to Applications…** copies it there and opens the copy, since permissions and agent connections set up from a temporary place stop working once the app moves. Its Settings window asks for Screen & System Audio Recording and Accessibility. Both stay on this Mac. Settings works from the keyboard: Tab moves between buttons, Return or Space presses one, Escape closes it.
+3. Connect your agents. Settings lists every agent client it finds on your Mac with its state: live now, configured, an old path left by another copy, not connected, or a config it can't read and leaves alone. Press **Connect All Detected**, or a row's **Connect**, **Fix Path** or **Disconnect** (right-click the menu bar icon and choose **Settings…**), or run:
 
    ```sh
    "/Applications/Agent Screen.app/Contents/MacOS/AgentScreen" mcp install
@@ -103,7 +103,7 @@ Built-in computer use drives your real mouse and keyboard, so you stop working w
 
    Or copy [skills/agent-screen](skills/agent-screen) into the agent's skills folder, such as `~/.agents/skills`. For an agent without skills, paste [docs/agents/AGENTS.md](docs/agents/AGENTS.md) into the project's `AGENTS.md` or `CLAUDE.md`. The skill is that file with a description on top.
 
-Then ask your agent something like "Use Agent Screen to open Calculator on your own display and work out 12 × 34." Start a new session after connecting, so the agent loads the tools. Once it has, Settings and the menu name the agent, and after a restart they say which agent last loaded the tools, and on which day. For another MCP client, **Copy MCP Config** in Settings copies an `"agent-screen"` server entry with `command` and `args` to paste into its JSON config, and **Client Guide** opens docs/clients.md for clients that use another format. If Agent Screen isn't running, it starts when the agent's client connects.
+Then ask your agent something like "Use Agent Screen to open Calculator on your own display and work out 12 × 34." Start a new session after connecting, so the agent loads the tools. Once it has, Settings and the menu name the agent, and after a restart they say which agent last loaded the tools, and on which day. Until an agent has, Settings shows this prompt with a **Copy** button, and the row turns green when the first session loads the tools. For another MCP client, **Other MCP Clients** in Settings copies the server's config as `mcpServers` JSON, OpenCode JSON, Codex TOML or the command line, and **Client Guide** opens docs/clients.md. If Agent Screen isn't running, it starts when the agent's client connects.
 
 ## Agent tools
 
@@ -177,7 +177,7 @@ Agent Screen runs on your Mac and collects no telemetry. It checks GitHub for up
 For a bug, collect diagnostics in the failing session and follow [Reporting bugs](docs/REPORTING_BUGS.md). The guide covers stale MCP clients and older builds too.
 
 - **The agent has no Agent Screen tools.** Start a new session after connecting; a running session doesn't load new MCP servers. `claude mcp get agent-screen` shows whether Claude Code has it.
-- **Tools fail with a permissions error after an update.** macOS ties the grants to the app's signature. The menu, which opens when you right-click the menu bar icon, then shows **Finish Setup: Allow …**. Choose it, and in each list it opens switch Agent Screen off and on. If the row still says Off 30 seconds after the pane opened, the helper beside System Settings adds a second step: if the switch is already on, remove Agent Screen from the list with − and drag its icon in again, since macOS may be holding an entry for another copy of the app.
+- **Tools fail with a permissions error after an update.** macOS ties the grants to the app's signature. The menu, which opens when you right-click the menu bar icon, then shows **Finish Setup: Allow …**. Choose it, and in each list it opens switch Agent Screen off and on. If the row still says Off 30 seconds after the pane opened, macOS may be holding an entry for another copy of the app: press **Reset & Reopen…** on that row. It clears only Agent Screen's Screen Recording, Accessibility and Input Monitoring entries, ends open Agent Displays and reopens Settings so you can turn them on again. **Reset Permissions…** beside the Permissions title, and `AgentScreen permissions reset` in Terminal, do the same at any time.
 - **Tools say Agent Screen isn't running.** The agent's client starts it when it connects, and the next tool call starts it again if it quit. If that fails, open `/Applications/Agent Screen.app` once yourself.
 - **An agent's tools act like an older version after an update.** The tools run in the app, so every session uses the updated app from its next call. A session started before version 0.1.39 keeps the MCP process it started with, which still works, until you restart its MCP connection (`/mcp` in Claude Code) or start a new session.
 - **The agent says you closed its display.** Closing a display from Peek or the Viewer tells its agent to stop and ask you before it makes another. Tell it to go on, and it creates a new one.

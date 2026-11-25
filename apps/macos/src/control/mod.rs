@@ -1,5 +1,8 @@
 pub mod agent;
 mod debug;
+
+/// Test hooks: debug builds, or AGENTSCREEN_DEBUG=1.
+pub(crate) use debug::enabled as debug_methods;
 pub mod front_hold;
 mod front_queue;
 pub mod server;

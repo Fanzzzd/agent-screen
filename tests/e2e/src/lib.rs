@@ -1359,7 +1359,7 @@ pub fn restore(before: &Snapshot) {
 
 // MARK: The app
 
-fn binary_of(app: &Path) -> String {
+pub fn binary_of(app: &Path) -> String {
     format!("{}/Contents/MacOS/AgentScreen", app.display())
 }
 

@@ -552,3 +552,61 @@ fn json_output_survives_a_path_that_isnt_utf8() {
     assert!(codex["config"].as_str().unwrap().contains("codex-\u{fffd}"));
     assert!(serde_json::from_str::<serde_json::Value>(&run("uninstall", &["--json"]).text).is_ok());
 }
+
+#[test]
+fn sessions_are_matched_to_their_client_by_name() {
+    let id = |info: &str| client_for_info(info).map(|c| c.id);
+    for (info, want) in [
+        ("Claude Code", "claude-code"),
+        ("claude-code", "claude-code"),
+        ("claude-ai", "claude-desktop"),
+        ("Codex", "codex"),
+        ("codex-mcp-client", "codex"),
+        ("cursor-vscode", "cursor"),
+        ("Cursor", "cursor"),
+        ("antigravity-client", "antigravity"),
+        ("gemini-cli-mcp-client", "gemini-cli"),
+        ("opencode", "opencode"),
+        ("Visual Studio Code", "vscode"),
+        ("github-copilot-cli", "vscode"),
+        ("windsurf-client", "windsurf"),
+        ("Devin", "devin"),
+        ("Zed", "zed"),
+        ("Cline", "cline"),
+        ("Roo Code", "roo-code"),
+        ("goose", "goose"),
+    ] {
+        assert_eq!(id(info), Some(want), "{info}");
+    }
+    for info in ["", "Agent", "test", "my-own-client"] {
+        assert_eq!(id(info), None, "{info}");
+    }
+}
+
+#[test]
+fn each_snippet_is_the_entry_the_registry_writes() {
+    let exe = Path::new(EXE);
+    let json: serde_json::Value = serde_json::from_str(&snippet(Snippet::Json, exe)).unwrap();
+    assert_eq!(json["mcpServers"]["agent-screen"]["command"], EXE);
+    assert_eq!(
+        json["mcpServers"]["agent-screen"]["args"],
+        serde_json::json!(["mcp"])
+    );
+    let opencode: serde_json::Value =
+        serde_json::from_str(&snippet(Snippet::OpenCode, exe)).unwrap();
+    assert!(opencode.to_string().contains(EXE));
+    let toml: toml_edit::DocumentMut = snippet(Snippet::Toml, exe).parse().unwrap();
+    assert_eq!(
+        toml["mcp_servers"]["agent-screen"]["command"].as_str(),
+        Some(EXE)
+    );
+    assert_eq!(snippet(Snippet::Command, exe), format!("'{EXE}' mcp\n"));
+    assert_eq!(
+        snippet(Snippet::Command, Path::new("/x/it's/AgentScreen")),
+        "'/x/it'\\''s/AgentScreen' mcp\n"
+    );
+    // The development build's entry keeps its own name.
+    let dev: serde_json::Value =
+        serde_json::from_str(&snippet(Snippet::Json, Path::new(DEV))).unwrap();
+    assert!(dev["mcpServers"]["agent-screen-dev"].is_object());
+}
