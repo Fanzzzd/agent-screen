@@ -1117,13 +1117,10 @@ async fn handle_one(
                 }
             };
             // Ended because the user closed it: the agent should stop.
-            let closed = woken.resolution == Resolution::Ended
-                && core.read_with(cx, |c, _| {
-                    c.displays.closed_by_user.contains(&id)
-                        || c.displays
-                            .get(id)
-                            .is_some_and(|d| d.ended == Some(EndReason::ClosedByUser))
-                });
+            let ended = (woken.resolution == Resolution::Ended)
+                .then(|| core.read_with(cx, |c, _| c.displays.ended_reason(id)))
+                .flatten();
+            let closed = ended == Some(EndReason::ClosedByUser);
             // An MCP server built before resolutions reads these flags.
             let (help_open, control_asked) = core.read_with(cx, |c, _| {
                 c.displays.get(id).map_or((false, false), |d| {
@@ -1140,6 +1137,11 @@ async fn handle_one(
                 .read_with(cx, |c, _| c.displays.get(id).is_some_and(|d| d.takeover))
                 .then(|| crate::mac::ime::user_idle().floor() as u64);
             let mut out = woken.to_json(closed);
+            if let Some(reason) = ended {
+                out["endedReason"] = json!(reason.tag());
+                out["endedMessage"] =
+                    json!(agent_screen_model::ended::ended_message(id, reason, true));
+            }
             out["helpOpen"] = json!(help_open);
             out["controlAsked"] = json!(control_asked);
             out["userIdleSeconds"] = json!(idle);
@@ -2622,13 +2624,18 @@ pub(super) fn usable(
         };
         let mine = named.as_ref().or_else(|| c.sessions.get(&connection));
         let owner = d.owner.as_ref().map(|o| &o.session_key);
-        if mine.is_none() || owner != mine {
+        let own = mine.is_some() && owner == mine;
+        // An ended display says why to anyone, so an agent whose client
+        // restarted its MCP server learns its earlier session ended (#326).
+        if let Some(reason) = d.ended
+            && (!own || !matches!(method, "endDisplay" | "waitForControl"))
+        {
+            return Err(ended_error(id, reason, own));
+        }
+        if !own {
             return Err(ControlError::not_found(format!(
                 "display {id} belongs to another session; call create_display to get yours"
             )));
-        }
-        if d.is_ended() && !matches!(method, "endDisplay" | "waitForControl") {
-            return Err(ended_error(id, d.ended == Some(EndReason::ClosedByUser)));
         }
         Ok(())
     })
@@ -7296,9 +7303,8 @@ async fn settle(
     id: DisplayId,
     cx: &mut AsyncApp,
 ) -> Result<windows::Window, ControlError> {
-    let ended = || ControlError::ended(format!("display {id} has ended"));
     if !takes_windows(core, id, cx) {
-        return Err(ended());
+        return Err(ended_during(core, id, cx));
     }
     claim(core, id, target, Origin::Launched, cx);
     // AeroSpace may take a placed window back to its own layout a moment
@@ -7315,7 +7321,7 @@ async fn settle(
     let mut last_error = None;
     for _ in 0..12 {
         if !takes_windows(core, id, cx) {
-            return Err(ended());
+            return Err(ended_during(core, id, cx));
         }
         // An app given a file may close the window it opened first and show
         // the document in another, as Pages does importing text: follow the
@@ -8671,16 +8677,20 @@ pub(super) fn display(
     let id = p
         .int("displayId")
         .ok_or_else(|| ControlError::invalid("displayId is required"))? as DisplayId;
+    let named = p.string("sessionKey").filter(|k| !k.is_empty());
+    let own = |key: Option<&String>| named.is_some() && key == named.as_ref();
     core.read_with(cx, |c, _| match c.displays.get(id) {
-        None if c.displays.retired.contains(&id) => {
-            Err(ended_error(id, c.displays.closed_by_user.contains(&id)))
-        }
-        None => Err(ControlError::not_found(format!(
-            "display {id} does not exist; call create_display again"
-        ))),
-        Some(d) if live && d.is_ended() => {
-            Err(ended_error(id, d.ended == Some(EndReason::ClosedByUser)))
-        }
+        None => match c.displays.endings.get(id) {
+            Some(e) => Err(ended_error(id, e.reason, own(e.session_key.as_ref()))),
+            None => Err(ControlError::not_found(format!(
+                "display {id} does not exist; call create_display again"
+            ))),
+        },
+        Some(d) if live && let Some(reason) = d.ended => Err(ended_error(
+            id,
+            reason,
+            own(d.owner.as_ref().map(|o| &o.session_key)),
+        )),
         Some(_) => Ok(id),
     })
 }
@@ -8957,16 +8967,22 @@ async fn adopt_opened(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) {
     }
 }
 
-/// The error for a call on an ended display. One the user closed means
-/// they want the agent to stop.
-fn ended_error(id: DisplayId, by_user: bool) -> ControlError {
-    ControlError::ended(if by_user {
-        format!(
-            "the user closed display {id}, so stop working on screen; ask the user before you call create_display again"
-        )
-    } else {
-        format!("display {id} has ended; call create_display for a new one")
-    })
+/// The error for a call on an ended display: why it ended and what to do
+/// (#326). One the user closed means they want the agent to stop. `own`:
+/// the asking session is the one the display belonged to.
+fn ended_error(id: DisplayId, reason: EndReason, own: bool) -> ControlError {
+    ControlError::ended(agent_screen_model::ended::ended_message(id, reason, own))
+}
+
+/// The error for the asking session's own display that ended during its
+/// call.
+fn ended_during(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) -> ControlError {
+    match core.read_with(cx, |c, _| c.displays.ended_reason(id)) {
+        Some(reason) => ended_error(id, reason, true),
+        None => ControlError::ended(format!(
+            "display {id} has ended; call create_display for a new one"
+        )),
+    }
 }
 
 pub(super) async fn target(
@@ -9258,13 +9274,12 @@ async fn wait_for_change(
     let mut unanswered = 0;
     let waited = |started: Instant| (started.elapsed().as_secs_f64() * 10.0).round() / 10.0;
     let outcome = loop {
-        let (closed, ended, by_user) = core.read_with(cx, |c, _| {
+        let (closed, ended, reason) = core.read_with(cx, |c, _| {
             let d = c.displays.get(id);
             (
                 c.closed.contains(&connection),
                 d.is_none_or(|d| d.is_ended()),
-                c.displays.closed_by_user.contains(&id)
-                    || d.is_some_and(|d| d.ended == Some(EndReason::ClosedByUser)),
+                c.displays.ended_reason(id),
             )
         });
         if closed {
@@ -9273,7 +9288,10 @@ async fn wait_for_change(
         if ended {
             return Ok(json!({
                 "outcome": "displayEnded",
-                "closedByUser": by_user,
+                "closedByUser": reason == Some(EndReason::ClosedByUser),
+                "endedReason": reason.map(EndReason::tag),
+                "endedMessage": reason
+                    .map(|r| agent_screen_model::ended::ended_message(id, r, true)),
                 "waitedSeconds": waited(started),
             }));
         }

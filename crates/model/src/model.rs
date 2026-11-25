@@ -4,10 +4,11 @@
 //! `H` is the platform's handle that keeps a display alive. Tests use `()`.
 
 use crate::access::{Access, Authority, Refusal};
+use crate::ended::Endings;
 pub use crate::request::{ControlAsk, Wait};
 use crate::request::{NamedWindow, Requests};
 use crate::session::Sessions;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 
 pub type DisplayId = u32;
 pub type WindowId = u32;
@@ -513,12 +514,10 @@ pub struct Displays<H> {
     /// The Agent Sessions using these displays: each one's live displays
     /// and Window Access (ADR 0016).
     pub sessions: Sessions,
-    /// Ended displays that are gone. The agent still gets "ended", not
-    /// "does not exist", for them.
-    pub retired: HashSet<DisplayId>,
-    /// Of those, the ones the user closed: the agent should stop, not make
-    /// another display.
-    pub closed_by_user: HashSet<DisplayId>,
+    /// Why the last displays ended, and whose they were, kept after they
+    /// are gone: the agent gets the reason, not "does not exist", for them
+    /// (#326).
+    pub endings: Endings,
     /// Optional shared snapshot updated automatically whenever window records
     /// or display states change (L3).
     owners_sink: Option<std::sync::Arc<std::sync::RwLock<BTreeMap<WindowId, DisplayId>>>>,
@@ -529,8 +528,7 @@ impl<H> Default for Displays<H> {
         Self {
             list: Vec::new(),
             sessions: Sessions::default(),
-            retired: HashSet::new(),
-            closed_by_user: HashSet::new(),
+            endings: Endings::new(),
             owners_sink: None,
         }
     }
@@ -830,8 +828,7 @@ impl<H> Displays<H> {
         handle: H,
     ) {
         // A spare display comes back under its old id.
-        self.retired.remove(&id);
-        self.closed_by_user.remove(&id);
+        self.endings.forget(id);
         let mut owner = owner;
         if let Some(owner) = &mut owner {
             // Numbered as it joins, so parallel create_display calls of
@@ -875,12 +872,6 @@ impl<H> Displays<H> {
         if let Some(owner) = &display.owner {
             self.sessions.leave(&owner.session_key, id);
         }
-        if display.is_ended() {
-            self.retired.insert(id);
-        }
-        if display.ended == Some(EndReason::ClosedByUser) {
-            self.closed_by_user.insert(id);
-        }
         display.requests.end();
         self.publish_recorded_owners();
         Some(display)
@@ -892,6 +883,16 @@ impl<H> Displays<H> {
 
     pub fn get_mut(&mut self, id: DisplayId) -> Option<&mut Display<H>> {
         self.list.iter_mut().find(|d| d.id == id)
+    }
+
+    /// Why display `id` ended: a listed one's own reason, or the one kept
+    /// after it was removed. `None` while it is live, or for an id this
+    /// app never ended.
+    pub fn ended_reason(&self, id: DisplayId) -> Option<EndReason> {
+        match self.get(id) {
+            Some(d) => d.ended,
+            None => self.endings.get(id).map(|e| e.reason),
+        }
     }
 
     /// A task title none of the session's live displays has: "Book
@@ -1051,6 +1052,7 @@ impl<H> Displays<H> {
         display.ended = Some(reason);
         display.takeover = false;
         display.pointer = None;
+        self.endings.record(id, reason, key.clone());
         if let Some(key) = key {
             self.sessions.leave(&key, id);
             // Only the agent's own end_display hands its apps on. A display
@@ -2575,7 +2577,10 @@ mod tests {
             Wait::Now(w) if w.resolution == crate::request::Resolution::Ended
         ));
         d.remove(7);
-        assert!(d.retired.contains(&7));
+        let ending = d.endings.get(7).expect("kept after removal");
+        assert_eq!(ending.reason, EndReason::Disconnected);
+        assert_eq!(ending.session_key.as_deref(), Some("s"));
+        assert_eq!(d.ended_reason(7), Some(EndReason::Disconnected));
     }
 
     #[test]
@@ -2702,8 +2707,7 @@ mod tests {
             "the first reason stands"
         );
         assert!(d.remove(7).is_some());
-        assert!(d.retired.contains(&7));
-        assert!(d.closed_by_user.contains(&7));
+        assert_eq!(d.ended_reason(7), Some(EndReason::ClosedByUser));
     }
 
     #[test]

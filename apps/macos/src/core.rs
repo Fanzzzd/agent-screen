@@ -1095,6 +1095,12 @@ impl Core {
             return;
         }
         for &id in ended {
+            if let Some(d) = self.displays.get(id)
+                && let Some(reason) = d.ended
+            {
+                let key = d.owner.as_ref().map(|o| o.session_key.as_str());
+                crate::lifecycle::ended(id, reason, key);
+            }
             #[cfg(debug_assertions)]
             crate::mac::cg::clear_user_stage(id);
             crate::web::expire_display(id);

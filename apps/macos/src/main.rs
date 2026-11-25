@@ -236,6 +236,9 @@ impl log::Log for Logger {
         if self.enabled(record.metadata()) && (all || record.target().starts_with("AgentScreen")) {
             let line = format!("Agent Screen {}: {}\n", record.level(), record.args());
             log_writer().write_line(line);
+            if record.target() == lifecycle::TARGET {
+                lifecycle::line(&record.args().to_string());
+            }
         }
     }
 
@@ -250,6 +253,11 @@ impl Logger {
     fn allows(level: log::Level, target: &str, debug: bool, diagnostics: bool) -> bool {
         if target == mac::click_diagnostics::TARGET {
             return diagnostics && level <= log::Level::Info;
+        }
+        // displays.log's events, such as why a display ended, in every
+        // build.
+        if target == lifecycle::TARGET {
+            return level <= log::Level::Info;
         }
         level
             <= if debug {
@@ -776,6 +784,16 @@ mod logger_tests {
             false,
             false
         ));
+    }
+
+    #[test]
+    fn display_events_log_in_release_builds_without_debug_lines() {
+        use log::Level::{Debug, Info};
+        let target = lifecycle::TARGET;
+        assert!(target.starts_with("AgentScreen"));
+        assert!(Logger::allows(Info, target, false, false));
+        assert!(!Logger::allows(Debug, target, false, false));
+        assert!(!Logger::allows(Info, "AgentScreen::core", false, false));
     }
 
     #[test]

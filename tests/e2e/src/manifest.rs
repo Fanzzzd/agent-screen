@@ -289,6 +289,7 @@ pub const SCRIPTS: &[Script] = &[
     script("displaychange", &[Peek, Displays], Full, Hook, 2).hands_off(),
     script("electron", &[AgentInput, Windows, Browser], Full, Agent, 1).hands_off(),
     script("electronfront", &[AgentInput, Browser], Full, Agent, 1).hands_off(),
+    script("endedreason", &[Displays], Full, Agent, 1),
     script("endhandover", &[WindowAccess, Windows], Full, Hook, 3),
     script("filedrag", &[InputQueue, AgentInput, Browser], Full, Real, 1).hands_off(),
     script("firstclick", &[Browser, AgentInput], Full, Agent, 1),
