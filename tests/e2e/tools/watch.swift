@@ -3,9 +3,11 @@
 // and sets the status to "Status: sending"; 3 s later "Sending…" goes,
 // "Delivered" comes and the status reads "Status: sent". Tick raises
 // "Count N", outside Messages, after 1 s. Clear removes "Delivered" after
-// 1.5 s. Close closes the window after 1.5 s. Every button works through
-// accessibility, so a script presses it without the user's pointer. It
-// never makes itself the active app: the user may be typing.
+// 1.5 s. Hide hides the app after 1.5 s and shows it again, without
+// activating it, 6 s later. Close closes the window after 1.5 s. Every
+// button works through accessibility, so a script presses it without the
+// user's pointer. It never makes itself the active app: the user may be
+// typing.
 import AppKit
 
 final class Group: NSView {
@@ -24,11 +26,11 @@ final class Delegate: NSObject, NSApplicationDelegate {
   var delivered: NSTextField?
 
   func applicationDidFinishLaunching(_ note: Notification) {
-    window = NSWindow(contentRect: NSRect(x: 200, y: 200, width: 420, height: 260),
+    window = NSWindow(contentRect: NSRect(x: 200, y: 200, width: 520, height: 260),
                       styleMask: [.titled, .closable], backing: .buffered, defer: false)
     window.title = "watch"
     window.isReleasedWhenClosed = false
-    let content = NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 260))
+    let content = NSView(frame: NSRect(x: 0, y: 0, width: 520, height: 260))
     let hello = NSTextField(labelWithString: "hello")
     hello.frame = NSRect(x: 10, y: 100, width: 300, height: 20)
     messages.addSubview(hello)
@@ -37,7 +39,7 @@ final class Delegate: NSObject, NSApplicationDelegate {
     count.frame = NSRect(x: 240, y: 80, width: 160, height: 20)
     content.addSubview(status)
     content.addSubview(count)
-    for (i, title) in ["Send", "Tick", "Clear", "Close"].enumerated() {
+    for (i, title) in ["Send", "Tick", "Clear", "Hide", "Close"].enumerated() {
       let button = NSButton(title: title, target: self, action: #selector(press(_:)))
       button.frame = NSRect(x: 20 + i * 98, y: 20, width: 90, height: 32)
       content.addSubview(button)
@@ -77,6 +79,11 @@ final class Delegate: NSObject, NSApplicationDelegate {
       later(1.5) {
         self.delivered?.removeFromSuperview()
         self.delivered = nil
+      }
+    case "Hide":
+      later(1.5) {
+        NSApp.hide(nil)
+        self.later(6) { NSApp.unhideWithoutActivation() }
       }
     default:
       later(1.5) { self.window.close() }

@@ -219,12 +219,25 @@ pub fn all_ids() -> std::collections::HashSet<u32> {
 unsafe extern "C" {
     /// SLSCopySpacesForWindows, through the shim.
     fn SSWindowSpaceCount(window: u32) -> i32;
+    /// SLSCopySpacesForWindows and SLSCopyManagedDisplaySpaces, through
+    /// the shim.
+    fn SSWindowSpaces(window: u32, unshown: *mut i32) -> i32;
 }
 
 /// How many Spaces hold a window, -1 when SkyLight can't say: none for one
 /// its app ordered out, as a closed main window it keeps (#221).
 pub fn space_count(window: u32) -> i32 {
     unsafe { SSWindowSpaceCount(window) }
+}
+
+/// How many Spaces hold a window, and how many of those no display shows
+/// now; each -1 when SkyLight can't say. A window its app closed but keeps
+/// can stay on the Space it was on, which a display still shows: only a
+/// window on a Space no display shows is on another Space.
+pub fn spaces(window: u32) -> (i32, i32) {
+    let mut unshown = -1;
+    let held = unsafe { SSWindowSpaces(window, &mut unshown) };
+    (held, unshown)
 }
 
 /// Ids of the on-screen windows, without their descriptions: a fraction of

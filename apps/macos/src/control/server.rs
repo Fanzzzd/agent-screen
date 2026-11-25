@@ -53,6 +53,15 @@ impl ControlError {
             blocked: None,
         }
     }
+    /// The window the call names is the display's and still open, but
+    /// shows nowhere: minimized, of a hidden app, or on another Space.
+    pub fn off_screen(m: impl Into<String>) -> Self {
+        Self {
+            code: "off_screen",
+            message: m.into(),
+            blocked: None,
+        }
+    }
     pub fn ended(m: impl Into<String>) -> Self {
         Self {
             code: "ended",

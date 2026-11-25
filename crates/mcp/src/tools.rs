@@ -434,6 +434,8 @@ pub fn definitions() -> Vec<Value> {
                 "List app windows on the display, front to back, with ids and bounds in screenshot pixels; scale is",
                 "screenshot pixels per point. origin says how a window got here; disposition is your set_disposition",
                 "verdict or null. offDisplay: true means the window is yours but not on the display: call place_window.",
+                "offScreen means the window is yours and open but shows nowhere: minimized, hidden (its app is hidden) or",
+                "otherSpace (on a macOS Space the display isn't showing); the note says what to do.",
                 "With strays: true it lists instead your apps' windows that opened off the display, and your windows that left it.",
                 "It never lists the user's windows; to ask for one, call place_window with the app's name.",
             ],
@@ -598,8 +600,8 @@ pub fn definitions() -> Vec<Value> {
                 "get_window_state, act_on_element or an earlier wait), so a change that landed before the call fires at once.",
                 "It fires on changed (any element appearing, changing or going away), or on appears or disappears: more or",
                 "fewer elements matching role and text than that tree had. It returns the conditions that fired and the",
-                "changes (+ new, ~ changed, - gone), or timed_out; also when the window closes or leaves your display, or the",
-                "display ends. timeout_seconds is 30 by default and at most 120: call again to keep waiting. A read sees at most",
+                "changes (+ new, ~ changed, - gone), or timed_out; also when the window closes, leaves your display or goes out",
+                "of sight (minimized, its app hidden, or on another macOS Space), or the display ends. timeout_seconds is 30 by default and at most 120: call again to keep waiting. A read sees at most",
                 "400 elements: in a long window, such as a chat",
                 "history, pass root to watch the part you need.",
             ],
@@ -988,6 +990,10 @@ async fn create_display(
     } else if orphans.is_some() {
         out["note"] = json!(RESTARTED);
     }
+    // "Displays have separate Spaces" is off: what a desktop switch does.
+    if let Some(spaces) = reply.get("spaces").filter(|v| v.is_string()) {
+        out["spaces"] = spaces.clone();
+    }
     Ok(Output::Object(out))
 }
 
@@ -1331,6 +1337,12 @@ async fn act_on_element(a: &Args<'_>, control: &Control) -> Result<Output, Contr
                     error.message
                 ))]))
             }
+            // The action took its own window out of sight, as Minimize
+            // does: it ran, and the window is still open.
+            Err(error) if error.code == "off_screen" => Ok(Output::Content(vec![text(format!(
+                "Done. Afterwards {}.",
+                error.message
+            ))])),
             // OK, Save or Close took its own window away: that is the
             // action working, so show what is on the display now. A
             // window the user gave to another session says so itself.
@@ -1923,8 +1935,20 @@ fn wait_output(display: i64, window: i64, root: Option<usize>, reply: &Object) -
             )
         }
         Some("windowClosed") => format!(
-            "window_closed after {waited} s: window {window} closed, or its app hid or minimized it, during the wait. See list_windows."
+            "window_closed after {waited} s: window {window} closed during the wait. See list_windows."
         ),
+        // Still open, but out of sight: never reported as closed.
+        Some(outcome @ ("windowOnOtherSpace" | "windowMinimized" | "windowHidden")) => {
+            let word = match outcome {
+                "windowOnOtherSpace" => "window_on_other_space",
+                "windowMinimized" => "window_minimized",
+                _ => "window_hidden",
+            };
+            let advice = agent_screen_model::presence::Presence::of_outcome(outcome)
+                .and_then(|p| p.advice(window, display as u32))
+                .unwrap_or_default();
+            format!("{word} after {waited} s: {advice}.")
+        }
         Some("windowLeft") => format!(
             "window_left after {waited} s: window {window} moved off display {display} and shows elsewhere. See list_windows with strays: true."
         ),
@@ -2649,6 +2673,12 @@ mod tests {
         for (outcome, start) in [
             (json!({ "outcome": "windowClosed" }), "window_closed"),
             (json!({ "outcome": "windowLeft" }), "window_left"),
+            (
+                json!({ "outcome": "windowOnOtherSpace" }),
+                "window_on_other_space",
+            ),
+            (json!({ "outcome": "windowMinimized" }), "window_minimized"),
+            (json!({ "outcome": "windowHidden" }), "window_hidden"),
             (json!({ "outcome": "rootGone" }), "root_gone"),
             (json!({ "outcome": "displayEnded" }), "display_ended"),
         ] {
@@ -2661,6 +2691,21 @@ mod tests {
             &reply(json!({ "outcome": "displayEnded", "closedByUser": true })),
         );
         assert!(closed.contains("the user closed display 3"), "{closed}");
+        // A window out of sight is never called closed, and the agent is
+        // told what to ask the user.
+        let space = wait_output(
+            3,
+            5,
+            None,
+            &reply(json!({ "outcome": "windowOnOtherSpace" })),
+        );
+        assert!(
+            space.contains("still open") && space.contains("doesn't switch Spaces"),
+            "{space}"
+        );
+        assert!(!space.contains("closed"), "{space}");
+        let hidden = wait_output(3, 5, None, &reply(json!({ "outcome": "windowHidden" })));
+        assert!(hidden.contains("Ask the user to show the app"), "{hidden}");
     }
 
     #[test]

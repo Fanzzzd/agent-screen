@@ -204,3 +204,94 @@ int SSWindowSpaceCount(CGWindowID windowID) {
     return count;
 }
 
+
+// The window server's Space management mode: 1 while each display has its
+// own Spaces ("Displays have separate Spaces" on), 0 while one Space spans
+// every display, -1 if SkyLight can't say. Reads only.
+int SSSpaceManagementMode(void) {
+    SSResolve();
+    typedef int32_t (*ModeFn)(uint32_t);
+    ModeFn mode = (ModeFn)dlsym(RTLD_DEFAULT, "SLSGetSpaceManagementMode");
+    if (mode == NULL || SS.mainConnectionID == NULL) return -1;
+    return mode(SS.mainConnectionID());
+}
+
+// The display identifier of each entry of the window server's managed
+// Spaces list, one per line, into `out` of `size` bytes: a display UUID
+// per display with separate Spaces, one "Main" for all without. The
+// number of entries, or -1 if SkyLight can't say. Reads only.
+int SSManagedDisplayIdentifiers(char *out, int size) {
+    SSResolve();
+    typedef CFArrayRef (*CopyFn)(uint32_t);
+    CopyFn copy = (CopyFn)dlsym(RTLD_DEFAULT, "SLSCopyManagedDisplaySpaces");
+    if (copy == NULL || SS.mainConnectionID == NULL || out == NULL || size < 1) return -1;
+    CFArrayRef list = copy(SS.mainConnectionID());
+    if (list == NULL) return -1;
+    NSMutableArray<NSString *> *names = [NSMutableArray array];
+    for (id entry in (__bridge NSArray *)list) {
+        if (![entry isKindOfClass:[NSDictionary class]]) continue;
+        id name = ((NSDictionary *)entry)[@"Display Identifier"];
+        [names addObject:[name isKindOfClass:[NSString class]] ? name : @""];
+    }
+    CFRelease(list);
+    const char *joined = [[names componentsJoinedByString:@"\n"] UTF8String];
+    strlcpy(out, joined ? joined : "", (size_t)size);
+    return (int)names.count;
+}
+
+// The "Displays have separate Spaces" setting as written for the next
+// login: com.apple.spaces spans-displays, 1 when one Space spans every
+// display, 0 when not, -1 when unset (macOS's default, separate Spaces).
+int SSSpansDisplaysSetting(void) {
+    CFPropertyListRef value = CFPreferencesCopyAppValue(CFSTR("spans-displays"), CFSTR("com.apple.spaces"));
+    if (value == NULL) return -1;
+    int result = -1;
+    if (CFGetTypeID(value) == CFBooleanGetTypeID()) {
+        result = CFBooleanGetValue((CFBooleanRef)value) ? 1 : 0;
+    } else if (CFGetTypeID(value) == CFNumberGetTypeID()) {
+        int n = 0;
+        if (CFNumberGetValue((CFNumberRef)value, kCFNumberIntType, &n)) result = n != 0 ? 1 : 0;
+    }
+    CFRelease(value);
+    return result;
+}
+
+// How many Spaces hold `windowID`, as SSWindowSpaceCount, -1 if SkyLight
+// can't say; and into `unshown`, how many of them no display shows now,
+// -1 if SkyLight can't say. A window its app closed but keeps stays on
+// the Space it was on, which a display still shows; a window on another
+// Space is on one no display shows. Reads only.
+int SSWindowSpaces(CGWindowID windowID, int *unshown) {
+    SSResolve();
+    if (unshown != NULL) *unshown = -1;
+    typedef CFArrayRef (*CopySpacesFn)(uint32_t, int32_t, CFArrayRef);
+    typedef CFArrayRef (*CopyManagedFn)(uint32_t);
+    CopySpacesFn copySpaces = (CopySpacesFn)dlsym(RTLD_DEFAULT, "SLSCopySpacesForWindows");
+    CopyManagedFn copyManaged = (CopyManagedFn)dlsym(RTLD_DEFAULT, "SLSCopyManagedDisplaySpaces");
+    if (copySpaces == NULL || SS.mainConnectionID == NULL) return -1;
+    NSArray *windows = @[@(windowID)];
+    // 0x7: the current Spaces, the others, and the user's.
+    CFArrayRef spaces = copySpaces(SS.mainConnectionID(), 0x7, (__bridge CFArrayRef)windows);
+    if (spaces == NULL) return -1;
+    NSArray *held = (__bridge_transfer NSArray *)spaces;
+    if (unshown != NULL && copyManaged != NULL) {
+        CFArrayRef managed = copyManaged(SS.mainConnectionID());
+        if (managed != NULL) {
+            NSMutableSet *shown = [NSMutableSet set];
+            for (id entry in (__bridge NSArray *)managed) {
+                if (![entry isKindOfClass:[NSDictionary class]]) continue;
+                id current = ((NSDictionary *)entry)[@"Current Space"];
+                if (![current isKindOfClass:[NSDictionary class]]) continue;
+                id space = ((NSDictionary *)current)[@"id64"];
+                if ([space isKindOfClass:[NSNumber class]]) [shown addObject:space];
+            }
+            CFRelease(managed);
+            int count = 0;
+            for (id space in held) {
+                if (![shown containsObject:space]) count++;
+            }
+            *unshown = count;
+        }
+    }
+    return (int)held.count;
+}

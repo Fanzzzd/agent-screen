@@ -66,7 +66,9 @@ impl PutAway {
     /// What a window off screen is, from what Accessibility and the window
     /// server say: whether Accessibility lists it with the app's windows,
     /// whether it says the window is minimized and the app hidden, and how
-    /// many Spaces hold it, -1 when unknown. A window Accessibility doesn't
+    /// many Spaces no display shows hold it, -1 when unknown. A window its
+    /// app closed but keeps can stay on a Space a display shows, so it
+    /// counts none and reads as closed. A window Accessibility doesn't
     /// list can't be brought out, whatever else is true of it.
     pub fn of(listed: bool, minimized: bool, app_hidden: bool, spaces: i32) -> PutAway {
         match (listed, spaces) {

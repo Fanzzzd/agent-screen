@@ -42,6 +42,19 @@ impl Window {
         })
     }
 
+    /// JSON for `listWindows` of a window the display holds that shows
+    /// nowhere now, with why (`Presence::off_screen`): no bounds, since it
+    /// has none on the display.
+    pub fn off_screen_json(&self, why: &str) -> Value {
+        json!({
+            "windowId": self.target.window_id,
+            "app": self.app,
+            "title": self.title,
+            "kind": self.kind_str(),
+            "offScreen": why,
+        })
+    }
+
     /// JSON serialized for `listWindows` on an Agent Display (`M2`): omits
     /// misleading coordinates and sets `offDisplay: true` when a recorded
     /// window sits outside its display's viewport.
@@ -227,6 +240,7 @@ use std::sync::{Arc, LazyLock, RwLock};
 
 use agent_screen_model::bring_out::{self, AppState, OtherWindow, Refusal, Step, Undo};
 use agent_screen_model::placement::PutAway;
+use agent_screen_model::presence::{ClosedMarks, Presence};
 use objc2_application_services::AXUIElement;
 
 /// Other apps' document windows that exist but aren't on screen, that
@@ -257,14 +271,25 @@ pub fn put_away(mut keep: impl FnMut(&Window) -> bool) -> Vec<(Window, PutAway)>
 
 /// Why a window that exists isn't on screen. Blocking.
 pub fn why_away(target: WindowTarget) -> PutAway {
+    why_away_on(target, cg::spaces(target.window_id))
+}
+
+/// As `why_away`, with `cg::spaces` already read. Only Spaces no display
+/// shows count as another Space: a window its app closed but keeps stays
+/// on a Space a display shows. When SkyLight can't say which Spaces show,
+/// every Space holding it counts, as before.
+fn why_away_on(target: WindowTarget, (held, unshown): (i32, i32)) -> PutAway {
+    let spaces = if unshown >= 0 { unshown } else { held };
     let element = ax::window_element(target);
     let minimized = element.as_ref().is_some_and(|w| ax::is_minimized(w));
-    PutAway::of(
-        element.is_some(),
-        minimized,
-        super::app::is_hidden(target.pid),
-        cg::space_count(target.window_id),
-    )
+    let hidden = super::app::is_hidden(target.pid);
+    let why = PutAway::of(element.is_some(), minimized, hidden, spaces);
+    log::debug!(
+        "window {} off screen: {why:?} (listed {}, minimized {minimized}, app hidden {hidden}, on {held} Spaces, {unshown} unshown)",
+        target.window_id,
+        element.is_some()
+    );
+    why
 }
 
 /// The app of `target` as the rules for bringing a window out read it
@@ -627,7 +652,53 @@ pub fn on_display(display: DisplayId) -> Vec<Window> {
     let windows = all();
     let online = online_display_areas();
     let owners = recorded_owners_snapshot();
-    filter_on_display(display, &windows, &online, &owners)
+    let on = filter_on_display(display, &windows, &online, &owners);
+    note_seen(display, &on);
+    on
+}
+
+/// The display each window was last listed on by `on_display`, and the
+/// window as listed, so a window that goes out of sight without closing is
+/// still that display's to describe (`held_off_screen`), whether or not a
+/// record holds it: a window an app opened straight onto the display has
+/// none. The window server's lists leave out a hidden or minimized window,
+/// so this is where its app and title come from. A window leaves it when
+/// it closes, shows elsewhere, or goes home (`forget_seen`).
+static LAST_SEEN: LazyLock<std::sync::Mutex<HashMap<u32, (DisplayId, Window)>>> =
+    LazyLock::new(Default::default);
+
+/// Recorded windows `held_off_screen` found closed, skipped until they
+/// show on screen again.
+static CLOSED: LazyLock<std::sync::Mutex<ClosedMarks>> = LazyLock::new(Default::default);
+
+fn note_seen(display: DisplayId, windows: &[Window]) {
+    let Ok(mut seen) = LAST_SEEN.lock() else {
+        return;
+    };
+    // Closed windows leave at the next look; this bounds what never does.
+    if seen.len() > 4096 {
+        seen.clear();
+    }
+    for w in windows {
+        seen.insert(w.target.window_id, (display, w.clone()));
+    }
+}
+
+/// The window went home or to the user: it is no display's to describe.
+pub fn forget_seen(window: u32) {
+    if let Ok(mut seen) = LAST_SEEN.lock() {
+        seen.remove(&window);
+    }
+}
+
+/// The window as display `display` last listed it.
+pub fn seen_on(display: DisplayId, window: u32) -> Option<Window> {
+    LAST_SEEN
+        .lock()
+        .ok()?
+        .get(&window)
+        .filter(|(d, _)| *d == display)
+        .map(|(_, w)| w.clone())
 }
 
 /// Whether `window_id` is currently on `display` (honoring `RECORDED_OWNERS`,
@@ -647,6 +718,104 @@ pub fn window_presence(display: DisplayId, window_id: u32) -> (bool, bool) {
     let owners = recorded_owners_snapshot();
     let here = window_belongs_on_display(display, window_id, &bounds, &online, &owners);
     (here, !here)
+}
+
+/// Where `target`, a window display `display` holds, is now
+/// (`agent_screen_model::presence`). Blocking: one on-screen scan; off
+/// screen, one SkyLight call, whose Space count says whether the window
+/// still exists (the window server's lists leave out a hidden or
+/// minimized window), and for one that does an Accessibility read.
+pub fn presence(display: DisplayId, target: WindowTarget) -> Presence {
+    let (here, elsewhere) = window_presence(display, target.window_id);
+    off_screen_presence(here, elsewhere, target)
+}
+
+fn off_screen_presence(here: bool, elsewhere: bool, target: WindowTarget) -> Presence {
+    let spaces = std::cell::Cell::new((-1, -1));
+    Presence::of(
+        here,
+        elsewhere,
+        || {
+            spaces.set(cg::spaces(target.window_id));
+            // On no Space it is gone. -1: SkyLight can't say, so
+            // Accessibility is asked.
+            spaces.get().0 != 0
+        },
+        || why_away_on(target, spaces.get()),
+    )
+}
+
+/// The windows display `display` holds, by the records' `recorded` or as
+/// it last listed them, other than `shown` and `not_its`, that are open but
+/// show nowhere: minimized, of a hidden app, or on a Space no display
+/// shows (`agent_screen_model::presence`). Nothing to ask while every one
+/// shows; then one id scan, and for each one off screen a SkyLight call,
+/// and an Accessibility read for one that still exists. A window found
+/// closed is skipped until it shows on screen again (`ClosedMarks`).
+/// Blocking.
+pub fn held_off_screen(
+    display: DisplayId,
+    recorded: &[WindowTarget],
+    shown: &HashSet<u32>,
+    not_its: &HashSet<u32>,
+) -> Vec<(Window, Presence)> {
+    let mut held: BTreeMap<u32, Option<Window>> =
+        recorded.iter().map(|t| (t.window_id, None)).collect();
+    if let Ok(seen) = LAST_SEEN.lock() {
+        for (w, (d, window)) in seen.iter() {
+            if *d == display {
+                held.insert(*w, Some(window.clone()));
+            }
+        }
+    }
+    held.retain(|w, _| !shown.contains(w) && !not_its.contains(w));
+    if held.is_empty() {
+        return Vec::new();
+    }
+    let on = cg::on_screen_ids();
+    {
+        let mut closed = CLOSED.lock().unwrap_or_else(|e| e.into_inner());
+        held.retain(|w, _| !closed.skip(*w, on.contains(w)));
+    }
+    let looked: Vec<(u32, Option<Window>, WindowTarget, Presence)> = held
+        .into_iter()
+        .filter_map(|(w, window)| {
+            let target = window
+                .as_ref()
+                .map(|w| w.target)
+                .or_else(|| recorded.iter().find(|t| t.window_id == w).copied())?;
+            let presence = off_screen_presence(false, on.contains(&w), target);
+            Some((w, window, target, presence))
+        })
+        .collect();
+    {
+        let mut closed = CLOSED.lock().unwrap_or_else(|e| e.into_inner());
+        for (w, _, _, presence) in &looked {
+            closed.note(*w, *presence);
+        }
+    }
+    looked
+        .into_iter()
+        .filter_map(|(w, window, target, presence)| {
+            let Some(_) = presence.off_screen() else {
+                // On screen elsewhere, or closed: no longer this display's
+                // to describe.
+                if matches!(presence, Presence::Elsewhere | Presence::Closed) {
+                    forget_seen(w);
+                }
+                return None;
+            };
+            let window = window.unwrap_or_else(|| Window {
+                target,
+                app: super::app::name(target.pid).unwrap_or_default(),
+                title: String::new(),
+                bounds: Rect::new(0.0, 0.0, 0.0, 0.0),
+                layer: 0,
+                off_display: false,
+            });
+            Some((window, presence))
+        })
+        .collect()
 }
 
 fn window_belongs_on_display(

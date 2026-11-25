@@ -68,6 +68,9 @@ pub struct Setup {
     pub wallpaper: Option<PathBuf>,
     /// Whether agents may report Agent Screen bugs (ADR 0024).
     pub reports_on: bool,
+    /// Every display shares one macOS Space ("Displays have separate
+    /// Spaces" off): a row says what that does and where to change it.
+    pub spaces_shared: bool,
     icon: Arc<gpui::Image>,
 }
 
@@ -103,6 +106,7 @@ impl Setup {
             pinned: Vec::new(),
             wallpaper: None,
             reports_on: true,
+            spaces_shared: false,
             icon,
         }
     }
@@ -199,6 +203,9 @@ impl Render for Setup {
             displays.push(self.wallpaper_row(&theme).into_any_element());
             if self.aerospace.is_some() || !self.pinned.is_empty() {
                 displays.push(self.aerospace_row(&theme).into_any_element());
+            }
+            if self.spaces_shared {
+                displays.push(self.spaces_row(&theme).into_any_element());
             }
         }
         let shell = self.shell.clone();
@@ -689,6 +696,40 @@ impl Setup {
             .into(),
             detail.into(),
             note,
+            action,
+            theme,
+        )
+    }
+
+    /// "Displays have separate Spaces" off, while it is: a desktop switch
+    /// takes agents' windows off their displays. Open Settings… opens
+    /// Desktop & Dock; Agent Screen never changes the setting.
+    fn spaces_row(&self, theme: &Theme) -> impl IntoElement {
+        let shell = self.shell.clone();
+        let action = key_button(
+            "setup-spaces",
+            t("Open Settings…", "打开设置…").into(),
+            None,
+            theme,
+            move |cx| tell(&shell, cx, |shell, cx| shell.open_spaces_settings(cx)),
+        )
+        .into_any_element();
+        item(
+            badge("icons/display.svg", theme.orange, false),
+            t("Displays Have Separate Spaces", "显示器具有单独的空间").into(),
+            t(
+                "Off: switching desktops moves agents' windows away",
+                "已关闭：切换桌面会移走 agent 的窗口",
+            )
+            .into(),
+            Some((
+                t(
+                    "Turn it on in Desktop & Dock > Mission Control, then log out",
+                    "请在“桌面与程序坞 > 调度中心”中打开，然后注销",
+                )
+                .to_string(),
+                theme.orange,
+            )),
             action,
             theme,
         )

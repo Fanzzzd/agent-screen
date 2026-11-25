@@ -9,6 +9,7 @@ use super::pointer;
 use super::recordings::Recordings;
 use super::report_card::{self, ReportCard};
 use super::setup::{self, Setup};
+use super::spaces_card::{self, SpacesCard};
 use super::stream::Streams;
 use super::viewer::{self, Sheet, Viewer, WindowMenu};
 use crate::core::Core;
@@ -230,6 +231,17 @@ pub struct Shell {
     report_shown: Option<report_card::Shown>,
     /// The card shows the whole report, not just its title.
     report_expanded: bool,
+    /// The Spaces card, and whether it shows.
+    spaces_card: Option<(WindowHandle<SpacesCard>, Retained<NSWindow>)>,
+    spaces_card_shown: bool,
+    /// Every display shares one macOS Space now ("Displays have separate
+    /// Spaces" off): Settings says so.
+    spaces_shared: bool,
+    /// The Spaces card waits to show: the first time the displays shared
+    /// one Space while an Agent Display was up, or a debugShow preview.
+    spaces_wanted: bool,
+    /// The card is a preview: Not Now marks nothing as seen.
+    spaces_preview: bool,
     /// Bug reports: the user's setting and consent, what waits for it and
     /// what was opened.
     pub reports: Reports,
@@ -580,6 +592,18 @@ fn open_panels(
     // Bar: its buttons leave the user's app in front.
     native::style_panel(&report_ns, native::LEVEL_POP_UP_MENU);
     native::set_keyable(&report_ns, false);
+    let spaces = {
+        let weak = weak.clone();
+        cx.open_window(panel_options(), move |_, cx| {
+            cx.new(|_| SpacesCard::new(weak))
+        })?
+    };
+    let spaces_ns = spaces
+        .update(cx, |_, window, _| native::ns_window(window))?
+        .expect("Spaces card window");
+    // Never takes the keyboard: its buttons leave the user's app in front.
+    native::style_panel(&spaces_ns, native::LEVEL_POP_UP_MENU);
+    native::set_keyable(&spaces_ns, false);
     let bar = {
         let (weak, core) = (weak.clone(), core.clone());
         cx.open_window(panel_options(), move |window, cx| {
@@ -612,8 +636,10 @@ fn open_panels(
         shell.viewer = Some((viewer, viewer_ns));
         shell.card = Some((card, card_ns));
         shell.report_card = Some((report, report_ns));
+        shell.spaces_card = Some((spaces, spaces_ns));
         shell.bar = Some((bar, bar_ns));
         shell.check_aerospace(cx);
+        shell.check_spaces(cx);
     });
     Ok(())
 }
@@ -859,6 +885,11 @@ impl Shell {
             report_card: None,
             report_shown: None,
             report_expanded: false,
+            spaces_card: None,
+            spaces_card_shown: false,
+            spaces_shared: false,
+            spaces_wanted: false,
+            spaces_preview: false,
             reports: crate::reports::load(),
             report_previews: HashSet::new(),
             waiting: None,
@@ -983,6 +1014,7 @@ impl Shell {
                 self.streams.update(cx, |s, cx| s.restart_misrouted(cx));
                 self.schedule_guard(cx);
                 self.schedule_regather(cx);
+                self.check_spaces(cx);
             }
             Native::ColorsChanged => {
                 super::theme::set_accent(native::accent());
@@ -1204,6 +1236,120 @@ impl Shell {
     fn sync_card(&mut self, cx: &mut Context<Self>) {
         self.sync_help_card(cx);
         self.sync_report_card(cx);
+        self.sync_spaces_card(cx);
+    }
+
+    // MARK: Spaces card
+
+    /// Read whether every display shares one Space, off the main thread,
+    /// and note it (`note_spaces`).
+    fn check_spaces(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let shared = cx
+                .background_executor()
+                .spawn(async { crate::mac::spaces::shared() })
+                .await;
+            let _ = this.update(cx, |shell, cx| shell.note_spaces(shared, cx));
+        })
+        .detach();
+    }
+
+    /// Every display shares one Space now, or not: Settings says so, and
+    /// the Spaces card shows once, while an Agent Display is up.
+    pub fn note_spaces(&mut self, shared: bool, cx: &mut Context<Self>) {
+        let changed = self.spaces_shared != shared;
+        self.spaces_shared = shared;
+        let displays = !self.core.read(cx).displays.list.is_empty();
+        if shared && displays && !self.spaces_wanted && !crate::mac::spaces::noticed() {
+            self.spaces_wanted = true;
+            self.spaces_preview = false;
+        }
+        self.sync_card(cx);
+        if changed {
+            self.push_setup(cx);
+        }
+    }
+
+    /// The Spaces card for `debugShow`, and its row in Settings. Marks
+    /// nothing as seen.
+    fn preview_spaces_card(&mut self, cx: &mut Context<Self>) {
+        self.spaces_wanted = true;
+        self.spaces_preview = true;
+        self.sync_card(cx);
+        self.push_setup(cx);
+    }
+
+    /// Not Now on the Spaces card: it doesn't come back.
+    pub fn dismiss_spaces_card(&mut self, cx: &mut Context<Self>) {
+        if !self.spaces_preview {
+            crate::mac::spaces::set_noticed();
+        }
+        self.spaces_wanted = false;
+        self.spaces_preview = false;
+        self.sync_card(cx);
+        self.push_setup(cx);
+    }
+
+    /// Open Desktop & Dock on the user's click, from the card or Settings.
+    pub fn open_spaces_settings(&mut self, cx: &mut Context<Self>) {
+        crate::mac::spaces::open_settings();
+        if self.spaces_wanted {
+            self.dismiss_spaces_card(cx);
+        }
+    }
+
+    /// Show the Spaces card when it waits and no other card or Peek shows,
+    /// or hide it.
+    fn sync_spaces_card(&mut self, _cx: &mut Context<Self>) {
+        let Some((_, window)) = self.spaces_card.clone() else {
+            return;
+        };
+        let want = self.spaces_wanted
+            && self.card_shown.is_none()
+            && self.report_shown.is_none()
+            && !self.peek_shown;
+        if want == self.spaces_card_shown {
+            return;
+        }
+        self.spaces_card_shown = want;
+        if !want {
+            native::order_out(&window);
+            return;
+        }
+        let Some((screen, _)) = self.host_screen() else {
+            log::debug!("spaces card: no screen to show it on");
+            self.spaces_card_shown = false;
+            return;
+        };
+        let (w, h) = (
+            f64::from(help_card::WIDTH),
+            f64::from(spaces_card::height()),
+        );
+        let anchor = self.anchor();
+        let (mid, top) = (
+            anchor.origin.x + anchor.size.width / 2.0,
+            anchor.origin.y - 6.0,
+        );
+        let x = (mid - w / 2.0)
+            .min(screen.origin.x + screen.size.width - w - 8.0)
+            .max(screen.origin.x + 8.0);
+        let frame = rect(x.round(), (top - h).round(), w, h);
+        native::later(move || {
+            native::set_alpha(&window, 0.0);
+            native::set_frame(&window, offset(frame, 10.0));
+            native::order_front(&window);
+            native::animate(&window, frame, 1.0, 0.24);
+        });
+    }
+
+    /// The Spaces card for `debugCard`.
+    pub fn debug_spaces(&self) -> serde_json::Value {
+        serde_json::json!({
+            "shown": self.spaces_card_shown,
+            "wanted": self.spaces_wanted,
+            "shared": self.spaces_shared,
+            "preview": self.spaces_preview,
+        })
     }
 
     /// Show the Help Card for the first open Help Request the user hasn't
@@ -2884,6 +3030,8 @@ impl Shell {
             // The Bug Report Card with a report from no agent, and its
             // buttons as a click presses them. Nothing opens.
             "report-card" => self.preview_report(cx),
+            "spaces-card" => self.preview_spaces_card(cx),
+            "spaces-card-later" => self.dismiss_spaces_card(cx),
             "report-card-open" | "report-card-later" => {
                 let id = self
                     .reports
@@ -3591,19 +3739,32 @@ impl Shell {
             .into_iter()
             .map(|target| {
                 let named = windows::find(target.window_id).map(|w| name(&w.app, &w.title));
-                (named, self.take_back(target, id, cx))
+                (named, target, self.take_back(target, id, cx))
             })
             .collect();
-        cx.spawn(async move |_, _| {
+        cx.spawn(async move |_, cx| {
             let mut stuck = Vec::new();
-            for (named, task) in tasks {
+            let mut stuck_ids = Vec::new();
+            for (named, window, task) in tasks {
                 if !task.await {
                     stuck.push(named);
+                    stuck_ids.push(window);
                 }
             }
             if stuck.is_empty() {
                 return;
             }
+            // A window on a Space the display isn't showing can't move
+            // until that Space shows; Agent Screen doesn't switch it.
+            let spaced = cx
+                .background_executor()
+                .spawn(async move {
+                    stuck_ids.into_iter().any(|target| {
+                        windows::presence(id, target)
+                            == agent_screen_model::presence::Presence::OtherSpace
+                    })
+                })
+                .await;
             let listed: Vec<String> = stuck.iter().flatten().cloned().collect();
             let names = if listed.is_empty() {
                 t("The window", "这个窗口").to_string()
@@ -3633,6 +3794,14 @@ impl Shell {
                         "它们仍在 agent 的显示器上，可再点“取回”重试。",
                     ),
                 )
+            };
+            let text = if spaced {
+                t(
+                    "It is on a desktop the agent's display isn't showing now. Show that desktop in Mission Control, then Take Back again.",
+                    "它在 agent 显示器当前未显示的桌面上。请在调度中心切换到那个桌面，再点“取回”。",
+                )
+            } else {
+                text
             };
             let text = if stuck.len() == 1 || listed.is_empty() {
                 text.to_string()
@@ -3690,6 +3859,8 @@ impl Shell {
         });
         // Nor does the agent's cold start of it count any more.
         crate::mac::catch::end_cold_start(id, target.pid);
+        // Nor is it the display's to describe once out of sight.
+        windows::forget_seen(target.window_id);
         // Keys typed in the Viewer must not follow the window home.
         let forwarder = self.core.update(cx, |core, _| core.forwarder(id));
         let main_name = main_screen_name();
@@ -4627,12 +4798,14 @@ impl Shell {
         let pinned: Vec<String> = self.conflicts.iter().map(|(w, _)| w.clone()).collect();
         let wallpaper = crate::mac::app::custom_wallpaper();
         let reports_on = self.reports.automatic;
+        let spaces_shared = self.spaces_shared || self.spaces_preview;
         if handle
             .update(cx, |setup, _, cx| {
                 setup.aerospace = aerospace;
                 setup.pinned = pinned;
                 setup.wallpaper = wallpaper;
                 setup.reports_on = reports_on;
+                setup.spaces_shared = spaces_shared;
                 setup.status = status;
                 setup.notifications = notifications;
                 (setup.colorsync, setup.colorsync_busy, setup.colorsync_error) = colorsync;

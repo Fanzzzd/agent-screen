@@ -2,10 +2,12 @@
 //! act_on_element's + / ~ / - form, or times out (#163). The Watch fixture
 //! changes itself seconds after a button press, which the script sends
 //! through act_on_element as an agent would: no pointer, no keyboard.
+//! Its Hide hides the app for a few seconds: a window out of sight is
+//! reported as hidden, not closed, and list_windows keeps it.
 //!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e waitchange
 //!
-//! One display; about 30 s.
+//! One display; about 40 s.
 
 use std::process::ExitCode;
 use std::time::Instant;
@@ -91,10 +93,11 @@ fn test(app: &std::path::Path) -> Result<()> {
     let button = |name: &str| {
         numbered(&state, &format!("button \"{name}\"")).with_context(|| format!("no {name} button"))
     };
-    let (send, tick, clear, close) = (
+    let (send, tick, clear, hide, close) = (
         button("Send")?,
         button("Tick")?,
         button("Clear")?,
+        button("Hide")?,
         button("Close")?,
     );
     let messages = numbered(&state, "group \"Messages\"").context("no Messages group")?;
@@ -177,6 +180,55 @@ fn test(app: &std::path::Path) -> Result<()> {
         "an unmet condition times out",
         text.starts_with("timed_out") && text.contains("no condition fired"),
         &text,
+    );
+
+    // Hide hides Watch 1.5 s later and shows it again 6 s after that,
+    // without activating it. The window is off screen, not closed: the wait
+    // says its app hid it, list_windows keeps it with offScreen, and
+    // get_window_state says why it can't read it.
+    press(hide, "none")?;
+    let hid = Instant::now();
+    let (text, took) =
+        wait(json!({ "appears": { "text": "never shown" }, "timeout_seconds": 10 }))?;
+    check(
+        "a window whose app hid ends the wait as hidden, not closed",
+        text.starts_with("window_hidden") && took < 6.0,
+        format!("{took:.1} s: {text}"),
+    );
+    let entry = |list: &ToolResult| {
+        list.get("windows")
+            .as_array()
+            .and_then(|ws| ws.iter().find(|w| w["windowId"] == window).cloned())
+    };
+    let listed = client.tool("list_windows", json!({ "display_id": id }))?;
+    println!("  list_windows while hidden: {}", listed.structured_content);
+    let hidden = entry(&listed);
+    check(
+        "list_windows keeps the hidden window, marked offScreen hidden",
+        hidden.as_ref().is_some_and(|w| w["offScreen"] == "hidden"),
+        format!("{hidden:?}"),
+    );
+    let state = client.tool("get_window_state", at(json!({ "image": false })))?;
+    println!("  get_window_state while hidden: {}", state.first_text());
+    check(
+        "get_window_state says the app is hidden, not that there is no window",
+        state.is_error && state.first_text().contains("hidden"),
+        state.first_text(),
+    );
+    // It shows again 7.5 s after the press.
+    let mut back = false;
+    while hid.elapsed().as_secs_f64() < 14.0 {
+        let list = client.tool("list_windows", json!({ "display_id": id }))?;
+        if entry(&list).is_some_and(|w| w.get("offScreen").is_none() && w.get("x").is_some()) {
+            back = true;
+            break;
+        }
+        sleep_ms(300);
+    }
+    check(
+        "the window shows on the display again once its app shows",
+        back,
+        format!("{:.1} s after Hide", hid.elapsed().as_secs_f64()),
     );
 
     // Close closes the window 1.5 s later, during the wait.

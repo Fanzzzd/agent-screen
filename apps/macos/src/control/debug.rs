@@ -718,8 +718,12 @@ fn debug_card(cx: &mut AsyncApp) -> Result<Value, ControlError> {
     let report = crate::ui::shell::current()
         .and_then(|shell| shell.read_with(cx, |shell, _| shell.debug_reports()).ok())
         .unwrap_or(Value::Null);
+    let spaces = crate::ui::shell::current()
+        .and_then(|shell| shell.read_with(cx, |shell, _| shell.debug_spaces()).ok())
+        .unwrap_or(Value::Null);
     Ok(json!({
         "report": report,
+        "spaces": spaces,
         "width": width,
         "buttons": buttons,
         "queueHeight": crate::ui::help_card::queue_height(),

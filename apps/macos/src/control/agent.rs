@@ -21,6 +21,7 @@ use agent_screen_model::bring_out::Refusal as BringOutRefusal;
 use agent_screen_model::held::{self, Held};
 use agent_screen_model::input_queue::Action;
 use agent_screen_model::placement::{self, AppSighting, Holder, NamedApp, PutAway, WindowSighting};
+use agent_screen_model::presence::Presence;
 use agent_screen_model::real_click;
 use agent_screen_model::request::{Answer, HelpAsked, Kind, NamedWindow, Resolution, Woken};
 use agent_screen_model::session::Orphans;
@@ -402,7 +403,18 @@ async fn handle_one(
         }
     };
     let result: Result<Value, ControlError> = match method {
-        "createDisplay" => create_display(&core, connection, &p, cx).await,
+        "createDisplay" => {
+            let mut reply = create_display(&core, connection, &p, cx).await?;
+            // "Displays have separate Spaces" off: the agent hears it with
+            // each display, and the user once, on a card (spaces).
+            if off(cx, crate::mac::spaces::shared).await {
+                reply["spaces"] = json!(agent_screen_model::spaces::SHARED_NOTE);
+                if let Some(shell) = crate::ui::shell::current() {
+                    let _ = shell.update(cx, |shell, cx| shell.note_spaces(true, cx));
+                }
+            }
+            Ok(reply)
+        }
         "recordStart" => {
             let id = display(&core, &p, true, cx)?;
             let label = core.read_with(cx, |c, _| {
@@ -676,15 +688,48 @@ async fn handle_one(
         }
         "listWindows" => {
             let id = display(&core, &p, false, cx)?;
-            let (records, started) = core.read_with(cx, |c, _| {
+            let (records, started, not_its) = core.read_with(cx, |c, _| {
                 c.displays
                     .get(id)
-                    .map(|d| (d.records.clone(), d.started.clone()))
+                    .map(|d| {
+                        // Windows the user took back or gave away: never
+                        // listed as the display's, wherever they are.
+                        let not_its: std::collections::HashSet<u32> =
+                            d.returned.iter().chain(d.given.keys()).copied().collect();
+                        (d.records.clone(), d.started.clone(), not_its)
+                    })
                     .unwrap_or_default()
             });
             let scale = display_scale(&core, id, cx);
-            let list: Vec<Value> = off(cx, move || windows::on_display(id))
-                .await
+            // The display's windows that show nowhere now stay listed, with
+            // why: minimized, their app hidden, or on another Space.
+            let recorded: Vec<_> = records.values().map(|r| r.target).collect();
+            let (shown, away) = off(cx, move || {
+                let shown = windows::on_display(id);
+                let ids = shown.iter().map(|w| w.target.window_id).collect();
+                let away = windows::held_off_screen(id, &recorded, &ids, &not_its);
+                (shown, away)
+            })
+            .await;
+            let advice: Vec<String> = away
+                .iter()
+                .filter_map(|(w, p)| p.advice(w.target.window_id as i64, id))
+                .map(|advice| format!("{advice}."))
+                .collect();
+            let away_json = away.iter().filter_map(|(w, p)| {
+                let mut json = w.off_screen_json(p.off_screen()?);
+                let record = records.get(&w.target.window_id);
+                let unrecorded = if started.contains(&w.target.pid) {
+                    "launched"
+                } else {
+                    "unknown"
+                };
+                json["origin"] = json!(record.map_or(unrecorded, |r| r.origin.as_str()));
+                json["disposition"] =
+                    json!(record.and_then(|r| r.disposition).map(Disposition::as_str));
+                Some(json)
+            });
+            let list: Vec<Value> = shown
                 .iter()
                 .map(|w| {
                     let mut json = w.display_json(scale);
@@ -701,11 +746,17 @@ async fn handle_one(
                         json!(record.and_then(|r| r.disposition).map(Disposition::as_str));
                     json
                 })
+                .chain(away_json)
                 .collect();
             let mut reply = json!({ "windows": list, "scale": scale });
             // list_windows shows the reply as it is: the note says it.
+            let mut notes = Vec::new();
             if let Some(given) = add_given(&core, id, &mut reply, cx) {
-                reply["note"] = json!(held::given_note(&given));
+                notes.push(held::given_note(&given));
+            }
+            notes.extend(advice);
+            if !notes.is_empty() {
+                reply["note"] = json!(notes.join(" "));
             }
             Ok(reply)
         }
@@ -8964,15 +9015,29 @@ async fn window_on(
     let window = p
         .int("windowId")
         .ok_or_else(|| ControlError::invalid("windowId is required"))?;
-    off(cx, move || windows::on_display(id))
-        .await
-        .into_iter()
-        .find(|w| w.target.window_id as i64 == window)
-        .ok_or_else(|| {
-            ControlError::not_found(format!(
-                "no window {window} on display {id}; see list_windows"
-            ))
-        })
+    let (found, presence) = off(cx, move || {
+        let found = windows::on_display(id)
+            .into_iter()
+            .find(|w| w.target.window_id as i64 == window);
+        // A window the display listed that shows nowhere now may still be
+        // open: say why, and what to ask the user. Asked only when it isn't
+        // on the display; any other window id stays a plain not_found.
+        let presence = match (&found, u32::try_from(window)) {
+            (None, Ok(w)) => windows::seen_on(id, w).map(|seen| windows::presence(id, seen.target)),
+            _ => None,
+        };
+        (found, presence)
+    })
+    .await;
+    if let Some(found) = found {
+        return Ok(found);
+    }
+    match presence.and_then(|p| p.advice(window, id)) {
+        Some(advice) => Err(ControlError::off_screen(advice)),
+        None => Err(ControlError::not_found(format!(
+            "no window {window} on display {id}; see list_windows"
+        ))),
+    }
 }
 
 fn modifiers(p: &Args) -> Result<crate::keychord::Modifiers, ControlError> {
@@ -9173,14 +9238,23 @@ async fn wait_for_change(
             }));
         }
         let window_id = target.window_id;
-        // Off the display and on screen elsewhere, it left; off screen, it
-        // closed, or its app hid or minimized it, which keeps its id.
+        // Off the display and on screen elsewhere, it left. Off screen, it
+        // closed, or it is still open: minimized, its app hidden, or on a
+        // Space the display isn't showing. Why is asked only then.
         let (here, elsewhere) = off(cx, move || windows::window_presence(id, window_id)).await;
         if !here {
-            return Ok(json!({
-                "outcome": if elsewhere { "windowLeft" } else { "windowClosed" },
-                "waitedSeconds": waited(started),
-            }));
+            let presence = if elsewhere {
+                Presence::Elsewhere
+            } else {
+                off(cx, move || windows::presence(id, target)).await
+            };
+            // Back on the display meanwhile: go on waiting.
+            if let Some(outcome) = presence.outcome() {
+                return Ok(json!({
+                    "outcome": outcome,
+                    "waitedSeconds": waited(started),
+                }));
+            }
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
         let read_root = root.as_ref().map(|r| ax::Sendable(r.get().clone()));
