@@ -275,6 +275,9 @@ Usage:
   AgentScreen colorsync setup | remove | reclaim
                           set it up or remove it (asks for an administrator password),
                           or run it now
+  AgentScreen permissions reset [--yes]
+                          clear Agent Screen's Screen Recording, Accessibility and Input
+                          Monitoring entries, then reopen it at Settings (ends open displays)
   AgentScreen diagnostics [--json]
                           report this CLI and the responding app without starting it
                           for the failing MCP process, use get_diagnostics in that session
@@ -311,6 +314,97 @@ fn colorsync(command: Option<&str>) {
         Err(error) => {
             eprintln!("Agent Screen colorsync: {error}");
             std::process::exit(1);
+        }
+    }
+}
+
+/// `AgentScreen permissions reset [--yes]`: Settings' Reset Permissions
+/// from Terminal. A running app runs the helper and quits; otherwise this
+/// process starts it. Returns the exit code.
+fn permissions_cli(args: &[String]) -> i32 {
+    use std::io::{BufRead, Write};
+    let yes = match args {
+        [reset] if reset == "reset" => false,
+        [reset, yes] if reset == "reset" && (yes == "--yes" || yes == "-y") => true,
+        _ => {
+            eprintln!("Usage: AgentScreen permissions reset [--yes]");
+            return 2;
+        }
+    };
+    // Refused here, as for a bare binary with no bundle id, nothing runs.
+    if let Err(error) = mac::permissions::reset_script() {
+        eprintln!("Agent Screen permissions: {error}");
+        return 1;
+    }
+    if !yes {
+        print!(
+            "This clears only Agent Screen's Screen Recording, Accessibility and Input Monitoring entries ({}), ends any open Agent Displays, and reopens Settings so you can turn them on again.\nReset? [y/N] ",
+            mac::permissions::bundle_id()
+        );
+        let _ = std::io::stdout().flush();
+        let mut answer = String::new();
+        let _ = std::io::stdin().lock().read_line(&mut answer);
+        if !matches!(answer.trim(), "y" | "Y" | "yes") {
+            println!("Nothing was reset.");
+            return 1;
+        }
+    }
+    // The user confirmed above; the running app asks again in its own
+    // Settings, so another process on the socket can't reset alone.
+    let socket_gone =
+        match std::os::unix::net::UnixStream::connect(agent_screen_mcp::endpoint::socket_path()) {
+            Ok(mut socket) => {
+                let request = serde_json::json!({
+                    "id": 1,
+                    "method": "resetPermissions",
+                    "params": { "confirmed": true },
+                });
+                let mut line = String::new();
+                let replied = writeln!(socket, "{request}")
+                    .and_then(|()| std::io::BufReader::new(&socket).read_line(&mut line));
+                let reply: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
+                if replied.is_err() || reply.get("error").is_some_and(|e| !e.is_null()) {
+                    eprintln!(
+                        "Agent Screen permissions: the running app refused: {}",
+                        reply["error"]["message"].as_str().unwrap_or("no reply")
+                    );
+                    return 1;
+                }
+                if reply["result"]["status"] == "confirm" {
+                    println!(
+                        "Agent Screen's Settings asks too: press Reset & Reopen there to reset."
+                    );
+                } else {
+                    println!("Agent Screen quits, resets its permissions and opens Settings.");
+                }
+                return 0;
+            }
+            Err(e) => matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            ),
+        };
+    // No app answers: this process runs the helper, which waits for it,
+    // only when no copy of the app is alive, or it would reset under it.
+    let running = mac::permissions::running_pids(&mac::permissions::bundle_id());
+    if !agent_screen_model::tcc_reset::may_run_without_app(
+        socket_gone,
+        &running,
+        std::process::id(),
+    ) {
+        eprintln!(
+            "Agent Screen permissions: Agent Screen is running but doesn't answer (pid {running:?}). Quit it, open Agent Screen first, then try again."
+        );
+        return 1;
+    }
+    match mac::permissions::reset_and_relaunch() {
+        Ok(()) => {
+            println!("Agent Screen's permissions reset now; Settings opens next.");
+            0
+        }
+        Err(error) => {
+            eprintln!("Agent Screen permissions: {error}");
+            1
         }
     }
 }
@@ -373,6 +467,10 @@ fn main() {
         Some("colorsync") => {
             colorsync(std::env::args().nth(2).as_deref());
             return;
+        }
+        Some("permissions") => {
+            let args: Vec<String> = lossy_args(std::env::args_os().skip(2));
+            std::process::exit(permissions_cli(&args));
         }
         Some(other) if other != "mcp" && other != "--setup" && !other.starts_with("-psn") => {
             eprint!("Agent Screen: unknown argument {other}\n\n{USAGE}");
@@ -635,6 +733,17 @@ mod cli_tests {
     #[test]
     fn help_lists_the_mcp_commands() {
         assert!(super::USAGE.contains(agent_screen_mcp::install::cli::USAGE));
+        assert!(super::USAGE.contains("AgentScreen permissions reset [--yes]"));
+    }
+
+    #[test]
+    fn permissions_takes_only_reset() {
+        assert_eq!(super::permissions_cli(&[]), 2);
+        assert_eq!(super::permissions_cli(&["wipe".into()]), 2);
+        assert_eq!(
+            super::permissions_cli(&["reset".into(), "--force".into()]),
+            2
+        );
     }
 }
 

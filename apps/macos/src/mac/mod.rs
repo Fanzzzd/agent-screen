@@ -25,6 +25,7 @@ pub mod permissions;
 pub mod playback;
 pub mod real_input;
 pub mod recording;
+pub mod relocate;
 pub mod screenshot;
 pub mod shared_app;
 pub mod spaces;

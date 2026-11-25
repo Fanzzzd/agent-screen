@@ -12,6 +12,7 @@ use crate::mac::aerospace::Ignoring;
 use crate::mac::native::{self, MenuAction, Native};
 use crate::mac::notify;
 use crate::mac::permissions::{Permission, Status};
+use agent_screen_model::location::Temporary;
 use gpui::{
     AnyElement, App, Context, FocusHandle, FontWeight, Hsla, InteractiveElement, IntoElement,
     KeyDownEvent, MouseButton, ObjectFit, ParentElement, Render, Role, SharedString,
@@ -25,6 +26,8 @@ pub const WIDTH: f32 = 520.;
 /// The height it opens at; it then fits its content, which grows by a
 /// line when a row explains what to do in System Settings.
 pub const HEIGHT: f32 = 640.;
+/// The tallest it gets; its content scrolls past that.
+pub const MAX_HEIGHT: f32 = 760.;
 
 pub struct Setup {
     shell: WeakEntity<Shell>,
@@ -33,6 +36,8 @@ pub struct Setup {
     focused: bool,
     /// Centered once its height fits the content.
     centered: std::rc::Rc<std::cell::Cell<bool>>,
+    /// The content's own height at the last paint, scrolled or not.
+    content_height: std::rc::Rc<std::cell::Cell<gpui::Pixels>>,
     pub status: Status,
     /// The permission whose pane the user was sent to.
     pub waiting: Option<Permission>,
@@ -47,10 +52,8 @@ pub struct Setup {
     /// The client that last loaded the tools, maybe before a restart, and
     /// the day it did.
     pub earlier: Option<(String, String)>,
-    /// The MCP command was just copied.
-    pub copied: bool,
-    /// A Connect is running.
-    pub connecting: bool,
+    /// The Agents section: each client's state and what runs.
+    pub agents: Agents,
     /// Clients whose config has Agent Screen's server.
     pub registered: Vec<&'static str>,
     /// Whether macOS lets Agent Screen notify.
@@ -71,7 +74,137 @@ pub struct Setup {
     /// Every display shares one macOS Space ("Displays have separate
     /// Spaces" off): a row says what that does and where to change it.
     pub spaces_shared: bool,
+    /// The bundle runs from the disk image, Downloads or a translocated
+    /// copy: a banner asks to move it first.
+    pub temporary: Option<Temporary>,
+    pub moving: MoveStep,
+    pub reset: ResetStep,
     icon: Arc<gpui::Image>,
+}
+
+/// Reset Permissions: asked inline in the Permissions section first.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum ResetStep {
+    #[default]
+    Idle,
+    Confirm,
+    Failed(String),
+}
+
+/// The Agents section as the shell last read it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Agents {
+    /// None until the first probe ends.
+    pub rows: Option<Vec<AgentRow>>,
+    /// The client a Connect or Disconnect runs for, or "all".
+    pub busy: Option<&'static str>,
+    /// The snippet Other MCP Clients last copied.
+    pub copied: Option<agent_screen_mcp::install::Snippet>,
+    pub prompt: Prompt,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AgentRow {
+    pub id: &'static str,
+    pub name: &'static str,
+    /// It loads servers only when it starts.
+    pub restart: bool,
+    pub pill: Pill,
+    /// Its last Connect or Disconnect failed.
+    pub error: Option<String>,
+}
+
+/// A client's state as its row says it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pill {
+    /// Configured, and one of its sessions loaded the tools in this run
+    /// or the last day.
+    Live,
+    Configured,
+    /// The entry runs a copy of Agent Screen that is gone or elsewhere.
+    Stale,
+    NotConnected,
+    /// The config can't be read; Agent Screen leaves it alone.
+    Invalid,
+}
+
+impl Pill {
+    pub fn of(state: &agent_screen_mcp::install::State, live: bool) -> Pill {
+        use agent_screen_mcp::install::State;
+        match state {
+            State::Connected if live => Pill::Live,
+            State::Connected => Pill::Configured,
+            State::StalePath(_) => Pill::Stale,
+            State::NotConnected => Pill::NotConnected,
+            State::InvalidConfig(_) => Pill::Invalid,
+        }
+    }
+}
+
+/// The test prompt, before or after an agent loads the tools.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum Prompt {
+    #[default]
+    Hidden,
+    Waiting {
+        copied: bool,
+    },
+    /// The agent that loaded the tools.
+    Done(String),
+}
+
+/// What to ask an agent first.
+#[allow(non_snake_case)]
+pub fn TEST_PROMPT() -> &'static str {
+    t(
+        "Use Agent Screen to open Calculator and compute 12 × 34",
+        "用 Agent Screen 打开计算器算 12 × 34",
+    )
+}
+
+/// `debugShow setup-agents-…`: made-up rows, one of each state for
+/// `setup-agents-mixed`, configured ones for the test prompt.
+pub fn preview_rows(surface: &str) -> Vec<AgentRow> {
+    let row = |id: &'static str, pill: Pill, error: Option<&str>| {
+        let client = agent_screen_mcp::install::client(id).expect("a client in the registry");
+        AgentRow {
+            id,
+            name: client.name,
+            restart: client.restart,
+            pill,
+            error: error.map(str::to_string),
+        }
+    };
+    if surface != "setup-agents-mixed" {
+        return vec![
+            row("claude-code", Pill::Configured, None),
+            row("codex", Pill::Configured, None),
+        ];
+    }
+    vec![
+        row("claude-code", Pill::Live, None),
+        row("codex", Pill::Configured, None),
+        row("claude-desktop", Pill::Configured, None),
+        row("cursor", Pill::Stale, None),
+        row(
+            "zed",
+            Pill::Invalid,
+            Some("settings.json was left as it is: expected a value at line 4"),
+        ),
+        row("gemini-cli", Pill::NotConnected, None),
+        row("opencode", Pill::NotConnected, None),
+    ]
+}
+
+/// Move to Applications, while the bundle runs from a temporary place.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum MoveStep {
+    #[default]
+    Idle,
+    /// Applications has an Agent Screen: replace it?
+    AskReplace,
+    Copying,
+    Failed(String),
 }
 
 /// The app icon, flat, from AppIcon.icns. Asking macOS for the Icon
@@ -89,14 +222,14 @@ impl Setup {
             focus: cx.focus_handle(),
             focused: false,
             centered: Default::default(),
+            content_height: std::rc::Rc::new(std::cell::Cell::new(px(HEIGHT))),
             status,
             waiting: None,
             still_off: false,
             restart: false,
             agent: None,
             earlier: None,
-            copied: false,
-            connecting: false,
+            agents: Agents::default(),
             registered: Vec::new(),
             notifications: notify::Auth::Unknown,
             colorsync: None,
@@ -107,6 +240,9 @@ impl Setup {
             wallpaper: None,
             reports_on: true,
             spaces_shared: false,
+            temporary: None,
+            moving: MoveStep::Idle,
+            reset: ResetStep::Idle,
             icon,
         }
     }
@@ -192,10 +328,11 @@ impl Render for Setup {
                         )),
                 )
         };
-        let mut permissions: Vec<AnyElement> = Permission::ALL
-            .map(|p| self.row(p, &theme).into_any_element())
-            .into_iter()
-            .collect();
+        let mut permissions: Vec<AnyElement> = Vec::new();
+        if self.reset != ResetStep::Idle {
+            permissions.push(self.reset_row(&theme).into_any_element());
+        }
+        permissions.extend(Permission::ALL.map(|p| self.row(p, &theme).into_any_element()));
         permissions.push(self.notifications_row(&theme).into_any_element());
         // Until setup is done, only what makes the Mac work well with agents.
         let mut displays = vec![self.colorsync_row(&theme).into_any_element()];
@@ -215,55 +352,78 @@ impl Render for Setup {
             .text_color(theme.label)
             .px(px(32.))
             .pt(px(if ready { 36. } else { 44. }))
-            .pb(px(24.))
+            .pb(px(6.))
+            .when_some(self.temporary, |d, why| {
+                d.child(self.location_banner(why, &theme))
+            })
             .child(header)
-            .child(section(t("Permissions", "权限"), permissions, &theme))
+            .child(section_with(
+                t("Permissions", "权限"),
+                Some({
+                    let shell = self.shell.clone();
+                    link(
+                        "setup-reset",
+                        t("Reset Permissions…", "重置权限…"),
+                        &theme,
+                        move |cx| tell(&shell, cx, |shell, cx| shell.ask_reset(cx)),
+                    )
+                    .into_any_element()
+                }),
+                permissions,
+                &theme,
+            ))
             .child(section(
                 t("Agents", "Agent"),
                 vec![
-                    self.agent_row(&theme, cx.weak_entity()).into_any_element(),
-                    self.reports_row(&theme).into_any_element(),
-                ],
+                    Some(self.clients_row(&theme).into_any_element()),
+                    self.client_list(&theme),
+                    Some(self.other_clients_row(&theme).into_any_element()),
+                    self.prompt_row(&theme),
+                    Some(self.reports_row(&theme).into_any_element()),
+                ]
+                .into_iter()
+                .flatten()
+                .collect(),
                 &theme,
             ))
             .child(section(
                 t("Agent Displays", "Agent 显示器"),
                 displays,
                 &theme,
-            ))
+            ));
+        let footer = div()
+            .px(px(32.))
+            .pt(px(12.))
+            .pb(px(20.))
+            .flex()
+            .items_center()
+            .gap(px(12.))
             .child(
                 div()
-                    .mt(px(18.))
-                    .flex()
-                    .items_center()
-                    .gap(px(12.))
-                    .child(
-                        div()
-                            .flex_1()
-                            // Wraps instead of pushing the button out.
-                            .min_w_0()
-                            .text_size(px(11.))
-                            .text_color(theme.secondary)
-                            .child(t(
-                                "Used only on this Mac. Turn off anytime in System Settings.",
-                                "权限仅在本机使用，可随时在系统设置中关闭。",
-                            )),
-                    )
-                    .child(key_button(
-                        "setup-close",
-                        if ready {
-                            t("Done", "完成")
-                        } else {
-                            t("Later", "稍后")
-                        }
-                        .into(),
-                        // Connect is the next step until an agent loads the tools.
-                        (ready && (self.agent.is_some() || !self.registered.is_empty()))
-                            .then_some(theme.accent),
-                        &theme,
-                        move |cx| tell(&shell, cx, |shell, cx| shell.close_setup(cx)),
+                    .flex_1()
+                    // Wraps instead of pushing the button out.
+                    .min_w_0()
+                    .text_size(px(11.))
+                    .text_color(theme.secondary)
+                    .child(t(
+                        "Used only on this Mac. Turn off anytime in System Settings.",
+                        "权限仅在本机使用，可随时在系统设置中关闭。",
                     )),
-            );
+            )
+            .child(key_button(
+                "setup-close",
+                if ready {
+                    t("Done", "完成")
+                } else {
+                    t("Later", "稍后")
+                }
+                .into(),
+                // Connect is the next step until an agent loads the tools.
+                (ready && (self.agent.is_some() || !self.registered.is_empty()))
+                    .then_some(theme.accent),
+                &theme,
+                move |cx| tell(&shell, cx, |shell, cx| shell.close_setup(cx)),
+            ));
         let close = self.shell.clone();
         div()
             .track_focus(&self.focus)
@@ -282,11 +442,14 @@ impl Render for Setup {
             .bg(theme.card)
             .on_children_prepainted({
                 let centered = self.centered.clone();
+                let tall = self.content_height.clone();
                 move |bounds, window, _| {
-                    let Some(content) = bounds.first() else {
+                    let Some(footer) = bounds.get(1) else {
                         return;
                     };
-                    let height = content.size.height.ceil();
+                    // Content and footer, up to the most that fits a
+                    // 13-inch screen: past that the content scrolls.
+                    let height = (tall.get() + footer.size.height).min(px(MAX_HEIGHT)).ceil();
                     if (window.viewport_size().height - height).abs() > px(1.) {
                         window.resize(gpui::size(px(WIDTH), height));
                         return;
@@ -298,7 +461,23 @@ impl Render for Setup {
                     }
                 }
             })
-            .child(content)
+            .child(
+                div()
+                    .on_children_prepainted({
+                        let tall = self.content_height.clone();
+                        move |bounds, _, _| {
+                            if let Some(content) = bounds.first() {
+                                tall.set(content.size.height);
+                            }
+                        }
+                    })
+                    .id("setup-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(content),
+            )
+            .child(footer)
     }
 }
 
@@ -323,6 +502,16 @@ fn green() -> Hsla {
 
 /// A titled group of rows.
 fn section(title: &str, rows: Vec<AnyElement>, theme: &Theme) -> impl IntoElement {
+    section_with(title, None, rows, theme)
+}
+
+/// A titled group of rows with a quiet action at the title's right.
+fn section_with(
+    title: &str,
+    trailing: Option<AnyElement>,
+    rows: Vec<AnyElement>,
+    theme: &Theme,
+) -> impl IntoElement {
     div()
         .mt(px(16.))
         .flex()
@@ -331,10 +520,17 @@ fn section(title: &str, rows: Vec<AnyElement>, theme: &Theme) -> impl IntoElemen
             div()
                 .px(px(4.))
                 .pb(px(5.))
-                .text_size(px(11.5))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.secondary)
-                .child(title.to_string()),
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .text_size(px(11.5))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.secondary)
+                        .child(title.to_string()),
+                )
+                .children(trailing),
         )
         .child(
             div()
@@ -449,6 +645,48 @@ fn item_with(
         .child(action)
 }
 
+/// A row whose text takes the full width, with its buttons under it at
+/// the right: for a question or a warning that needs a sentence.
+fn stacked(
+    lead: impl IntoElement,
+    title: SharedString,
+    detail: SharedString,
+    note: Option<(String, Hsla)>,
+    actions: AnyElement,
+    theme: &Theme,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .gap(px(12.))
+        .px(px(14.))
+        .py(px(10.))
+        .child(lead)
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.5))
+                        .text_color(theme.secondary)
+                        .child(detail),
+                )
+                .when_some(note, |d, (text, color)| {
+                    d.child(div().text_size(px(11.)).text_color(color).child(text))
+                })
+                .child(div().mt(px(6.)).flex().justify_end().child(actions)),
+        )
+}
+
 /// A text button under a row's detail.
 fn link(
     id: &'static str,
@@ -470,19 +708,6 @@ fn link(
         .child(label)
 }
 
-/// Agent Screen's server as an MCP client's JSON config takes it, with the
-/// command and its arguments apart.
-pub fn mcp_config() -> String {
-    let exe = std::env::current_exe().unwrap_or_default();
-    mcp_config_for(&exe.display().to_string())
-}
-
-fn mcp_config_for(exe: &str) -> String {
-    let server = serde_json::json!({ "command": exe, "args": ["mcp"] });
-    let body = serde_json::to_string_pretty(&server).unwrap_or_default();
-    format!("\"agent-screen\": {body}")
-}
-
 /// docs/clients.md: each client's config.
 pub fn open_client_guide() {
     let _ = std::process::Command::new("/usr/bin/open")
@@ -491,6 +716,101 @@ pub fn open_client_guide() {
 }
 
 impl Setup {
+    /// The bundle runs from a temporary place: what breaks, and Move to
+    /// Applications, which copies it there and opens the copy.
+    fn location_banner(&self, why: Temporary, theme: &Theme) -> impl IntoElement {
+        let shell = self.shell.clone();
+        let detail = match why {
+            Temporary::DiskImage => t(
+                "Running from the disk image: permissions and agents set up here break once it moves",
+                "当前从磁盘映像运行，移动后此处设置的权限和 agent 会失效",
+            ),
+            Temporary::Downloads => t(
+                "Running from Downloads: permissions and agents set up here break once it moves",
+                "当前从“下载”运行，移动后此处设置的权限和 agent 会失效",
+            ),
+            Temporary::Translocated => t(
+                "macOS runs a temporary copy: permissions and agents set up here won't last",
+                "macOS 正在运行临时副本，此处设置的权限和 agent 不会保留",
+            ),
+        };
+        let note = match &self.moving {
+            MoveStep::AskReplace => Some((
+                t(
+                    "Replace the Agent Screen in Applications?",
+                    "替换“应用程序”中的 Agent Screen？",
+                )
+                .to_string(),
+                theme.label,
+            )),
+            MoveStep::Failed(error) => Some((
+                tf!(
+                    "Didn't work: {error}. Drag it to Applications in Finder instead.",
+                    "未成功：{error}。请在访达中将它拖到“应用程序”。"
+                ),
+                theme.orange,
+            )),
+            _ => None,
+        };
+        let action = match &self.moving {
+            MoveStep::Copying => busy(t("Copying…", "正在拷贝…"), theme),
+            MoveStep::AskReplace => {
+                let cancel = shell.clone();
+                div()
+                    .flex()
+                    .gap(px(8.))
+                    .child(key_button(
+                        "setup-move-cancel",
+                        t("Cancel", "取消").into(),
+                        None,
+                        theme,
+                        move |cx| tell(&cancel, cx, |shell, cx| shell.cancel_move(cx)),
+                    ))
+                    .child(key_button(
+                        "setup-move-replace",
+                        t("Replace", "替换").into(),
+                        Some(theme.orange),
+                        theme,
+                        move |cx| {
+                            tell(&shell, cx, |shell, cx| shell.move_to_applications(true, cx))
+                        },
+                    ))
+                    .into_any_element()
+            }
+            step => key_button(
+                "setup-move",
+                if matches!(step, MoveStep::Failed(_)) {
+                    t("Try Again", "重试")
+                } else {
+                    t("Move to Applications…", "移至应用程序…")
+                }
+                .into(),
+                Some(theme.orange),
+                theme,
+                move |cx| {
+                    tell(&shell, cx, |shell, cx| {
+                        shell.move_to_applications(false, cx)
+                    })
+                },
+            )
+            .into_any_element(),
+        };
+        div()
+            .mb(px(18.))
+            .rounded(px(12.))
+            .bg(theme.orange.opacity(0.12))
+            .border_1()
+            .border_color(theme.orange.opacity(0.35))
+            .child(stacked(
+                badge("icons/alert.svg", theme.orange, false),
+                t("Move to Applications First", "请先移至“应用程序”").into(),
+                detail.into(),
+                note,
+                action,
+                theme,
+            ))
+    }
+
     /// Notifications: optional, so setup is complete without them.
     fn notifications_row(&self, theme: &Theme) -> impl IntoElement {
         let shell = self.shell.clone();
@@ -735,69 +1055,211 @@ impl Setup {
         )
     }
 
-    /// Connecting agents, the step after the permissions: Connect sets up
-    /// the clients the registry finds, and any other takes the command.
-    fn agent_row(&self, theme: &Theme, this: WeakEntity<Setup>) -> impl IntoElement {
+    /// The agent clients: how many were found, Connect All Detected, and
+    /// what the agents did with the tools.
+    fn clients_row(&self, theme: &Theme) -> impl IntoElement {
         let shell = self.shell.clone();
+        let rows = self.agents.rows.as_deref().unwrap_or_default();
+        let pending = rows
+            .iter()
+            .filter(|r| matches!(r.pill, Pill::NotConnected | Pill::Stale))
+            .count();
         let loaded = self.agent.is_some();
-        let action = if loaded {
-            done(t("Connected", "已接入"))
-        } else if self.connecting {
+        let action = if self.agents.busy == Some("all") {
             busy(t("Connecting…", "正在接入…"), theme)
-        } else {
-            let again = !self.registered.is_empty() || self.earlier.is_some();
+        } else if pending > 0 {
             key_button(
                 "setup-connect",
-                if again {
-                    t("Connect Again…", "重新接入…")
-                } else {
-                    t("Connect…", "接入…")
-                }
+                tf!(
+                    "Connect All Detected ({pending})",
+                    "一键接入全部 ({pending})"
+                )
                 .into(),
-                (self.status.complete() && !again).then_some(theme.accent),
+                self.status.complete().then_some(theme.accent),
                 theme,
-                move |cx| tell(&shell, cx, |shell, cx| shell.connect_agents(cx)),
+                move |cx| tell(&shell, cx, |shell, cx| shell.connect_client(None, cx)),
             )
             .into_any_element()
+        } else if loaded {
+            done(t("Connected", "已接入"))
+        } else {
+            div().into_any_element()
         };
-        let detail = match (&self.agent, &self.earlier, self.registered.as_slice()) {
+        let detail = match (&self.agent, &self.earlier, &self.agents.rows) {
             (Some(agent), _, _) => tf!("{agent} loaded the tools", "{agent} 已加载工具"),
+            (None, _, None) => {
+                t("Looking for agent clients…", "正在查找 agent 客户端…").to_string()
+            }
+            (None, _, Some(rows)) if rows.is_empty() => t(
+                "No agent client found. Use Other MCP Clients below",
+                "未找到 agent 客户端，请使用下方的其他客户端",
+            )
+            .to_string(),
             (None, Some((client, day)), _) => tf!(
                 "{client} last loaded the tools on {day}",
                 "{client} 上次于 {day}加载工具"
             ),
-            (None, None, []) => t(
-                "Connect sets up the agent clients on this Mac",
-                "“接入”会配置这台 Mac 上的 agent 客户端",
-            )
-            .to_string(),
-            (None, None, clients) => tf!(
-                "Added to {}. Start a new session to load the tools",
-                "已添加到 {}。新建会话即可加载工具",
-                clients.join(t(" and ", " 和 "))
+            (None, None, Some(rows)) => tf!(
+                "{} found on this Mac",
+                "在这台 Mac 上找到 {} 个",
+                rows.len()
             ),
         };
         let color = if loaded { green() } else { theme.accent };
-        let copied = self.copied;
-        let others = div()
+        item(
+            badge("icons/plus.svg", color, loaded),
+            t("MCP Clients", "MCP 客户端").into(),
+            detail.into(),
+            None,
+            action,
+            theme,
+        )
+    }
+
+    /// One row per client: its state and the one thing to do about it.
+    /// More than five scroll inside the section.
+    fn client_list(&self, theme: &Theme) -> Option<AnyElement> {
+        let rows = self.agents.rows.as_ref().filter(|r| !r.is_empty())?;
+        let list = div()
+            .id("setup-clients")
             .flex()
-            .gap(px(12.))
-            .mt(px(2.))
-            .child(link(
-                "setup-copy-command",
-                if copied {
-                    t("Copied", "已复制")
-                } else {
-                    t("Copy MCP Config", "复制 MCP 配置")
-                },
+            .flex_col()
+            .when(rows.len() > 5, |d| {
+                d.max_h(px(5.5 * 41.)).overflow_y_scroll()
+            })
+            .children(rows.iter().enumerate().map(|(i, row)| {
+                div()
+                    .when(i > 0, |d| d.border_t_1().border_color(theme.card_border))
+                    .child(self.client_row(row, theme))
+            }));
+        Some(list.into_any_element())
+    }
+
+    fn client_row(&self, row: &AgentRow, theme: &Theme) -> impl IntoElement {
+        let shell = self.shell.clone();
+        let id = row.id;
+        let (label, color): (String, Hsla) = match row.pill {
+            Pill::Live => (t("Live now", "已实时连入").into(), green()),
+            Pill::Configured if row.restart => (
+                t("Configured · restart the app", "已配置，重启后生效").into(),
+                green(),
+            ),
+            Pill::Configured => (
+                t(
+                    "Configured · new sessions pick it up",
+                    "已配置，新开会话生效",
+                )
+                .into(),
+                green(),
+            ),
+            Pill::Stale => (t("Old path", "路径已过期").into(), theme.orange),
+            Pill::NotConnected => (t("Not connected", "未接入").into(), theme.secondary),
+            Pill::Invalid => (t("Config can't be read", "配置格式有误").into(), theme.red),
+        };
+        let action = if self.agents.busy == Some(id)
+            || (self.agents.busy == Some("all")
+                && matches!(row.pill, Pill::NotConnected | Pill::Stale))
+        {
+            busy(t("Working…", "正在处理…"), theme)
+        } else {
+            let (key, label, prominent): (&'static str, &'static str, bool) = match row.pill {
+                Pill::NotConnected => ("connect", t("Connect", "接入"), false),
+                Pill::Stale => ("fix", t("Fix Path", "修复路径"), true),
+                Pill::Live | Pill::Configured => ("disconnect", t("Disconnect", "断开"), false),
+                Pill::Invalid => ("show", t("Show File", "显示文件"), false),
+            };
+            let button_id: &'static str = match key {
+                "connect" => "setup-client-connect",
+                "fix" => "setup-client-fix",
+                "disconnect" => "setup-client-disconnect",
+                _ => "setup-client-show",
+            };
+            small_button(
+                (button_id, id),
+                label,
+                prominent.then_some(theme.orange),
                 theme,
                 move |cx| {
-                    native::copy(&mcp_config());
-                    let _ = this.update(cx, |setup, cx| {
-                        setup.copied = true;
-                        cx.notify();
-                    });
+                    tell(&shell, cx, move |shell, cx| match key {
+                        "disconnect" => shell.disconnect_client(id, cx),
+                        "show" => shell.reveal_config(id),
+                        _ => shell.connect_client(Some(id), cx),
+                    })
                 },
+            )
+            .into_any_element()
+        };
+        div()
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .pl(px(60.))
+            .pr(px(14.))
+            .py(px(7.))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(1.))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(div().flex_none().size(px(7.)).rounded_full().bg(color))
+                            .child(
+                                div()
+                                    .text_size(px(12.5))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(row.name),
+                            )
+                            .child(div().text_size(px(11.)).text_color(color).child(label)),
+                    )
+                    .when_some(row.error.clone(), |d, error| {
+                        d.child(
+                            div()
+                                .pl(px(13.))
+                                .text_size(px(11.))
+                                .text_color(theme.orange)
+                                .child(error),
+                        )
+                    }),
+            )
+            .child(action)
+    }
+
+    /// Any other MCP client: the config to paste, in each format, and the
+    /// guide.
+    fn other_clients_row(&self, theme: &Theme) -> impl IntoElement {
+        use agent_screen_mcp::install::Snippet;
+        let copied = self.agents.copied;
+        let copy = |id: &'static str, kind: Snippet, label: &'static str| {
+            let shell = self.shell.clone();
+            link(
+                id,
+                if copied == Some(kind) {
+                    t("Copied", "已复制")
+                } else {
+                    label
+                },
+                theme,
+                move |cx| tell(&shell, cx, move |shell, cx| shell.copy_snippet(kind, cx)),
+            )
+        };
+        let links = div()
+            .flex()
+            .flex_wrap()
+            .gap(px(12.))
+            .mt(px(2.))
+            .child(copy("setup-copy-json", Snippet::Json, "JSON"))
+            .child(copy("setup-copy-opencode", Snippet::OpenCode, "OpenCode"))
+            .child(copy("setup-copy-toml", Snippet::Toml, "TOML"))
+            .child(copy(
+                "setup-copy-command",
+                Snippet::Command,
+                t("Command", "命令"),
             ))
             .child(link(
                 "setup-client-guide",
@@ -806,13 +1268,67 @@ impl Setup {
                 |_| open_client_guide(),
             ));
         item_with(
-            badge("icons/plus.svg", color, loaded),
-            t("MCP Clients", "MCP 客户端").into(),
-            detail.into(),
+            badge("icons/tray.svg", theme.secondary, false),
+            t("Other MCP Clients", "其他客户端").into(),
+            t(
+                "Copy the server's config in the format your client takes",
+                "按客户端的格式复制服务器配置",
+            )
+            .into(),
             None,
-            Some(others.into_any_element()),
-            action,
+            Some(links.into_any_element()),
+            div().into_any_element(),
             theme,
+        )
+    }
+
+    /// The first thing to ask an agent, until one loads the tools; then
+    /// green.
+    fn prompt_row(&self, theme: &Theme) -> Option<AnyElement> {
+        let shell = self.shell.clone();
+        let (on, detail, action) = match &self.agents.prompt {
+            Prompt::Hidden => return None,
+            Prompt::Waiting { copied } => (
+                false,
+                t(
+                    "Paste it into a new agent session",
+                    "粘贴到新的 agent 会话中",
+                )
+                .to_string(),
+                key_button(
+                    "setup-copy-prompt",
+                    if *copied {
+                        t("Copied", "已复制")
+                    } else {
+                        t("Copy", "复制")
+                    }
+                    .into(),
+                    (!*copied).then_some(theme.accent),
+                    theme,
+                    move |cx| tell(&shell, cx, |shell, cx| shell.copy_test_prompt(cx)),
+                )
+                .into_any_element(),
+            ),
+            Prompt::Done(agent) => (
+                true,
+                tf!(
+                    "{agent} is using Agent Screen",
+                    "{agent} 已在使用 Agent Screen"
+                ),
+                done(t("Working", "已生效")),
+            ),
+        };
+        let color = if on { green() } else { theme.accent };
+        Some(
+            item(
+                badge("icons/play.svg", color, on),
+                TEST_PROMPT().into(),
+                detail.into(),
+                None,
+                action,
+                theme,
+            )
+            .into_any_element(),
         )
     }
 
@@ -858,6 +1374,49 @@ impl Setup {
         )
     }
 
+    /// Reset Permissions, asked before it runs: what it clears, that it
+    /// ends open Agent Displays, and that Settings opens again.
+    fn reset_row(&self, theme: &Theme) -> impl IntoElement {
+        let cancel = self.shell.clone();
+        let go = self.shell.clone();
+        let note = match &self.reset {
+            ResetStep::Failed(error) => {
+                Some((tf!("Didn't work: {error}", "未成功：{error}"), theme.orange))
+            }
+            _ => None,
+        };
+        let action = div()
+            .flex()
+            .gap(px(8.))
+            .child(key_button(
+                "setup-reset-cancel",
+                t("Cancel", "取消").into(),
+                None,
+                theme,
+                move |cx| tell(&cancel, cx, |shell, cx| shell.cancel_reset(cx)),
+            ))
+            .child(key_button(
+                "setup-reset-go",
+                t("Reset & Reopen", "重置并重启").into(),
+                Some(theme.orange),
+                theme,
+                move |cx| tell(&go, cx, |shell, cx| shell.reset_permissions(cx)),
+            ))
+            .into_any_element();
+        div().bg(theme.orange.opacity(0.08)).child(stacked(
+            badge("icons/alert.svg", theme.orange, false),
+            t("Reset Agent Screen's Permissions?", "重置 Agent Screen 的权限？").into(),
+            t(
+                "Clears only its Screen Recording, Accessibility and Input Monitoring entries, ends open Agent Displays, then reopens Settings",
+                "仅清除它的录屏、辅助功能和输入监控条目，结束已打开的 Agent 显示器，然后重新打开设置",
+            )
+            .into(),
+            note,
+            action,
+            theme,
+        ))
+    }
+
     fn row(&self, p: Permission, theme: &Theme) -> impl IntoElement {
         let granted = self.status.has(p);
         let (icon, detail) = match p {
@@ -879,7 +1438,18 @@ impl Setup {
         let shell = self.shell.clone();
         let restart_here = p == Permission::ScreenRecording && granted && self.restart;
         let waiting = self.waiting == Some(p) && !granted;
-        let action = if restart_here {
+        let stuck = waiting && self.still_off;
+        let action = if stuck {
+            let reset = shell.clone();
+            key_button(
+                "setup-reset-still-off",
+                t("Reset & Reopen…", "重置并重启…").into(),
+                Some(theme.accent),
+                theme,
+                move |cx| tell(&reset, cx, |shell, cx| shell.ask_reset(cx)),
+            )
+            .into_any_element()
+        } else if restart_here {
             key_button(
                 "setup-restart",
                 t("Reopen Agent Screen", "重新打开 Agent Screen").into(),
@@ -918,11 +1488,11 @@ impl Setup {
                 .to_string(),
                 theme.orange,
             ))
-        } else if waiting && self.still_off {
+        } else if stuck {
             Some((
                 t(
-                    "Already on? Remove with −, then re-add",
-                    "已开启仍无效？点 − 移除后重新添加",
+                    "Already on? Reset clears the old entry",
+                    "已开启仍无效？重置可清除旧条目",
                 )
                 .to_string(),
                 theme.orange,
@@ -940,11 +1510,25 @@ impl Setup {
             None
         };
         let color = if granted { green() } else { theme.accent };
-        item(
+        let again = stuck.then(|| {
+            let shell = self.shell.clone();
+            link(
+                match p {
+                    Permission::ScreenRecording => "setup-grant-screen",
+                    Permission::Accessibility => "setup-grant-ax",
+                },
+                t("Open Settings Again", "重新打开设置"),
+                theme,
+                move |cx| tell(&shell, cx, move |shell, cx| shell.grant(p, cx)),
+            )
+            .into_any_element()
+        });
+        item_with(
             badge(icon, color, granted),
             p.name().into(),
             detail.into(),
             note,
+            again,
             action,
             theme,
         )
@@ -960,6 +1544,46 @@ pub(crate) fn button(
 ) -> impl IntoElement {
     button_base(id, title.clone(), prominent, theme)
         .on_click(move |_, _, cx| action(cx))
+        .child(title)
+}
+
+/// A client row's button: smaller, with an id per client.
+fn small_button(
+    id: (&'static str, &'static str),
+    title: &'static str,
+    prominent: Option<Hsla>,
+    theme: &Theme,
+    action: impl Fn(&mut App) + 'static,
+) -> impl IntoElement {
+    let (bg, hover, fg) = match prominent {
+        Some(color) => (color.opacity(0.9), color, gpui::white()),
+        None => (
+            theme.control_hover.opacity(0.6),
+            theme.control_hover,
+            theme.label,
+        ),
+    };
+    div()
+        .id(gpui::ElementId::NamedChild(
+            std::sync::Arc::new(gpui::ElementId::Name(id.0.into())),
+            id.1.into(),
+        ))
+        .role(Role::Button)
+        .aria_label(title)
+        .flex_none()
+        .h(px(24.))
+        .px(px(11.))
+        .flex()
+        .items_center()
+        .rounded_full()
+        .bg(bg)
+        .hover(move |s| s.bg(hover))
+        .active(|s| s.opacity(0.7))
+        .text_size(px(11.5))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(fg)
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .keyboard(action, theme)
         .child(title)
 }
 
@@ -1040,17 +1664,38 @@ impl Keyboard for gpui::Stateful<gpui::Div> {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_screen_mcp::install::State;
 
     #[test]
-    fn the_mcp_config_keeps_command_and_args_apart() {
-        let config = mcp_config_for("/Applications/Agent Screen.app/Contents/MacOS/AgentScreen");
-        let value: serde_json::Value =
-            serde_json::from_str(&format!("{{{config}}}")).expect("valid JSON in braces");
-        let server = &value["agent-screen"];
+    fn each_state_has_its_pill() {
+        assert_eq!(Pill::of(&State::Connected, true), Pill::Live);
+        assert_eq!(Pill::of(&State::Connected, false), Pill::Configured);
+        // A session counts only while the config runs this copy.
+        let stale = State::StalePath("/Volumes/x".into());
+        assert_eq!(Pill::of(&stale, true), Pill::Stale);
+        assert_eq!(Pill::of(&State::NotConnected, true), Pill::NotConnected);
         assert_eq!(
-            server["command"],
-            "/Applications/Agent Screen.app/Contents/MacOS/AgentScreen"
+            Pill::of(&State::InvalidConfig("x".into()), false),
+            Pill::Invalid
         );
-        assert_eq!(server["args"], serde_json::json!(["mcp"]));
+    }
+
+    #[test]
+    fn the_mixed_preview_shows_every_state_and_scrolls() {
+        let rows = preview_rows("setup-agents-mixed");
+        for pill in [
+            Pill::Live,
+            Pill::Configured,
+            Pill::Stale,
+            Pill::NotConnected,
+            Pill::Invalid,
+        ] {
+            assert!(rows.iter().any(|r| r.pill == pill), "{pill:?}");
+        }
+        assert!(rows.len() > 5);
+        assert!(
+            rows.iter()
+                .all(|r| agent_screen_mcp::install::client(r.id).is_some())
+        );
     }
 }
