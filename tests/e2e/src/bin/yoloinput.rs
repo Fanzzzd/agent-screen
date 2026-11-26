@@ -246,9 +246,10 @@ fn test(control: &Control, id: &Value, pid: &mut Option<i64>) -> Result<()> {
             && probe(&["frontpid"])?.trim() == holder.pid().to_string()
             && queue["grantActive"] == false,
         format!(
-            "{typed_before:?} -> {:?}; hold {}",
+            "{typed_before:?} -> {:?}; hold {}; printed {:?}",
             holder.text(),
-            state["armedHold"]
+            state["armedHold"],
+            holder.printed()
         ),
     );
     check(

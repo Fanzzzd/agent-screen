@@ -2121,6 +2121,11 @@ impl Holder {
         self.child.id()
     }
 
+    /// Everything it printed: key changes and each text, in order.
+    pub fn printed(&self) -> String {
+        self.printed.lock().map(|s| s.clone()).unwrap_or_default()
+    }
+
     /// The field's text now.
     pub fn text(&self) -> String {
         let printed = self.printed.lock().map(|s| s.clone()).unwrap_or_default();

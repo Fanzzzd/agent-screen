@@ -222,7 +222,9 @@ fn send(held: &[(Kind, Held)], pointer: Option<(f64, f64)>, confirmed: bool) {
             CGEvent::set_location(Some(event), CGPoint::new(x, y));
         }
         CGEvent::set_integer_value_field(Some(event), CGEventField::EventSourceUserData, TAG);
-        CGEvent::post(CGEventTapLocation::HIDEventTap, Some(event));
+        // Past this hold's own tap, which stays on while it drains: sent
+        // back through it at the HID level, they came in out of order.
+        CGEvent::post(CGEventTapLocation::SessionEventTap, Some(event));
     }
 }
 
@@ -381,8 +383,11 @@ unsafe extern "C-unwind" fn seen(
     let mut guard = state();
     if let State::Draining { held } = &mut *guard {
         // Behind what `finish` is sending on.
+        // A release or modifier change always queues, so it can't pass a
+        // held press.
         if let ArmedEvent::Input(input) = seen
-            && held.len() < agent_screen_model::key_hold::MAX_EVENTS
+            && (held.len() < agent_screen_model::key_hold::MAX_EVENTS
+                || matches!(input, Kind::Modifiers | Kind::KeyUp | Kind::MouseUp))
             && let Some(copy) = CGEvent::new_copy(Some(cg))
         {
             held.push((input, Held(copy)));

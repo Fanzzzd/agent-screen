@@ -310,19 +310,20 @@ impl Armed {
             ArmedEvent::Input(Kind::Other) => ArmedVerdict::Pass,
             ArmedEvent::Input(kind) => {
                 self.first_held(now);
-                self.count += 1;
-                if self.count < MAX_EVENTS {
+                if self.count + 1 < MAX_EVENTS {
+                    self.count += 1;
                     ArmedVerdict::Hold
-                } else if self.count == MAX_EVENTS {
+                } else if self.count + 1 == MAX_EVENTS {
+                    self.count += 1;
                     ArmedVerdict::HoldAndEnd
-                } else if kind != Kind::KeyDown
-                    && kind != Kind::MouseDragged
-                    && self.count < 2 * MAX_EVENTS
-                {
-                    // Until the restore lets go, releases still go out
-                    // after the presses they end; nothing new is kept.
+                } else if matches!(kind, Kind::Modifiers | Kind::KeyUp | Kind::MouseUp) {
+                    // Full and ending: a release, or a modifier change,
+                    // is always kept, so no press goes out without the
+                    // release that ends it. `MAX_HOLD_MS` bounds them.
+                    self.count += 1;
                     ArmedVerdict::Hold
                 } else {
+                    // A new press or a drag isn't kept, nor counted.
                     ArmedVerdict::Drop
                 }
             }
@@ -430,12 +431,27 @@ mod tests {
             armed.see(ArmedEvent::Input(Kind::KeyUp), Mode::Yolo, 1002),
             ArmedVerdict::Hold
         );
-        for n in 0..2 * MAX_EVENTS {
-            armed.see(ArmedEvent::Input(Kind::KeyUp), Mode::Yolo, 1003 + n as u64);
+        // A long drag past the cap counts nothing, and the Shift release
+        // after it is still kept.
+        let kept = armed.held();
+        for n in 0..4 * MAX_EVENTS {
+            assert_eq!(
+                armed.see(
+                    ArmedEvent::Input(Kind::MouseDragged),
+                    Mode::Yolo,
+                    1003 + n as u64
+                ),
+                ArmedVerdict::Drop
+            );
         }
+        assert_eq!(armed.held(), kept);
         assert_eq!(
-            armed.see(ArmedEvent::Input(Kind::KeyUp), Mode::Yolo, 9999),
-            ArmedVerdict::Drop
+            armed.see(ArmedEvent::Input(Kind::Modifiers), Mode::Yolo, 9999),
+            ArmedVerdict::Hold
+        );
+        assert_eq!(
+            armed.see(ArmedEvent::Input(Kind::MouseUp), Mode::Yolo, 9999),
+            ArmedVerdict::Hold
         );
     }
 

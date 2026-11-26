@@ -181,7 +181,9 @@ impl Setting {
     /// A file that says YOLO, an unknown mode or unreadable JSON loads as
     /// Ask. So does one whose Protected Apps can't be read, with only the
     /// built-in ones: a damaged list never leaves Auto acting on apps the
-    /// user protected.
+    /// user protected. Auto also needs its whole record, as `to_json`
+    /// writes it: a file missing `protected` or `yoloEnded`, or with
+    /// `yoloEnded` unreadable, loads as Ask.
     pub fn from_json(text: &str) -> Setting {
         let Ok(value) = serde_json::from_str::<Value>(text) else {
             return Setting::default();
@@ -199,14 +201,18 @@ impl Setting {
         let Some(protected) = protected else {
             return Setting::default();
         };
+        let yolo_ended = match value.get("yoloEnded") {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(Value::String(end)) => YoloEnd::parse(end).map(Some),
+            Some(_) => None,
+        };
+        let whole = value.get("protected").is_some() && yolo_ended.is_some();
         let base = match value.get("mode").and_then(Value::as_str) {
-            Some("auto") => Base::Auto,
+            Some("auto") if whole => Base::Auto,
             _ => Base::Ask,
         };
-        let yolo_ended = value
-            .get("yoloEnded")
-            .and_then(Value::as_str)
-            .and_then(YoloEnd::parse);
+        let yolo_ended = yolo_ended.flatten();
         Setting {
             base,
             yolo: false,
@@ -920,7 +926,9 @@ mod tests {
 
     #[test]
     fn a_damaged_protected_list_fails_closed() {
-        let ok = Setting::from_json(r#"{"mode":"auto","protected":["com.example.bank"," "]}"#);
+        let ok = Setting::from_json(
+            r#"{"mode":"auto","protected":["com.example.bank"," "],"yoloEnded":null}"#,
+        );
         assert_eq!(ok.mode(), Mode::Auto);
         assert_eq!(ok.protected.len(), 1);
         for text in [
@@ -928,6 +936,8 @@ mod tests {
             r#"{"mode":"auto","protected":["com.example.bank",7]}"#,
             r#"{"mode":"auto","protected":null}"#,
             r#"{"mode":"auto","protected":{"a":1}}"#,
+            r#"{"mode":"auto"}"#,
+            r#"{"mode":"auto","yoloEnded":null}"#,
             r#"["auto"]"#,
             "{\"mode\":\"auto\"",
             r#"{"mode":"yolo"}"#,
@@ -937,6 +947,8 @@ mod tests {
             assert_eq!(s.mode(), Mode::Ask, "{text}");
             assert!(s.protected.is_empty(), "{text}");
         }
+        let odd = Setting::from_json(r#"{"mode":"auto","protected":["x"],"yoloEnded":"later"}"#);
+        assert_eq!(odd.mode(), Mode::Ask);
     }
 
     #[test]

@@ -283,7 +283,18 @@ pub fn type_keys(
     may_borrow(keys.len(), mode)?;
     // In Auto and YOLO an armed hold keeps the user's keys from the agent's
     // app; in Auto their first key stops the borrow, in YOLO it runs on
-    // for `HELD_GRACE_MS` (ADR 0025).
+    // for `HELD_GRACE_MS` (ADR 0025). Not after a Stop, nor once the mode
+    // the call was decided in has changed: the tap isn't armed then.
+    if mode.acts() {
+        if STOP.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(Typed::Halted(0));
+        }
+        if crate::autonomy::mode() != mode {
+            return Err(
+                "the user changed the Autonomy Mode before the keys went, so nothing was typed; try again".into(),
+            );
+        }
+    }
     let held = mode.acts() && super::armed_hold::start(mode);
     let yolo = held && mode == agent_screen_model::autonomy::Mode::Yolo;
     let release = |front: Option<i32>| {

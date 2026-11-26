@@ -8193,7 +8193,31 @@ async fn through_input_method(
     // In Auto the borrow waits up to `BORROW_WAIT_MS` for 2 s of quiet and
     // no composition, then runs (ADR 0025); in Ask it fails at once, as
     // ADR 0008 says.
-    borrow_wait(mode, cx).await;
+    if borrow_wait(mode, cx).await {
+        // The wait took seconds: the display, its access and the target
+        // again, so the keys don't go to a window taken back meanwhile.
+        let gone = core.read_with(cx, |c, _| {
+            c.displays
+                .get(id)
+                .is_none_or(|d| d.takeover || !d.is_live())
+        });
+        if gone {
+            forwarder.keys_done().await;
+            return Err(ControlError::takeover(format!(
+                "the user took over display {id} or it ended while the keys waited for their hands to rest. Call wait_for_control to wait until they hand it back."
+            )));
+        }
+        if let Err(refused) = keys_allowed(&forwarder, bounds, cx).await {
+            forwarder.keys_done().await;
+            return Err(refused);
+        }
+        if forwarder.keys_target(bounds).await != Some(target) {
+            forwarder.keys_done().await;
+            return Err(ControlError::failed(
+                "the window that would take the keys changed while they waited for the user's hands to rest, so nothing was typed. Take a screenshot and try again",
+            ));
+        }
+    }
     // The user may have changed the mode meanwhile.
     let mode = autonomy::for_target(crate::autonomy::mode(), protected);
     // Refused before the glow shows: no flash for a call that sends nothing.
@@ -8264,11 +8288,11 @@ async fn through_input_method(
 }
 
 /// In Auto, wait for the hands to be quiet enough for a Keyboard Borrow,
-/// at most `BORROW_WAIT_MS`. Ask and YOLO don't wait.
-async fn borrow_wait(mode: autonomy::Mode, cx: &mut AsyncApp) {
+/// at most `BORROW_WAIT_MS`. Ask and YOLO don't wait. Whether it waited.
+async fn borrow_wait(mode: autonomy::Mode, cx: &mut AsyncApp) -> bool {
     use agent_screen_model::user_activity::{BORROW_WAIT_MS, WAITING_SAMPLE_MS};
     if mode != autonomy::Mode::Auto {
-        return;
+        return false;
     }
     let _waiting = crate::mac::activity::Waiting::start();
     let until = Instant::now() + Duration::from_millis(BORROW_WAIT_MS);
@@ -8281,13 +8305,13 @@ async fn borrow_wait(mode: autonomy::Mode, cx: &mut AsyncApp) {
             &hands,
         );
         if !matches!(decision, autonomy::Decision::WaitHands(_)) {
-            return;
+            return true;
         }
         if Instant::now() >= until {
             log::info!(
                 "autonomy: a Keyboard Borrow waited {BORROW_WAIT_MS} ms for quiet: {decision:?}"
             );
-            return;
+            return true;
         }
         cx.background_executor()
             .timer(Duration::from_millis(WAITING_SAMPLE_MS))
