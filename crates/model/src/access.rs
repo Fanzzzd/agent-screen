@@ -119,6 +119,21 @@ pub enum Authority {
     Once,
     /// The session's grant, for a window of this app.
     Grant { bundle_id: Option<String> },
+    /// The user's Autonomy Mode, Auto or YOLO (ADR 0025). It has the checks
+    /// `Once` has; Kept Windows and Protected Apps are decided before it.
+    Mode(crate::autonomy::Mode),
+}
+
+impl Authority {
+    /// The reply's and the log's name for it.
+    pub fn name(&self, words: bool) -> &'static str {
+        match self {
+            Authority::User => "user",
+            Authority::Mode(_) => "mode",
+            _ if words => "chat",
+            _ => "grant",
+        }
+    }
 }
 
 /// One session's Window Access on its display.

@@ -116,7 +116,7 @@ pub async fn hold(
             }
         });
         let elapsed = started.elapsed().as_millis() as u64;
-        match front_hold::next(phase, elapsed, own_front, pending, input) {
+        match front_hold::next(phase, elapsed, own_front, pending, input, true) {
             Next::Wait => {}
             Next::Run => {
                 phase = Phase::Running;
