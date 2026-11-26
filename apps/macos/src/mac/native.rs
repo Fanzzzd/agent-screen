@@ -805,7 +805,7 @@ struct GlowScreen {
     frame: NSRect,
     shape: agent_screen_model::screen_edge::Screen,
     window: Retained<NSWindow>,
-    /// Fades the whole glow in as it appears.
+    /// Holds the layers, hidden until the glow first shows.
     root: Retained<objc2_quartz_core::CALayer>,
     /// Carries the state and the breathing of the bands.
     pulse: Retained<objc2_quartz_core::CALayer>,
@@ -828,7 +828,7 @@ thread_local! {
     static GLOW: RefCell<GlowWindows> = RefCell::new(GlowWindows::default());
 }
 
-/// Breathing, on `pulse`; and the fades, on `root` and both layers.
+/// Breathing, on `pulse`; and the fades, on `pulse` and `rims`.
 const BREATH: &str = "breath";
 const APPEAR: &str = "appear";
 const CHANGE: &str = "change";
@@ -971,8 +971,10 @@ fn set_look(screen: &GlowScreen, state: Glow, look: glow::Look, appearing: bool,
     screen.pulse.setOpacity(look.pulse as f32);
     screen.rims.setOpacity(look.rims as f32);
     let delay = if appearing {
-        fade(&screen.root, 0.0, 1.0, glow::APPEAR_S, APPEAR);
-        0.0
+        // The rims are at full strength with the window, before any input
+        // goes out; only the bloom fades in.
+        fade(&screen.pulse, 0.0, look.pulse, glow::APPEAR_S, APPEAR);
+        glow::APPEAR_S
     } else {
         fade(&screen.pulse, pulse_was, look.pulse, glow::CHANGE_S, CHANGE);
         fade(&screen.rims, rims_was, look.rims, glow::CHANGE_S, CHANGE);

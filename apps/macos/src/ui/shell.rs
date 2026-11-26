@@ -1622,7 +1622,7 @@ impl Shell {
                 .displays
                 .list
                 .iter()
-                .any(|d| d.keyboard_borrowed && !d.is_ended()),
+                .any(|d| d.keyboard_borrowed() && !d.is_ended()),
             front_hold: input.hold().is_some(),
             preview: self.glow_preview.map(|(glow, _)| glow),
         };
@@ -1703,7 +1703,7 @@ impl Shell {
                 .displays
                 .list
                 .iter()
-                .any(|d| d.keyboard_borrowed && !d.is_ended());
+                .any(|d| d.keyboard_borrowed() && !d.is_ended());
         if !on {
             if self.bar_shown {
                 self.bar_shown = false;

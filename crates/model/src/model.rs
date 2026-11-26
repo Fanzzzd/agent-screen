@@ -305,9 +305,10 @@ pub struct Display<H> {
     /// The open Help, Control and Window Requests, and the agent's waits
     /// for the user.
     pub requests: Requests,
-    /// The agent is typing through the user's input method, which takes
-    /// the user's keyboard for that time (ADR 0008).
-    pub keyboard_borrowed: bool,
+    /// Keyboard Borrows running on the display (ADR 0008). Calls can
+    /// overlap: one that loses the session's input lock returns while
+    /// another still types, so each call returns only its own.
+    keyboard_borrows: u32,
     pub pointer: Option<AgentPointer>,
     pub(crate) handover_serial: u64,
     /// The latest give-back of each window, by serial: only that one's
@@ -326,6 +327,22 @@ pub struct Display<H> {
 impl<H> Display<H> {
     pub fn is_ended(&self) -> bool {
         self.ended.is_some()
+    }
+
+    /// The agent is typing through the user's input method, which takes
+    /// the user's keyboard for that time (ADR 0008).
+    pub fn keyboard_borrowed(&self) -> bool {
+        self.keyboard_borrows > 0
+    }
+
+    /// A Keyboard Borrow starts.
+    pub fn borrow_keyboard(&mut self) {
+        self.keyboard_borrows += 1;
+    }
+
+    /// A Keyboard Borrow that `borrow_keyboard` started has returned.
+    pub fn return_keyboard(&mut self) {
+        self.keyboard_borrows = self.keyboard_borrows.saturating_sub(1);
     }
 
     /// Display Label: "Claude Code · Book flights".
@@ -853,7 +870,7 @@ impl<H> Displays<H> {
             released: Default::default(),
             takeover: false,
             requests: Requests::default(),
-            keyboard_borrowed: false,
+            keyboard_borrows: 0,
             pointer: None,
             handover_serial: 0,
             given_back: BTreeMap::new(),
@@ -1890,6 +1907,22 @@ mod tests {
         let mut d = Displays::default();
         d.add(7, "Agent Screen 1".into(), DEFAULT_SIZE, owner(1), ());
         d
+    }
+
+    #[test]
+    fn an_overlapping_borrow_returning_leaves_the_keyboard_borrowed() {
+        let mut d = displays();
+        let display = d.get_mut(7).unwrap();
+        display.borrow_keyboard();
+        // A second call, refused by the session's input lock, returns
+        // while the first still types.
+        display.borrow_keyboard();
+        display.return_keyboard();
+        assert!(display.keyboard_borrowed());
+        display.return_keyboard();
+        assert!(!display.keyboard_borrowed());
+        display.return_keyboard();
+        assert!(!display.keyboard_borrowed());
     }
 
     #[test]

@@ -89,7 +89,7 @@ impl Render for InputBar {
             .displays
             .list
             .iter()
-            .find(|d| (d.keyboard_borrowed || preview == Some(d.id)) && !d.is_ended());
+            .find(|d| (d.keyboard_borrowed() || preview == Some(d.id)) && !d.is_ended());
         let (title, how, clock, stops) = if core.input_queue.queue.grant().is_some() {
             let view = help_card::queue_view(core, None);
             let title = help_card::queue_title(&view);

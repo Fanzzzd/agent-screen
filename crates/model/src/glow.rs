@@ -172,9 +172,9 @@ pub fn look(glow: Glow) -> Option<Look> {
 pub const BREATH_LOW: f64 = 0.70;
 pub const BREATH_S: f64 = 1.8;
 
-/// Appearing, both opacities rise from 0 over `APPEAR_S`; Armed to Live and
-/// back takes `CHANGE_S`. Off is at once. Real input waits for the window,
-/// never for the fade.
+/// Appearing, the rims show at full strength with the window and the bloom
+/// rises from 0 over `APPEAR_S`; Armed to Live and back takes `CHANGE_S`.
+/// Off is at once. Real input waits for the window, never for the fade.
 pub const APPEAR_S: f64 = 0.12;
 pub const CHANGE_S: f64 = 0.15;
 

@@ -7848,18 +7848,31 @@ async fn through_input_method(
         forwarder.keys_done().await;
         return Err(no_keyboard_target());
     };
-    let borrow = |core: &Entity<Core>, on: bool, cx: &mut AsyncApp| {
+    // Calls can overlap, and one that loses the session's input lock
+    // returns while another types: each returns only its own borrow, so
+    // the glow stays while any runs. A Stop pressed for a running borrow
+    // stays pressed.
+    let first = core.update(cx, |c, cx| {
+        let first = !c.displays.list.iter().any(|d| d.keyboard_borrowed());
+        if let Some(display) = c.displays.get_mut(id) {
+            display.borrow_keyboard();
+        }
+        cx.notify();
+        first
+    });
+    let give_back = |core: &Entity<Core>, cx: &mut AsyncApp| {
         core.update(cx, |c, cx| {
             if let Some(display) = c.displays.get_mut(id) {
-                display.keyboard_borrowed = on;
+                display.return_keyboard();
             }
             cx.notify();
         })
     };
-    crate::mac::ime::clear_stop();
-    borrow(core, true, cx);
+    if first {
+        crate::mac::ime::clear_stop();
+    }
     if !sync_glow(cx) {
-        borrow(core, false, cx);
+        give_back(core, cx);
         sync_glow(cx);
         forwarder.keys_done().await;
         return Err(ControlError::failed(
@@ -7877,7 +7890,7 @@ async fn through_input_method(
         .background_executor()
         .spawn(async move { crate::mac::ime::type_keys(target, &keys, source.as_deref(), wake) })
         .await;
-    borrow(core, false, cx);
+    give_back(core, cx);
     sync_glow(cx);
     forwarder.keys_done().await;
     match typed {
