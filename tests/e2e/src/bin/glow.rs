@@ -8,7 +8,8 @@
 //! corners, with the centre untouched. Armed meets it times 0.55 and
 //! holds still; Off leaves no window. A screenshot of the Agent Display
 //! during the preview has no red rim. A preview grant is Armed and goes
-//! Off within a frame of the Input Bar's Stop. A real click at 4 pt from
+//! Off within a frame of the Input Bar's Stop. The Input Bar for a
+//! Keyboard Borrow shows above the glow's level. A real click at 4 pt from
 //! your main screen's left edge reaches the script's own window there,
 //! through the glow.
 //!
@@ -324,6 +325,26 @@ fn test(control: &Control, id: &Value, pid: u32) -> Result<()> {
     let _ = control.call(
         "inputQueue",
         json!({ "sessionKey": KEY, "displayId": id, "action": "done" }),
+    );
+
+    // The Input Bar as during a Keyboard Borrow, just above the glow's
+    // level; its Stop takes it away.
+    let bar = || {
+        windows_of(pid)
+            .into_iter()
+            .find(|w| w.layer == 1001 && w.height < 120.0)
+    };
+    show(control, id, "input-bar-keyboard")?;
+    let shown = bar();
+    if let Some(b) = &shown {
+        let _ =
+            agent_screen_tests::capture("glow-input-bar-keyboard", [b.x, b.y, b.width, b.height]);
+    }
+    show(control, id, "input-bar-stop")?;
+    check(
+        "during a Keyboard Borrow the Input Bar shows above the glow's level, and its Stop takes it away",
+        shown.is_some() && bar().is_none(),
+        format!("{shown:?} then {:?}", bar()),
     );
 
     click_through(control, id)
