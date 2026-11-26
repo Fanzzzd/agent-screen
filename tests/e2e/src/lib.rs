@@ -1093,6 +1093,43 @@ pub struct Sighting {
     pub last: i64,
     /// How long it showed, in all.
     pub ms: i64,
+    /// The 1-minute load average as it first showed.
+    #[serde(default)]
+    pub load: f64,
+}
+
+/// The 1-minute load average above which a time budget isn't judged. The
+/// scripts measure a window's time on the user's screen by the wall clock,
+/// so on a busy Mac the time Agent Screen and the app wait for a core
+/// counts against Agent Screen: with the load at 9 to 72, a running app's
+/// new window showed 158 to 226 ms against its 150, nearly all of it in
+/// the app's Accessibility answers to the catch. Over 30 launches on a
+/// quiet Mac it showed 29 ms in the median and 138 ms at most.
+pub const IDLE_LOAD: f64 = 4.0;
+
+/// The 1-minute load average.
+pub fn load_average() -> f64 {
+    let mut load = [0.0f64; 1];
+    // SAFETY: getloadavg writes at most `nelem` doubles into the buffer.
+    if unsafe { libc::getloadavg(load.as_mut_ptr(), 1) } == 1 {
+        load[0]
+    } else {
+        0.0
+    }
+}
+
+/// Check that something took `ms` at most `limit` ms. Over it with the
+/// load above `IDLE_LOAD`, `load` at the time, it's not judged: the line
+/// says so and counts neither way.
+pub fn check_within(label: &str, ms: i64, limit: i64, load: f64, detail: impl AsRef<str>) -> bool {
+    let detail = detail.as_ref();
+    if ms > limit && load > IDLE_LOAD {
+        println!(
+            "not judged {label}: {detail}, over {limit} ms at load {load:.1}, above {IDLE_LOAD}"
+        );
+        return true;
+    }
+    check(label, ms <= limit, detail)
 }
 
 /// Start watching the user's displays for windows of processes the test
@@ -1135,6 +1172,34 @@ fn start_sighting() {
     }
 }
 
+/// The sightings past what `allowed` lets show, and those only over their
+/// allowance's time at a load above `IDLE_LOAD`, which aren't judged: the
+/// wall clock counts the waits for a core. A window with no allowance
+/// fails at any load.
+fn judge_sightings<'a>(
+    seen: &'a [Sighting],
+    allowed: &[(String, u64, i64)],
+) -> (Vec<&'a Sighting>, Vec<&'a Sighting>) {
+    let mut offenders = Vec::new();
+    let mut unjudged = Vec::new();
+    for s in seen {
+        let budgets: Vec<u64> = allowed
+            .iter()
+            .filter(|(owner, _, from)| (owner.is_empty() || *owner == s.owner) && s.first >= *from)
+            .map(|(_, ms, _)| *ms)
+            .collect();
+        if budgets.iter().any(|ms| s.ms as u64 <= *ms) {
+            continue;
+        }
+        if !budgets.is_empty() && s.load > IDLE_LOAD {
+            unjudged.push(s);
+        } else {
+            offenders.push(s);
+        }
+    }
+    (offenders, unjudged)
+}
+
 /// Stop watching and check that nothing the test started showed on the
 /// user's screen, past what the script allowed. False when something did.
 fn finish_sighting() -> bool {
@@ -1155,32 +1220,34 @@ fn finish_sighting() -> bool {
         .lines()
         .filter_map(|line| serde_json::from_str(line).ok())
         .collect();
-    let offenders: Vec<&Sighting> = seen
-        .iter()
-        .filter(|s| {
-            !allowed.iter().any(|(owner, ms, from)| {
-                (owner.is_empty() || *owner == s.owner) && s.first >= *from && s.ms as u64 <= *ms
+    let (offenders, unjudged) = judge_sightings(&seen, &allowed);
+    let lines = |list: &[&Sighting]| -> String {
+        list.iter()
+            .map(|s| {
+                let [x, y, w, h] = s.frame;
+                format!(
+                    "\n  {} (pid {}, layer {}) {:?} at {x},{y} {w}x{h}: {} ms, from {} to {} ms, load {:.1}",
+                    s.owner, s.pid, s.layer, s.title, s.ms, s.first, s.last, s.load
+                )
             })
-        })
-        .collect();
-    let lines: Vec<String> = offenders
-        .iter()
-        .map(|s| {
-            let [x, y, w, h] = s.frame;
-            format!(
-                "\n  {} (pid {}, layer {}) {:?} at {x},{y} {w}x{h}: {} ms, from {} to {} ms",
-                s.owner, s.pid, s.layer, s.title, s.ms, s.first, s.last
-            )
-        })
-        .collect();
+            .collect()
+    };
+    if !unjudged.is_empty() {
+        println!(
+            "not judged: {} window(s) over their allowance at a load above {IDLE_LOAD}{}",
+            unjudged.len(),
+            lines(&unjudged)
+        );
+    }
     check(
         "nothing the test started showed on your screen",
         offenders.is_empty(),
         format!(
-            "{} window(s), {} allowed{}",
+            "{} window(s), {} allowed, {} not judged{}",
             offenders.len(),
-            seen.len() - offenders.len(),
-            lines.concat()
+            seen.len() - offenders.len() - unjudged.len(),
+            unjudged.len(),
+            lines(&offenders)
         ),
     )
 }
@@ -1998,5 +2065,37 @@ mod tests {
             ),
             dir
         ));
+    }
+
+    fn sighting(owner: &str, ms: i64, load: f64) -> super::Sighting {
+        super::Sighting {
+            owner: owner.into(),
+            pid: 1,
+            path: String::new(),
+            title: String::new(),
+            layer: 0,
+            frame: [0.0; 4],
+            first: 1000,
+            last: 1000 + ms,
+            ms,
+            load,
+        }
+    }
+
+    #[test]
+    fn a_window_over_its_allowance_fails_at_idle_and_is_not_judged_under_load() {
+        let allowed = vec![("TextEdit".to_string(), 150, 0)];
+        let seen = [
+            sighting("TextEdit", 120, 0.5),
+            sighting("TextEdit", 300, 1.0),
+            sighting("TextEdit", 187, 12.0),
+            sighting("Calculator", 40, 12.0),
+        ];
+        let (offenders, unjudged) = super::judge_sightings(&seen, &allowed);
+        let ms = |list: &[&super::Sighting]| list.iter().map(|s| s.ms).collect::<Vec<_>>();
+        // At idle a 300 ms flash fails; with no allowance a window fails at
+        // any load.
+        assert_eq!(ms(&offenders), [300, 40]);
+        assert_eq!(ms(&unjudged), [187]);
     }
 }

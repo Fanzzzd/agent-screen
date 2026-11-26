@@ -12,9 +12,9 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use agent_screen_tests::{
-    Control, McpClient, ToolResult, Value, Window, allow_on_your_screen, check, cut, in_test_app,
-    instance, json, now_ms, quit_app, quit_discarding, quoted, run, running, sh, sh_lenient, skip,
-    sleep_ms, tool, try_osa, wait_for_idle, watch_flash,
+    Control, McpClient, ToolResult, Value, Window, allow_on_your_screen, check, check_within, cut,
+    in_test_app, instance, json, load_average, now_ms, quit_app, quit_discarding, quoted, run,
+    running, sh, sh_lenient, skip, sleep_ms, tool, try_osa, wait_for_idle, watch_flash,
 };
 use anyhow::{Context, Result};
 use regex::Regex;
@@ -34,7 +34,8 @@ struct OnScreen {
 /// A starting app is hidden until its window is on the display, so it never
 /// shows on the user's screen for more than two frames. A running app's new
 /// window shows there until the catch moves it: flash measured 29 ms median,
-/// 55 ms p90 and 138 ms at most over 30 launches.
+/// 55 ms p90 and 138 ms at most over 30 launches. Over its limit on a busy
+/// Mac, a running app's flash isn't judged (`IDLE_LOAD`).
 const FLASH_LIMIT: i64 = 34;
 const RUNNING_FLASH_LIMIT: i64 = 150;
 
@@ -395,9 +396,11 @@ fn body(r: &Robust, temporary: &mut Vec<String>) -> Result<()> {
 
     // Launched again while running: a second document, still not on the user's screen.
     let (again_flash, again) = watch_flash("TextEdit", || r.launch("TextEdit"))?;
-    check(
+    check_within(
         "a running app's new window shows on the user's screen 150 ms at most",
-        again_flash.ms <= RUNNING_FLASH_LIMIT,
+        again_flash.ms,
+        RUNNING_FLASH_LIMIT,
+        load_average(),
         format!("{} windows for {} ms", again_flash.windows, again_flash.ms),
     );
     check(
