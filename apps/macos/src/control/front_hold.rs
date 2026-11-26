@@ -7,6 +7,8 @@
 //! user's window. Then the app gets the front back with that window key.
 //! The keys the user types meanwhile are held at the tap and go to their
 //! window after; a mouse press ends the hold, and the rest waits again.
+//! The Red Glow shows, Live, from before the front is taken until the hold
+//! is over; without it the hold doesn't start.
 //! The rules are in `agent_screen_model::front_hold`.
 
 use super::off;
@@ -75,8 +77,16 @@ pub async fn hold(
         drop(keys);
         return None;
     }
-    // However the hold ends, even by a panic, its record goes.
+    // However the hold ends, even by a panic, its record goes, and the
+    // glow with it.
     let _clear = Clear(core.clone(), cx.clone());
+    // The glow first: the front isn't taken without it.
+    if !super::agent::sync_glow(cx) {
+        log::warn!("front hold: the red glow didn't show; nothing runs");
+        core.update(cx, |c, _| c.input_queue.end_hold());
+        drop(keys);
+        return None;
+    }
     let started = Instant::now();
     let mut phase = Phase::Taking;
     if start == Start::Take {
@@ -160,6 +170,7 @@ impl Drop for Clear {
             c.input_queue.clear_hold();
             cx.notify();
         });
+        super::agent::sync_glow(&mut self.1);
     }
 }
 

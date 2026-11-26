@@ -10,7 +10,7 @@ This breaks ADR 0001's rule on purpose. For the call, the user's keys reach the 
 - It runs only when the user hasn't touched the keyboard or pointer for 2 s, and stops at the next touch.
 - It runs only when the target app has keyboard focus, checked before every key. A modal system prompt, such as a keychain password request, keeps focus; Agent Screen then sends nothing. It also refuses while secure input is on, which a password field turns on.
 - It takes at most 250 keys, about 10 s, a call.
-- The Viewer and Peek say the agent is using the user's keyboard while it lasts.
+- The Red Glow shows on the user's screens while it lasts, with the Input Bar naming the agent, and the Viewer and Peek say so too. Without the glow no key is sent.
 
 We tried a session-level post without the focus check while a keychain prompt was in front. The keys went into its password field. The checks above came from that.
 

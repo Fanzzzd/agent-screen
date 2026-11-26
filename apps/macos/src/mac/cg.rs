@@ -492,8 +492,9 @@ pub fn above(window: u32, at: (f64, f64)) -> Option<(Rect, bool, bool)> {
                 bounds = Some(b);
                 return;
             }
-            // Agent Screen's border lets every click through.
-            if pid == me && layer == super::native::BORDER_LEVEL as i64 {
+            // Agent Screen's Red Glow lets every click through, and the
+            // Input Bar just above it is no window of the user's.
+            if pid == me && layer >= super::native::BORDER_LEVEL as i64 {
                 return;
             }
             let alpha = unsafe { cf::float(info, cf::kCGWindowAlpha) }.unwrap_or(1.0);

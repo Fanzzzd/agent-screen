@@ -3,9 +3,10 @@
 //! "nihao" and space into 你好, where plain typing gives the letters, and a
 //! key through it starts a composition. The
 //! user's front app, input source and AeroSpace workspace are the same
-//! after. It waits for the user to leave the keyboard and pointer alone for
-//! 3 s, since the call borrows their keyboard, and skips after 60 s, or
-//! when a password field on the user's screen has the keyboard.
+//! after. The Red Glow is Live while the keys go in and off after. It
+//! waits for the user to leave the keyboard and pointer alone for 3 s,
+//! since the call borrows their keyboard, and skips after 60 s, or when a
+//! password field on the user's screen has the keyboard.
 //!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e ime
 
@@ -98,10 +99,36 @@ fn test(field: &Path) -> Result<()> {
         "/opt/homebrew/bin/aerospace",
         &["list-workspaces", "--focused"],
     );
-    let typed = control.call(
-        "type",
-        json!({ "sessionKey": key, "displayId": id, "text": "nihao ", "viaInputMethod": true, "inputSource": PINYIN }),
-    );
+    // The glow's state through the borrow, read on a second connection.
+    let borrowing = std::sync::atomic::AtomicBool::new(true);
+    let (typed, seen) = std::thread::scope(|scope| {
+        let watcher = scope.spawn(|| {
+            let mut seen = Vec::new();
+            let Ok(glow) = Control::connect() else {
+                return seen;
+            };
+            while borrowing.load(std::sync::atomic::Ordering::Relaxed) {
+                if let Ok(g) = glow.call("debugGlow", json!({ "alpha": false }))
+                    && let Some(state) = g["state"].as_str()
+                    && seen.last().map(String::as_str) != Some(state)
+                {
+                    seen.push(state.to_string());
+                }
+                sleep_ms(30);
+            }
+            seen
+        });
+        let typed = control.call(
+            "type",
+            json!({ "sessionKey": key, "displayId": id, "text": "nihao ", "viaInputMethod": true, "inputSource": PINYIN }),
+        );
+        borrowing.store(false, std::sync::atomic::Ordering::Relaxed);
+        (typed, watcher.join().unwrap_or_default())
+    });
+    let after = control
+        .call("debugGlow", json!({ "alpha": false }))
+        .map(|g| g["state"].as_str().unwrap_or_default().to_string())
+        .unwrap_or_default();
     if let Err(e) = &typed
         && e.to_string().contains("secure input")
     {
@@ -116,6 +143,11 @@ fn test(field: &Path) -> Result<()> {
         "typing through the input method succeeds",
         typed.is_ok(),
         format!("{typed:?}"),
+    );
+    check(
+        "the Red Glow is Live during the Keyboard Borrow and off after",
+        seen.iter().any(|s| s == "live") && after == "off",
+        format!("seen {seen:?}, after {after}"),
     );
     sleep_ms(300);
     check(

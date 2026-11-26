@@ -1,4 +1,4 @@
-//! The Input Grant's red edge around a screen: the outline of the screen's
+//! The outline the Red Glow follows around a screen: the screen's
 //! visible glass, square on an external display and on built-in panels
 //! nobody has measured, and the measured shape on a notched MacBook Pro:
 //! rounded top corners, square bottom corners, and a path around the

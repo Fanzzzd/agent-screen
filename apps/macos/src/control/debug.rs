@@ -356,6 +356,7 @@ pub(super) async fn handle(
         // Which picture the menu bar icon shows: idle, working, asking or setup.
         "debugIcon" => debug_icon(cx),
         "debugShow" => debug_show(core, connection, p, cx).await,
+        "debugGlow" => debug_glow(p, cx).await,
         _ => return None,
     };
     Some(result)
@@ -803,6 +804,16 @@ async fn debug_show(
 ) -> Result<Value, ControlError> {
     let surface = p.string("surface").unwrap_or_else(|| "viewer".into());
     let id = p.int("displayId").unwrap_or(0) as DisplayId;
+    // They show on the user's real screens.
+    if matches!(
+        surface.as_str(),
+        "glow-live" | "glow-armed" | "glow-off" | "input-bar-keyboard"
+    ) && agent_screen_mcp::endpoint::instance().as_deref() != Some("e2e")
+    {
+        return Err(ControlError::invalid(
+            "glow and Input Bar previews require the isolated e2e instance",
+        ));
+    }
     #[cfg(debug_assertions)]
     if surface == "userStage" {
         usable(core, connection, p, id, "debugShow", cx)?;
@@ -1067,6 +1078,121 @@ async fn debug_show(
         .timer(Duration::from_millis(900))
         .await;
     Ok(json!({}))
+}
+
+/// The Red Glow as it is: its state and preview, and per user screen its
+/// window and, unless `alpha` is false, the alpha `glow::CONTRACT` is
+/// read at, from a capture of that window alone. Live is read at the top
+/// of its breath: the breath stops for the capture.
+async fn debug_glow(p: &Args<'_>, cx: &mut AsyncApp) -> Result<Value, ControlError> {
+    use crate::mac::native;
+    use agent_screen_model::glow::Glow;
+    let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
+    let (state, preview, stop, restore) = shell
+        .update(cx, |shell, _| shell.glow_debug())
+        .map_err(|e| ControlError::failed(e.to_string()))?;
+    let measure = p.bool("alpha").unwrap_or(true);
+    let probes = native::glow_probe();
+    let held = measure && state == Glow::Live;
+    if held {
+        native::glow_hold_breath(true);
+        // A frame for the held breath to reach the screen.
+        cx.background_executor()
+            .timer(Duration::from_millis(100))
+            .await;
+    }
+    let shots: Vec<(u32, usize, usize)> = probes
+        .iter()
+        .filter(|g| measure && g.visible)
+        .map(|g| {
+            (
+                g.window,
+                (g.frame.width * g.backing).round() as usize,
+                (g.frame.height * g.backing).round() as usize,
+            )
+        })
+        .collect();
+    let captured = off(cx, move || {
+        shots
+            .into_iter()
+            .map(|(window, w, h)| {
+                (
+                    window,
+                    crate::mac::screenshot::window_alpha(window, (w, h)).map(|a| (w, h, a)),
+                )
+            })
+            .collect::<Vec<_>>()
+    })
+    .await;
+    if held {
+        native::glow_hold_breath(false);
+    }
+    // Where each window lies, by the window server's displays: the main
+    // screen's top-left is the origin, y down.
+    let top = cg::display_bounds(cg::main_display()).height;
+    let elsewhere = |g: &native::GlowProbe| {
+        let middle = (
+            g.frame.x + g.frame.width / 2.0,
+            top - g.frame.y - g.frame.height / 2.0,
+        );
+        cg::active_displays().into_iter().any(|id| {
+            (cg::is_agent_screen(id) || cg::is_closet(id))
+                && cg::display_bounds(id).contains(middle)
+        })
+    };
+    let on_agent_displays = probes.iter().filter(|g| elsewhere(g)).count();
+    let screens: Vec<Value> = probes
+        .iter()
+        .map(|g| {
+            let alpha = captured
+                .iter()
+                .find(|(w, _)| *w == g.window)
+                .map(|(_, shot)| match shot {
+                    Ok((w, h, a)) => {
+                        let read = |(x, y): (f64, f64)| {
+                            let px = ((x * g.backing) as usize).min(w - 1);
+                            let py = ((y * g.backing) as usize).min(h - 1);
+                            (f64::from(a[py * w + px]) / 255.0 * 1000.0).round() / 1000.0
+                        };
+                        let mut places = Map::new();
+                        for (place, d, at) in &g.samples {
+                            if *place == "centre" {
+                                places.insert("centre".into(), json!(read(*at)));
+                                continue;
+                            }
+                            places
+                                .entry(place.to_string())
+                                .or_insert_with(|| json!({}))
+                                .as_object_mut()
+                                .expect("an object")
+                                .insert(format!("{d:.0}"), json!(read(*at)));
+                        }
+                        Value::Object(places)
+                    }
+                    Err(e) => json!({ "error": e }),
+                });
+            json!({
+                "displayId": g.display,
+                "frame": [g.frame.x, g.frame.y, g.frame.width, g.frame.height],
+                "visible": g.visible,
+                "ignoresMouse": g.ignores_mouse,
+                "level": g.level,
+                "scale": (g.scale * 10000.0).round() / 10000.0,
+                "alpha": alpha,
+            })
+        })
+        .collect();
+    Ok(json!({
+        "state": state.name(),
+        "preview": preview.map(|g| g.name()),
+        "screens": screens,
+        "onAgentDisplays": on_agent_displays,
+        "rasterized": !probes.is_empty() && probes.iter().all(|g| g.rasterized),
+        "animations": probes.first().map(|g| g.animations.clone()).unwrap_or_default(),
+        "reduceMotion": objc2_app_kit::NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion(),
+        "stopToOffMs": stop.map(|d| d.as_secs_f64() * 1000.0),
+        "restoreMs": restore.map(|d| d.as_secs_f64() * 1000.0),
+    }))
 }
 
 /// A preview click with `presses` (1 to 3) in `app`'s window `title`

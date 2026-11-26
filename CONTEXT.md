@@ -65,7 +65,7 @@ A video of an Agent Display that its Agent Session asked for, with a timeline of
 _Avoid_: capture, screencast
 
 **Keyboard Borrow** (借用键盘):
-One `type` or `key` call that goes through the user's input method. For the call, the agent's app has keyboard focus and the user's keys reach it (ADR 0008).
+One `type` or `key` call that goes through the user's input method. For the call, the agent's app has keyboard focus and the user's keys reach it (ADR 0008). The Red Glow shows while it lasts.
 _Avoid_: focus steal, IME mode
 
 **Input Request** (申请指针和键盘):
@@ -108,6 +108,10 @@ _Avoid_: resume request, reclaim
 **Window Authorization** (窗口授权):
 The user's explicit instruction allowing an Agent Session to take a user window without another confirmation. It can cover one Placement or persist for that Agent Session, on each of its displays, for all apps or named apps. A Takeover pauses a continuing authorization; handing control back resumes it. Revoking it (Revoke, 撤销授权) prevents future Placements without moving windows already handed over. It never covers a window another Agent Session holds: only the user's answer, or their words naming that window or app, move one (ADR 0017). Ending the session's last display or disconnecting the session clears it. A window the user takes back stays excluded until they explicitly authorize that window again.
 _Avoid_: full access, unattended mode, blanket permission
+
+**Red Glow** (红光):
+The red light along the edges of each of the user's screens while an Agent Session has, or may at any moment take, their pointer or keyboard: during an Input Grant, a Keyboard Borrow and a front hold. It is strongest while input goes out. It never shows on an Agent Display, so no agent screenshot contains it. Without it, no real input is sent.
+_Avoid_: red edge, border, indicator, halo
 
 **Disposition**:
 The Agent Session's standing verdict on one of its windows: keep it for the user to review, or close it. The agent can revise it at any time; the user has the final say when dismissing the display.

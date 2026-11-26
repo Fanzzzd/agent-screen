@@ -141,14 +141,20 @@ fn test(control: &Control, key: &str, id: &Value, pid: u32) -> Result<()> {
             .into_iter()
             .find(|w| w.width == 320.0 && w.layer > 0)
     };
-    // The Input Bar: a short window of the app's own, below the edge's
-    // level 1000.
+    // The Input Bar: a short window of the app's own, just above the Red
+    // Glow's level 1000.
     let bar = || -> Option<Frame> {
         windows_of(pid)
             .into_iter()
-            .find(|w| w.layer > 0 && w.layer < 1000 && w.width != 320.0 && w.height < 120.0)
+            .find(|w| w.layer == 1001 && w.width != 320.0 && w.height < 120.0)
     };
     let edges = || windows_of(pid).iter().filter(|w| w.layer == 1000).count();
+    let glow = || -> String {
+        control
+            .call("debugGlow", json!({ "alpha": false }))
+            .map(|g| g["state"].as_str().unwrap_or_default().to_string())
+            .unwrap_or_else(|e| format!("{e}"))
+    };
     let meets = |a: &Frame, b: &Frame| {
         a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
     };
@@ -282,8 +288,14 @@ fn test(control: &Control, key: &str, id: &Value, pid: u32) -> Result<()> {
         format!("{granted:?} {request}"),
     );
     let shown = bar();
+    let armed = glow();
     check(
-        "during the grant the Input Bar and the red edge show, the bar clear of the card and nothing over the card",
+        "during the grant with nothing running the Red Glow is armed",
+        armed == "armed",
+        &armed,
+    );
+    check(
+        "during the grant the Input Bar and the Red Glow show, the bar clear of the card and nothing over the card",
         granted
             .as_ref()
             .is_some_and(|c| c.height < 500.0 && covering(c).is_empty())
@@ -311,7 +323,7 @@ fn test(control: &Control, key: &str, id: &Value, pid: u32) -> Result<()> {
         let file = capture("inputqueue-bar", [b.x, b.y, b.width, b.height])?;
         println!("     bar: {}", file.display());
     }
-    // The red edge at the main screen's top-left corner and top middle,
+    // The Red Glow at the main screen's top-left corner and top middle,
     // where a built-in display has its rounded corner and its notch.
     let main: Vec<f64> = sh_lenient(tool("probe")?, &["main"])
         .split_whitespace()
@@ -393,13 +405,14 @@ fn test(control: &Control, key: &str, id: &Value, pid: u32) -> Result<()> {
         format!("{asks:?} {why}"),
     );
     check(
-        "the Input Bar's Stop ends the grant: the bar and edge go, and the card asks again",
+        "the Input Bar's Stop ends the grant: the bar and glow go, and the card asks again",
         // Still its full height: a bar sized from its window shrank.
         again
             .as_ref()
             .is_some_and(|b| (40.0..80.0).contains(&b.height))
             && bar().is_none()
             && edges() == 0
+            && glow() == "off"
             && request["state"] == "queued"
             && card().is_some()
             && icon() == "asking",

@@ -12,7 +12,9 @@
 //! front with its user window key. Each must reach the agent's page with
 //! route real_input. Afterwards the app that was in front is back, the
 //! user window keeps its frame, AeroSpace shows the workspaces it showed,
-//! and with the harness in front its user window is key again.
+//! and with the harness in front its user window is key again. The Red
+//! Glow is Live while the loan has the pointer, and off once the session
+//! is done.
 //!
 //! Needs an Electron.app: `target/e2e/Electron.app`, or E2E_ELECTRON.
 //!
@@ -201,6 +203,7 @@ fn test(
                     "button": "left", "count": 1, "realInput": true }),
         )?;
         sleep_ms(800);
+        let glows = std::sync::Mutex::new(Vec::<String>::new());
         let (reply, fronts) = fronts_during(6, None, || {
             // The loan moves and clicks your pointer: that's the script's
             // input, not yours.
@@ -210,6 +213,23 @@ fn test(
                     while loaning.load(std::sync::atomic::Ordering::Relaxed) {
                         own_input_now();
                         sleep_ms(100);
+                    }
+                });
+                // The glow's state through the loan, on a second connection.
+                scope.spawn(|| {
+                    let Ok(glow) = Control::connect() else {
+                        return;
+                    };
+                    while loaning.load(std::sync::atomic::Ordering::Relaxed) {
+                        if let Ok(g) = glow.call("debugGlow", json!({ "alpha": false }))
+                            && let Some(state) = g["state"].as_str()
+                        {
+                            let mut seen = glows.lock().unwrap();
+                            if seen.last().map(String::as_str) != Some(state) {
+                                seen.push(state.to_string());
+                            }
+                        }
+                        sleep_ms(30);
                     }
                 });
                 let _ = control.call(
@@ -262,6 +282,18 @@ fn test(
             json!({ "sessionKey": KEY, "displayId": id, "action": "done" }),
         );
         sleep_ms(1000);
+        let after = control
+            .call("debugGlow", json!({ "alpha": false }))
+            .map(|g| g["state"].as_str().unwrap_or_default().to_string())
+            .unwrap_or_default();
+        let seen = glows.into_inner().unwrap_or_default();
+        check(
+            &format!(
+                "{round}: the Red Glow is Live while the loan runs, and off once the session is done"
+            ),
+            seen.iter().any(|s| s == "live") && after == "off",
+            format!("seen {seen:?}, after done {after}"),
+        );
     }
     Ok(())
 }

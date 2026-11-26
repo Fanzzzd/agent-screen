@@ -23,6 +23,7 @@ use crate::mac::{app, assist, ax, cg, menubar, notify, update, viewer_input, win
 use crate::model::{DEFAULT_SIZE, DisplayId, EndReason, GivenBack, Rect, WindowTarget};
 use agent_screen_model::access::Authority;
 use agent_screen_model::card;
+use agent_screen_model::glow::{self, Glow};
 use agent_screen_model::peek as peek_intent;
 use agent_screen_model::report::{Filed, Filing, Reports, Via};
 use agent_screen_model::request::{
@@ -248,6 +249,17 @@ pub struct Shell {
     /// The first loan of a grant waits for the user's hand to rest; a
     /// check is set for the moment it will have.
     quiet_check: bool,
+    /// The Red Glow's state as last shown, and a preview `debugShow` asked
+    /// for with its number, which its timer ends unless a newer one came.
+    glow: Glow,
+    glow_preview: Option<(Glow, u64)>,
+    glow_previews: u64,
+    /// When `debugShow input-bar-stop` pressed Stop, and how long the glow
+    /// then took to go, for `debugGlow`.
+    glow_stop_at: Option<Instant>,
+    glow_stop_to_off: Option<Duration>,
+    /// How long the last cleanup took to put the pointer and front back.
+    glow_restore: Option<Duration>,
     streams: Entity<Streams>,
     icon: StatusIcon,
     peek: Option<(WindowHandle<Peek>, Retained<NSWindow>)>,
@@ -682,8 +694,9 @@ fn open_panels(
         .update(cx, |_, window, _| native::ns_window(window))?
         .expect("Input Bar window");
     // A non-activating panel that never takes the keyboard: a click on its
-    // Stop leaves the user's app in front.
-    native::style_panel(&bar_ns, native::LEVEL_POP_UP_MENU);
+    // Stop leaves the user's app in front. Just above the Red Glow, which
+    // would tint its Stop.
+    native::style_panel(&bar_ns, native::BORDER_LEVEL + 1);
     native::set_keyable(&bar_ns, false);
     let peek_ns = peek
         .update(cx, |_, window, _| native::ns_window(window))?
@@ -942,6 +955,12 @@ impl Shell {
             loan_running: false,
             quiet_check: false,
             restoring: false,
+            glow: Glow::Off,
+            glow_preview: None,
+            glow_previews: 0,
+            glow_stop_at: None,
+            glow_stop_to_off: None,
+            glow_restore: None,
             colorsync: None,
             colorsync_busy: false,
             colorsync_error: None,
@@ -1087,6 +1106,7 @@ impl Shell {
             Native::UpdateReady => self.watch_updates(cx),
             Native::MenuBarClick { display, x } => self.menu_bar(display, x, cx),
             Native::ScreensChanged => {
+                self.sync_glow(cx);
                 self.core.update(cx, |core, cx| {
                     core.repark(cx);
                     core.hold_modes(cx);
@@ -1583,13 +1603,107 @@ impl Shell {
         });
     }
 
-    /// Show the Input Bar while a grant lasts, at the bottom centre of the
-    /// screen the card drops onto, or hide it. Showing it again redraws its
-    /// clock.
+    /// Show the Red Glow as the Input Queue, a Keyboard Borrow, a front
+    /// hold and a preview call for (`agent_screen_model::glow`). Returns
+    /// whether every user screen shows it, as real input may run only then.
+    pub fn sync_glow(&mut self, cx: &mut Context<Self>) -> bool {
+        use agent_screen_model::input_queue::Status;
+        let core = self.core.read(cx);
+        let input = &core.input_queue;
+        let facts = glow::Facts {
+            grant_open: input.queue.grant().is_some(),
+            loan: self.loan_running
+                || input
+                    .queue
+                    .active()
+                    .is_some_and(|r| matches!(r.status, Status::Running | Status::Stopping(_))),
+            restoring: self.restoring,
+            keyboard_borrow: core
+                .displays
+                .list
+                .iter()
+                .any(|d| d.keyboard_borrowed && !d.is_ended()),
+            front_hold: input.hold().is_some(),
+            preview: self.glow_preview.map(|(glow, _)| glow),
+        };
+        let state = glow::state(&facts);
+        if state != self.glow {
+            log::info!(
+                "red glow: {} -> {} ({facts:?})",
+                self.glow.name(),
+                state.name()
+            );
+            if state == Glow::Off
+                && let Some(at) = self.glow_stop_at.take()
+            {
+                self.glow_stop_to_off = Some(at.elapsed());
+            }
+            self.glow = state;
+        }
+        let shown = native::show_glow(state);
+        // The bar names the agent during a Keyboard Borrow too; during a
+        // grant `drive_queue` shows it.
+        if facts.keyboard_borrow || input_bar::previewing() {
+            self.sync_bar(true, cx);
+        } else if !facts.grant_open {
+            self.sync_bar(false, cx);
+        }
+        shown
+    }
+
+    /// Preview the Red Glow in `glow`, or end the preview with Off. It ends
+    /// by itself after `glow::PREVIEW_MS`.
+    fn preview_glow(&mut self, glow: Glow, cx: &mut Context<Self>) {
+        self.glow_previews += 1;
+        let number = self.glow_previews;
+        self.glow_preview = (glow != Glow::Off).then_some((glow, number));
+        self.sync_glow(cx);
+        if glow == Glow::Off {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(glow::PREVIEW_MS))
+                .await;
+            let _ = this.update(cx, |shell, cx| {
+                if shell.glow_preview.is_some_and(|(_, n)| n == number) {
+                    shell.glow_preview = None;
+                    shell.sync_glow(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// What `debugGlow` reports of the shell: the state, the preview, how
+    /// long the last Stop took to turn the glow off, and how long the last
+    /// cleanup restored the pointer and front.
+    pub fn glow_debug(&self) -> (Glow, Option<Glow>, Option<Duration>, Option<Duration>) {
+        (
+            self.glow,
+            self.glow_preview.map(|(glow, _)| glow),
+            self.glow_stop_to_off,
+            self.glow_restore,
+        )
+    }
+
+    /// Show the Input Bar while a grant or a Keyboard Borrow lasts, at the
+    /// bottom centre of the screen the card drops onto, or hide it. Showing
+    /// it again redraws its clock.
     fn sync_bar(&mut self, on: bool, cx: &mut Context<Self>) {
         let Some((bar, window)) = self.bar.clone() else {
             return;
         };
+        // A Keyboard Borrow keeps it, whatever the grant does.
+        let on = on
+            || input_bar::previewing()
+            || self
+                .core
+                .read(cx)
+                .displays
+                .list
+                .iter()
+                .any(|d| d.keyboard_borrowed && !d.is_ended());
         if !on {
             if self.bar_shown {
                 self.bar_shown = false;
@@ -1697,7 +1811,7 @@ impl Shell {
         }
     }
 
-    /// Run the Input Queue (ADR 0013): show the indicator during a grant,
+    /// Run the Input Queue (ADR 0013): show the Red Glow during a grant,
     /// hand each loan to the executor, and clean up after the grant ends.
     /// Called on approval, revocation, a loan's end and once a second.
     fn drive_queue(&mut self, cx: &mut Context<Self>) {
@@ -1716,31 +1830,43 @@ impl Shell {
                 .real_saved
                 .take()
                 .filter(|_| end.restore && !real_input::touched());
-            self.restoring = true;
-            // The grant is over; the edge stays until cleanup is done.
+            // Cleanup is over: the glow goes in the same turn.
+            let cleaned = move |shell: &mut Shell, cx: &mut Context<Shell>| {
+                shell.restoring = false;
+                shell.sync_glow(cx);
+                real_input::arm(false);
+                shell.core.update(cx, |core, cx| {
+                    core.input_queue.ended(end);
+                    cx.notify();
+                });
+                shell.drive_queue(cx);
+            };
+            let Some(saved) = saved else {
+                self.glow_restore = None;
+                cleaned(self, cx);
+                self.sync_bar(false, cx);
+                return;
+            };
             self.sync_bar(false, cx);
+            self.restoring = true;
+            // The grant is over; the glow stays, Armed, until the pointer
+            // and front are back.
+            self.sync_glow(cx);
+            let started = Instant::now();
             cx.spawn(async move |this, cx| {
-                if let Some(saved) = saved {
-                    cx.background_executor()
-                        .spawn(async move { real_input::restore(saved) })
-                        .await;
-                }
+                cx.background_executor()
+                    .spawn(async move { real_input::restore(saved) })
+                    .await;
                 let _ = this.update(cx, |shell, cx| {
-                    shell.restoring = false;
-                    real_input::arm(false);
-                    native::show_borders(false);
-                    shell.core.update(cx, |core, cx| {
-                        core.input_queue.ended(end);
-                        cx.notify();
-                    });
-                    shell.drive_queue(cx);
+                    shell.glow_restore = Some(started.elapsed());
+                    cleaned(shell, cx);
                 });
             })
             .detach();
             return;
         }
         if !granted {
-            native::show_borders(false);
+            self.sync_glow(cx);
             self.sync_bar(false, cx);
             real_input::arm(false);
             // A disabled observer revoked the previous grant. Restore the
@@ -1752,12 +1878,12 @@ impl Shell {
             }
             return;
         }
-        // No observer or indicator, no real input.
+        // No observer or glow, no real input.
         if !real_input::watching() {
             self.revoke_input(cx);
             return;
         }
-        if !native::show_borders(true) {
+        if !self.sync_glow(cx) {
             return;
         }
         self.sync_bar(true, cx);
@@ -1804,6 +1930,7 @@ impl Shell {
             return;
         };
         self.loan_running = true;
+        self.sync_glow(cx);
         self.sync_bar(true, cx);
         let ok = self.core.read(cx).input_queue.loan_ok.clone();
         let grant_ms = {
@@ -3016,7 +3143,26 @@ impl Shell {
                 self.sync_card(cx);
             }
             // The Input Bar's Stop, as a click presses it.
-            "input-bar-stop" => self.revoke_input(cx),
+            "input-bar-stop" => {
+                self.glow_stop_at = Some(Instant::now());
+                self.glow_stop_to_off = None;
+                self.glow_restore = None;
+                if self.core.read(cx).input_queue.queue.grant().is_some() {
+                    self.revoke_input(cx);
+                } else {
+                    input_bar::stop_keyboard();
+                    self.sync_glow(cx);
+                }
+            }
+            // The Input Bar as during a Keyboard Borrow, with no keys going
+            // and no glow; its Stop or `input-bar-stop` ends it.
+            "input-bar-keyboard" => {
+                input_bar::preview_keyboard(Some(id));
+                self.sync_glow(cx);
+            }
+            "glow-live" => self.preview_glow(Glow::Live, cx),
+            "glow-armed" => self.preview_glow(Glow::Armed, cx),
+            "glow-off" => self.preview_glow(Glow::Off, cx),
             "input-queue-decline" => {
                 let approval = self.core.read(cx).input_queue.queue.approval();
                 self.answer_input(approval, false, cx);
