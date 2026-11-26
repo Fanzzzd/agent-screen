@@ -74,6 +74,12 @@ pub struct Core {
     pub input_queue: crate::input_queue::InputQueue,
     /// The user's Autonomy Mode and the Kept Windows (ADR 0025).
     pub autonomy: crate::autonomy::Autonomy,
+    /// Window Requests waiting in Auto for a window In Use, by display.
+    pub window_waits: HashMap<DisplayId, crate::autonomy::WindowWait>,
+    window_wait_serial: u64,
+    /// Why the mode left a display's Window Request to the user, for its
+    /// card's line.
+    pub window_notes: HashMap<DisplayId, crate::autonomy::CardNote>,
     forwarders: HashMap<DisplayId, Forwarder>,
     /// The numbered elements of each window an agent has looked at, by
     /// display. Dropped with the display.
@@ -164,6 +170,9 @@ impl Core {
             displays,
             input_queue: Default::default(),
             autonomy: crate::autonomy::Autonomy::load(),
+            window_waits: HashMap::new(),
+            window_wait_serial: 0,
+            window_notes: HashMap::new(),
             forwarders: HashMap::new(),
             elements: HashMap::new(),
             closed: HashSet::new(),
@@ -1228,6 +1237,52 @@ impl Core {
             self.autonomy_changed(cx);
         }
         ended
+    }
+
+    /// Wait in Auto for window `window` to be no longer In Use, as a line
+    /// on display `id`. A newer wait on the display replaces it.
+    pub fn wait_for_window(
+        &mut self,
+        id: DisplayId,
+        window: agent_screen_model::request::NamedWindow,
+        cx: &mut Context<Self>,
+    ) -> (
+        u64,
+        futures::channel::oneshot::Receiver<crate::autonomy::WaitAnswer>,
+    ) {
+        self.window_wait_serial += 1;
+        let serial = self.window_wait_serial;
+        let (wait, rx) = crate::autonomy::WindowWait::new(serial, window);
+        self.window_waits.insert(id, wait);
+        cx.notify();
+        (serial, rx)
+    }
+
+    /// The wait `serial` on display `id` ended.
+    pub fn end_window_wait(&mut self, id: DisplayId, serial: u64, cx: &mut Context<Self>) {
+        if self
+            .window_waits
+            .get(&id)
+            .is_some_and(|w| w.serial == serial)
+        {
+            self.window_waits.remove(&id);
+            cx.notify();
+        }
+    }
+
+    /// The user answered display `id`'s waiting line.
+    pub fn answer_window_wait(
+        &mut self,
+        id: DisplayId,
+        answer: crate::autonomy::WaitAnswer,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let answered = self
+            .window_waits
+            .get_mut(&id)
+            .is_some_and(|w| w.answer(answer));
+        cx.notify();
+        answered
     }
 
     /// What a change of mode does to work in progress.

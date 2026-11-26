@@ -1049,6 +1049,29 @@ async fn debug_show(
         });
         return Ok(json!({ "changed": changed, "mode": crate::autonomy::mode().as_str() }));
     }
+    // The display's waiting Window Request in Auto, and its buttons.
+    if let Some(answer) = match surface.as_str() {
+        "window-wait-give" => Some(Some(crate::autonomy::WaitAnswer::HandOver)),
+        "window-wait-keep" => Some(Some(crate::autonomy::WaitAnswer::Keep)),
+        "window-wait" => Some(None),
+        _ => None,
+    } {
+        usable(core, connection, p, id, "debugShow", cx)?;
+        return core.update(cx, |c, cx| {
+            let Some(wait) = c.window_waits.get(&id) else {
+                return Err(ControlError::invalid(
+                    "no Window Request is waiting on this display",
+                ));
+            };
+            let line = json!({
+                "windowId": wait.window.target.window_id,
+                "app": wait.window.app,
+                "sinceS": wait.since.elapsed().as_secs(),
+            });
+            let answered = answer.is_some_and(|a| c.answer_window_wait(id, a, cx));
+            Ok(json!({ "wait": line, "answered": answered }))
+        });
+    }
     // Allow itself, through the shell, comes after this.
     if matches!(surface.as_str(), "input-queue" | "input-queue-approved") {
         core.update(cx, |c, cx| -> Result<(), ControlError> {

@@ -4020,6 +4020,8 @@ impl Shell {
     ) -> Task<bool> {
         let given = self.core.update(cx, |core, cx| {
             let out = core.displays.give_back(id, target);
+            // Taken back: no Autonomy Mode takes it again (ADR 0025).
+            core.autonomy.keep(target.window_id);
             cx.notify();
             out
         });
@@ -5831,6 +5833,8 @@ impl Shell {
                     }
                     let landed = core.displays.commit_hand_over(id, &ticket, named);
                     if landed {
+                        // The user's own Handover: no longer a Kept Window.
+                        core.autonomy.release(target.window_id);
                         // Handed over again: the app's late windows are the
                         // agent's to have, not to send back.
                         core.returning

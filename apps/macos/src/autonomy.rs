@@ -148,6 +148,54 @@ pub fn sync_monitor(mode: Mode) {
     }
 }
 
+/// A Window Request waiting in Auto for a window In Use: a line on the
+/// display's tile and in the Viewer header, with no card (ADR 0025).
+pub struct WindowWait {
+    pub serial: u64,
+    pub window: agent_screen_model::request::NamedWindow,
+    pub since: Instant,
+    answer: Option<futures::channel::oneshot::Sender<WaitAnswer>>,
+}
+
+/// The user's answer on the waiting line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaitAnswer {
+    /// Hand Over: the user's own Handover.
+    HandOver,
+    /// Keep: the window becomes a Kept Window.
+    Keep,
+}
+
+impl WindowWait {
+    pub fn new(
+        serial: u64,
+        window: agent_screen_model::request::NamedWindow,
+    ) -> (Self, futures::channel::oneshot::Receiver<WaitAnswer>) {
+        let (tx, rx) = futures::channel::oneshot::channel();
+        (
+            WindowWait {
+                serial,
+                window,
+                since: Instant::now(),
+                answer: Some(tx),
+            },
+            rx,
+        )
+    }
+
+    /// The user answered. False when it was answered already.
+    pub fn answer(&mut self, answer: WaitAnswer) -> bool {
+        self.answer.take().is_some_and(|tx| tx.send(answer).is_ok())
+    }
+}
+
+/// Why the mode left a Window Request to the user, for its card's line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CardNote {
+    Kept,
+    Protected(String),
+}
+
 /// Who changed the mode, for the log.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
@@ -249,6 +297,11 @@ impl Autonomy {
         true
     }
 
+    /// Whether the app `bundle` is a Protected App now.
+    pub fn protected(&self, bundle: Option<&str>) -> bool {
+        autonomy::protected(bundle, &clients(), &self.setting.protected)
+    }
+
     /// The resolved list, for `debugAutonomy`: exact ids, prefixes ending in
     /// a dot, the clients' apps and the user's additions.
     pub fn protected_list(&self) -> Vec<String> {
@@ -262,6 +315,18 @@ impl Autonomy {
         list.sort();
         list.dedup();
         list
+    }
+
+    /// The user took window `window` back, or answered Keep for it.
+    pub fn keep(&mut self, window: u32) {
+        if window != 0 {
+            self.kept.keep(window);
+        }
+    }
+
+    /// The user handed it over themselves, or their words named it.
+    pub fn release(&mut self, window: u32) {
+        self.kept.release(window);
     }
 
     /// `get_diagnostics`' shape, from the main thread.
