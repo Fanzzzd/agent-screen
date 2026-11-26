@@ -184,25 +184,24 @@ pub enum PopupTyped {
     Slow(usize),
 }
 
-/// The longest gap between two keys of a title. AppKit and Chromium end a
-/// type-ahead search about a second after its last key, and a key after
-/// that starts a new search. No space is ever typed, so a late key can't
-/// open the menu, but it could choose another item: the gap is measured
-/// as the key goes out, after the process's real-input gate.
-const KEY_GAP: Duration = Duration::from_millis(300);
-
 /// After a key, give the app a moment to take it and to run what a new
 /// choice triggers, such as a change handler that focuses another field,
 /// so the focus check before the next key sees it: until the pop-up shows
-/// another item, then a little longer, or at most `KEY_SETTLE` in all.
-/// Well under `KEY_GAP`, which the next key must still meet.
-/// `before` is what the pop-up showed just before the key.
-fn settle_key(element: &super::ax::Sendable, before: &Option<String>) {
-    let start = Instant::now();
-    while start.elapsed() < KEY_SETTLE {
-        thread::sleep(Duration::from_millis(15));
+/// another item, at most `KEY_SETTLE`, then a little longer, never past
+/// `until`, which leaves time for that check before the next key is due
+/// (`type_ahead::Pacer`). `before` is what the pop-up showed just before
+/// the key.
+fn settle_key(element: &super::ax::Sendable, before: &Option<String>, until: Instant) {
+    let shows_by = until.min(Instant::now() + KEY_SETTLE);
+    loop {
+        let left = shows_by.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(15).min(left));
         if super::ax::string_attribute(element.get(), "AXValue") != *before {
-            thread::sleep(Duration::from_millis(80));
+            let left = until.saturating_duration_since(Instant::now());
+            thread::sleep(Duration::from_millis(80).min(left));
             return;
         }
     }
@@ -1060,7 +1059,7 @@ impl Forwarder {
     /// is its app's focused element. Each key goes out only while the
     /// button's window is on this display and is its app's key window, the
     /// app hasn't come to the front, no Takeover started, and the last key
-    /// went out less than `KEY_GAP` before.
+    /// went out less than `type_ahead::KEY_GAP` before.
     ///
     /// A user who clicks their own window of the same app between the check
     /// and the key could still get that one key: the check is an AX call,
@@ -1140,11 +1139,16 @@ impl Forwarder {
                 thread::sleep(Duration::from_millis(20));
             }
             let front_at_start = is_front(target.pid);
-            let mut last: Option<Instant> = None;
+            // The pacing reads one clock, from the button's focus check on.
+            let mut pacer = agent_screen_model::type_ahead::Pacer::new();
+            let clock = |at: Instant| at.saturating_duration_since(asked);
+            let mut checked_from = Instant::now();
             let mut shown = None;
             for (typed, character) in keys.chars().enumerate() {
                 if typed > 0 {
-                    settle_key(&element, &shown);
+                    let until = asked + pacer.settle_until(clock(Instant::now()));
+                    settle_key(&element, &shown, until);
+                    checked_from = Instant::now();
                 }
                 if is_stopped() {
                     return PopupTyped::Stopped(typed);
@@ -1181,7 +1185,7 @@ impl Forwarder {
                 // off the display. Checked once per key, with the gate held
                 // just before the key, so nothing comes between the check
                 // and the key; a second check would push the key past
-                // KEY_GAP.
+                // type_ahead::KEY_GAP.
                 let reaches_button = !(!front_at_start && is_front(target.pid))
                     && placed()
                     && (super::ax::is_window_or_sheet_focused(target)
@@ -1191,13 +1195,24 @@ impl Forwarder {
                 if !reaches_button {
                     return PopupTyped::Interrupted(typed);
                 }
-                if last.is_some_and(|at| at.elapsed() >= KEY_GAP) {
+                let now = clock(Instant::now());
+                pacer.checked(clock(checked_from), now);
+                if pacer.too_late(now) {
+                    log::info!(
+                        "input: pop-up key {typed} of {} would go out {:?} after the last, past {:?}; the slowest check took {:?}",
+                        keys.chars().count(),
+                        pacer.gap(now).unwrap_or_default(),
+                        agent_screen_model::type_ahead::KEY_GAP,
+                        pacer.slowest_check(),
+                    );
                     return PopupTyped::Slow(typed);
                 }
+                // The key's event time, which the app's search measures, is
+                // stamped as it goes out.
+                pacer.sent(clock(Instant::now()));
                 for event in &events {
                     post_now(event, key_pid, true);
                 }
-                last = Some(Instant::now());
                 drop(input);
                 thread::sleep(Duration::from_millis(4));
             }

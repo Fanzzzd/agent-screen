@@ -51,6 +51,7 @@ pub mod spares;
 pub mod substitute;
 pub mod tcc_reset;
 pub mod tree;
+pub mod type_ahead;
 pub mod typing;
 pub mod viewer_keys;
 pub mod viewer_press;
