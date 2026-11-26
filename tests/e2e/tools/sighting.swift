@@ -2,7 +2,8 @@
 // window a process of the test shows there. Samples the window list every
 // INTERVAL ms (default 10) until stdin closes, then prints one JSON line per
 // window seen: owner, pid, executable, title, frame, first and last seen and
-// how long it showed, in ms since <since>.
+// how long it showed, in ms since <since>, and the 1-minute load average as
+// it first showed.
 //
 //     sighting <script pid> <since, s since 1970> <mark> [<skip path>...]
 //
@@ -120,6 +121,12 @@ struct Seen {
   var first: Double
   var last: Double
   var ms: Double
+  var load: Double
+}
+
+func loadAverage() -> Double {
+  var load = [Double](repeating: 0, count: 1)
+  return getloadavg(&load, 1) == 1 ? load[0] : 0
 }
 
 var seen: [Int: Seen] = [:]
@@ -171,7 +178,7 @@ while !done {
         owner: w[kCGWindowOwnerName as String] as? String ?? "", pid: pid,
         title: w[kCGWindowName as String] as? String ?? "",
         layer: w[kCGWindowLayer as String] as? Int ?? 0, frame: r, first: elapsed, last: elapsed,
-        ms: interval > 0 ? Double(interval) : 1)
+        ms: interval > 0 ? Double(interval) : 1, load: loadAverage())
       order.append(id)
     }
   }
@@ -185,6 +192,7 @@ for id in order {
     "title": s.title, "layer": s.layer,
     "frame": [s.frame.minX, s.frame.minY, s.frame.width, s.frame.height],
     "first": Int(s.first), "last": Int(s.last), "ms": Int(s.ms.rounded()),
+    "load": (s.load * 10).rounded() / 10,
   ]
   print(String(data: try! JSONSerialization.data(withJSONObject: out), encoding: .utf8)!)
 }
