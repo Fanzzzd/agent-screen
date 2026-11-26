@@ -179,27 +179,30 @@ impl Setting {
     }
 
     /// A file that says YOLO, an unknown mode or unreadable JSON loads as
-    /// Ask.
+    /// Ask. So does one whose Protected Apps can't be read, with only the
+    /// built-in ones: a damaged list never leaves Auto acting on apps the
+    /// user protected.
     pub fn from_json(text: &str) -> Setting {
         let Ok(value) = serde_json::from_str::<Value>(text) else {
+            return Setting::default();
+        };
+        let protected: Option<BTreeSet<String>> = match value.get("protected") {
+            None => Some(BTreeSet::new()),
+            Some(Value::Array(list)) => list
+                .iter()
+                .map(|id| id.as_str().map(str::trim))
+                .filter(|id| id != &Some(""))
+                .map(|id| id.map(String::from))
+                .collect(),
+            Some(_) => None,
+        };
+        let Some(protected) = protected else {
             return Setting::default();
         };
         let base = match value.get("mode").and_then(Value::as_str) {
             Some("auto") => Base::Auto,
             _ => Base::Ask,
         };
-        let protected = value
-            .get("protected")
-            .and_then(Value::as_array)
-            .map(|list| {
-                list.iter()
-                    .filter_map(Value::as_str)
-                    .map(str::trim)
-                    .filter(|id| !id.is_empty())
-                    .map(String::from)
-                    .collect()
-            })
-            .unwrap_or_default();
         let yolo_ended = value
             .get("yoloEnded")
             .and_then(Value::as_str)
@@ -338,6 +341,11 @@ pub fn decide(mode: Mode, crossing: Crossing, subject: Subject, hands_now: &Hand
     if mode == Mode::Ask || protected || kept {
         return Decision::AskPath;
     }
+    // No mode moves a window while the screen is locked: In Use reads
+    // nothing then, and the user may have been typing in it.
+    if hands_now.locked && matches!(crossing, Crossing::UserWindow | Crossing::ReviewWindow) {
+        return Decision::WaitHands(Busy::Locked);
+    }
     match (crossing, mode) {
         (_, Mode::Ask) => Decision::AskPath,
         // Arbitration between two agents: no mode decides it.
@@ -355,6 +363,26 @@ pub fn decide(mode: Mode, crossing: Crossing, subject: Subject, hands_now: &Hand
             hands(hands_now.yolo_may_start())
         }
     }
+}
+
+/// The mode an operation on a window of `protected`'s app runs under:
+/// a Protected App keeps Ask's rules in every mode.
+pub fn for_target(mode: Mode, protected: bool) -> Mode {
+    if protected { Mode::Ask } else { mode }
+}
+
+/// Whether what an armed hold kept may go out after a mode's grant: the
+/// saved front app `front` is in front again (`front_now`), and its saved
+/// focused window, when there was one, is focused in it (`focused_now`).
+/// The app reporting its window alone isn't enough: after a refused
+/// activation the loan's app is still in front and would get the keys.
+pub fn replay_confirmed(
+    front: i32,
+    window: Option<u32>,
+    front_now: Option<i32>,
+    focused_now: Option<u32>,
+) -> bool {
+    front_now == Some(front) && window.is_none_or(|w| focused_now == Some(w))
 }
 
 /// `kVK_ANSI_Period`.
@@ -472,6 +500,27 @@ mod tests {
             decide(Mode::Auto, Crossing::UserWindow, used(), &rested()),
             Decision::WaitWindow
         );
+    }
+
+    #[test]
+    fn no_mode_takes_a_window_while_the_screen_is_locked() {
+        let locked = hands_of(Sample {
+            locked: true,
+            ..sample(60_000)
+        });
+        for mode in [Mode::Auto, Mode::Yolo] {
+            for crossing in [Crossing::UserWindow, Crossing::ReviewWindow] {
+                let d = decide(mode, crossing, free(), &locked);
+                assert!(
+                    d == Decision::WaitHands(Busy::Locked) || d == Decision::AskPath,
+                    "{mode:?} {crossing:?}: {d:?}"
+                );
+            }
+            assert_eq!(
+                decide(mode, Crossing::UserWindow, free(), &locked),
+                Decision::WaitHands(Busy::Locked)
+            );
+        }
     }
 
     #[test]
@@ -867,5 +916,47 @@ mod tests {
         ] {
             assert_eq!(YoloEnd::parse(end.as_str()), Some(end));
         }
+    }
+
+    #[test]
+    fn a_damaged_protected_list_fails_closed() {
+        let ok = Setting::from_json(r#"{"mode":"auto","protected":["com.example.bank"," "]}"#);
+        assert_eq!(ok.mode(), Mode::Auto);
+        assert_eq!(ok.protected.len(), 1);
+        for text in [
+            r#"{"mode":"auto","protected":"com.example.bank"}"#,
+            r#"{"mode":"auto","protected":["com.example.bank",7]}"#,
+            r#"{"mode":"auto","protected":null}"#,
+            r#"{"mode":"auto","protected":{"a":1}}"#,
+            r#"["auto"]"#,
+            "{\"mode\":\"auto\"",
+            r#"{"mode":"yolo"}"#,
+            r#"{"mode":"AUTO"}"#,
+        ] {
+            let s = Setting::from_json(text);
+            assert_eq!(s.mode(), Mode::Ask, "{text}");
+            assert!(s.protected.is_empty(), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_protected_app_keeps_ask_in_every_mode() {
+        for mode in [Mode::Ask, Mode::Auto, Mode::Yolo] {
+            assert_eq!(for_target(mode, true), Mode::Ask);
+            assert_eq!(for_target(mode, false), mode);
+        }
+    }
+
+    #[test]
+    fn held_keys_go_out_only_with_the_front_and_window_back() {
+        // Front and window back.
+        assert!(replay_confirmed(7, Some(70), Some(7), Some(70)));
+        // The app still reports its window, but the loan's app is front.
+        assert!(!replay_confirmed(7, Some(70), Some(9), Some(70)));
+        // Front back, another window focused.
+        assert!(!replay_confirmed(7, Some(70), Some(7), Some(71)));
+        // No saved window: the front decides.
+        assert!(replay_confirmed(7, None, Some(7), None));
+        assert!(!replay_confirmed(7, None, Some(9), None));
     }
 }

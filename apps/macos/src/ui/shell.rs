@@ -1120,7 +1120,15 @@ impl Shell {
             Native::YoloEnds(why) => self.yolo_ends(why, cx),
             Native::StopChord => self.stop_autonomy(crate::autonomy::Source::Chord, cx),
             Native::GraceOver => {
-                if self.core.read(cx).input_queue.queue.mode_grant().is_some() {
+                // An armed grant, even one Allow made the user's.
+                if self
+                    .core
+                    .read(cx)
+                    .input_queue
+                    .queue
+                    .grant()
+                    .is_some_and(|g| g.armed)
+                {
                     crate::mac::activity::interrupted();
                     log::info!("autonomy: YOLO's grace is over; the grant ends");
                     self.revoke_input(cx);
@@ -1970,13 +1978,22 @@ impl Shell {
             let input = &self.core.read(cx).input_queue;
             (input.queue.grant().is_some(), input.ending())
         };
+        // By whether a hold was armed for the grant, not by who opened it
+        // last: Allow makes a mode's grant the user's, and its hold must
+        // still end.
         if let Some(end) = ending
-            && matches!(end.opened, agent_screen_model::input_queue::Opened::Mode(_))
+            && end.armed
         {
             self.end_mode_grant(end, cx);
             return;
         }
         if let Some(end) = ending {
+            // No hold belongs to a grant the user opened; one left armed
+            // would swallow their next key.
+            if crate::mac::armed_hold::armed() && !crate::mac::ime::borrowing() {
+                log::warn!("armed hold: still on at a user grant's end; letting go");
+                crate::mac::armed_hold::finish(None, false);
+            }
             // Keep observing through restoration: a user touch during
             // cleanup must prevent restoring over their new action.
             let saved = self
@@ -2237,7 +2254,19 @@ impl Shell {
                         && input.queue.active().is_none()
                         && input.mode_wanted()
                 };
-                if !still || shell.loan_running || shell.restoring {
+                // A Keyboard Borrow that started during those reads owns
+                // the armed hold.
+                if !still || shell.loan_running || shell.restoring || crate::mac::ime::borrowing() {
+                    shell.drive_queue(cx);
+                    return;
+                }
+                // In Auto the decision read the monitor's last sample: a
+                // touch since, read now, with nothing awaited before the
+                // observer arms, keeps the grant shut.
+                if mode == agent_screen_model::autonomy::Mode::Auto
+                    && activity::idle_ms_now() < hands.rest_ms()
+                {
+                    log::info!("autonomy: the user touched after the sample; no grant yet");
                     shell.drive_queue(cx);
                     return;
                 }

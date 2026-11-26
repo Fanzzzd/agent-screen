@@ -51,3 +51,4 @@ Ask and Auto are stored. YOLO is kept in memory and ends when the Mac locks or s
 - A composition with no candidate window, as Korean 2-set shows none, is not seen. A front change commits its syllable.
 - A video paused in a front window stops counting as use 120 s after the last touch.
 - Agent Screen now registers a global hotkey and, for mode-opened operations, an active event tap. macOS can disable a tap that runs late; the armed hold enables it again while it holds.
+- `autonomy-<instance>.json` can be written by anything with the user's file access, an agent's shell included, which could set Auto for the next launch: the same trust the MCP clients' config files already rest on. A file that can't be read, or whose Protected Apps can't, loads as Ask, and none ever loads as YOLO.

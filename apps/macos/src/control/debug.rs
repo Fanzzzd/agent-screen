@@ -357,7 +357,16 @@ pub(super) async fn handle(
         "debugIcon" => debug_icon(cx),
         "debugShow" => debug_show(core, connection, p, cx).await,
         "debugGlow" => debug_glow(p, cx).await,
-        "debugAutonomy" => Ok(debug_autonomy(core, cx)),
+        // The e2e instance only: it shows the user's activity, Kept
+        // Windows and agent clients.
+        "debugAutonomy" => {
+            if agent_screen_mcp::endpoint::instance().as_deref() != Some("e2e") {
+                return Some(Err(ControlError::invalid(
+                    "debugAutonomy requires the isolated e2e instance",
+                )));
+            }
+            Ok(debug_autonomy(core, cx))
+        }
         // The e2e instance only: a release build with debug methods on the
         // default instance can't fake the user's idle time.
         "debugActivity" => {

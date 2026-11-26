@@ -135,6 +135,10 @@ pub struct Grant {
     pub since_ms: u64,
     pub idle_since_ms: Option<u64>,
     pub opened: Opened,
+    /// An armed hold runs for it: the mode opened it. Allow makes the
+    /// grant the user's but leaves this set, so cleanup still ends the
+    /// hold (ADR 0025).
+    pub armed: bool,
     participants: BTreeSet<Owner>,
     done: BTreeSet<Owner>,
 }
@@ -154,6 +158,8 @@ pub struct GrantEnd {
     pub id: u64,
     pub restore: bool,
     pub opened: Opened,
+    /// The grant's armed hold must end with it.
+    pub armed: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -561,6 +567,7 @@ impl Queue {
             since_ms: now,
             idle_since_ms: None,
             opened: Opened::User,
+            armed: false,
             participants,
             done: BTreeSet::new(),
         });
@@ -601,6 +608,7 @@ impl Queue {
             since_ms: now,
             idle_since_ms: None,
             opened: Opened::Mode(mode),
+            armed: true,
             participants,
             done: BTreeSet::new(),
         });
@@ -905,6 +913,7 @@ impl Queue {
                 id: grant.id,
                 restore,
                 opened: grant.opened,
+                armed: grant.armed,
             });
         }
     }
@@ -2146,6 +2155,21 @@ mod tests {
         assert_eq!(q.start(6), Some(bank));
         // A stale card can't approve twice.
         assert!(!q.allow(card, 7));
+    }
+
+    #[test]
+    fn an_allowed_mode_grant_still_ends_its_armed_hold() {
+        let mut q = queue();
+        let drag = add(&mut q, "a", 1, "drag", 0);
+        assert!(q.open_by_mode(Mode::Yolo, 0));
+        assert!(q.allow(q.approval(), 1));
+        assert!(q.grant().unwrap().armed);
+        assert_eq!(q.start(1), Some(drag));
+        assert!(q.finish(drag, 2));
+        q.stop();
+        let end = q.pending_end().expect("the grant ends");
+        assert_eq!(end.opened, Opened::User);
+        assert!(end.armed);
     }
 
     #[test]

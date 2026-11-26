@@ -1,7 +1,8 @@
 //! The Stop chord, ⌃⌥⌘. (ADR 0025): registered with `RegisterEventHotKey`
 //! while the mode is Auto or YOLO, and unregistered in Ask so no other app
-//! loses the chord. During an armed hold the hold's tap sees the chord
-//! first (`armed_hold`); both send `Native::StopChord`. Main thread.
+//! loses the chord. During an armed hold or a key hold that tap sees the
+//! chord first (`armed_hold`, `key_hold`); each sends `Native::StopChord`.
+//! Main thread.
 
 use agent_screen_model::autonomy::{Mode, PERIOD_KEYCODE};
 use std::cell::Cell;

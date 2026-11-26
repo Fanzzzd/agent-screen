@@ -36,6 +36,12 @@ unsafe impl Send for Held {}
 
 enum State {
     Idle,
+    /// `finish` is sending on what was held: the user's new input queues
+    /// behind it, so nothing overtakes a held event and no release passes
+    /// before its press.
+    Draining {
+        held: Vec<(Kind, Held)>,
+    },
     Armed {
         id: u64,
         mode: Mode,
@@ -117,7 +123,7 @@ pub fn grace_over() -> bool {
         } => armed
             .deadline(*mode)
             .is_some_and(|deadline| millis(*started) >= deadline),
-        State::Idle => false,
+        _ => false,
     }
 }
 
@@ -125,7 +131,7 @@ pub fn grace_over() -> bool {
 pub fn held() -> usize {
     match &*state() {
         State::Armed { held, .. } => held.len(),
-        State::Idle => 0,
+        _ => 0,
     }
 }
 
@@ -134,10 +140,20 @@ pub fn held() -> usize {
 /// `confirmed`, whether the user's window is key again, without which the
 /// key downs are dropped. Blocks only to post.
 pub fn finish(pointer: Option<(f64, f64)>, confirmed: bool) {
-    let taken = std::mem::replace(&mut *state(), State::Idle);
-    if let Some(Some(tap)) = TAP.get() {
-        CGEvent::tap_enable(&tap.0, false);
-    }
+    let taken = {
+        let mut s = state();
+        match *s {
+            State::Armed { .. } => std::mem::replace(&mut *s, State::Draining { held: Vec::new() }),
+            // Another finish is draining: it lets go.
+            State::Draining { .. } => return,
+            State::Idle => {
+                if let Some(Some(tap)) = TAP.get() {
+                    CGEvent::tap_enable(&tap.0, false);
+                }
+                return;
+            }
+        }
+    };
     let State::Armed {
         armed,
         started,
@@ -147,26 +163,56 @@ pub fn finish(pointer: Option<(f64, f64)>, confirmed: bool) {
     else {
         return;
     };
-    send_on(held, &armed, started, pointer, confirmed);
-}
-
-fn send_on(
-    held: Vec<(Kind, Held)>,
-    armed: &Armed,
-    started: Instant,
-    pointer: Option<(f64, f64)>,
-    confirmed: bool,
-) {
     let key_downs = held.iter().filter(|(k, _)| *k == Kind::KeyDown).count();
+    let mut events = held.len();
+    let mut discarded = if confirmed { 0 } else { key_downs };
     let now = millis(started);
+    send(&held, pointer, confirmed);
+    // What the user did meanwhile goes out after, in order. The tap goes
+    // off under the same lock that finds the queue empty.
+    loop {
+        let more = {
+            let mut s = state();
+            match &mut *s {
+                State::Draining { held } if !held.is_empty() => std::mem::take(held),
+                _ => {
+                    *s = State::Idle;
+                    if let Some(Some(tap)) = TAP.get() {
+                        CGEvent::tap_enable(&tap.0, false);
+                    }
+                    break;
+                }
+            }
+        };
+        events += more.len();
+        if !confirmed {
+            discarded += more.iter().filter(|(k, _)| *k == Kind::KeyDown).count();
+        }
+        send(&more, pointer, confirmed);
+    }
     let stats = Stats {
-        events: held.len(),
+        events,
         key_downs,
         ms: armed.first().map_or(0, |first| now.saturating_sub(first)),
         sent: confirmed,
-        discarded: if confirmed { 0 } else { key_downs },
+        discarded,
     };
-    for (kind, Held(event)) in &held {
+    if events == 0 {
+        log::info!("armed hold: off, nothing held");
+    } else if confirmed {
+        log::info!("armed hold: off, sent on {stats:?}");
+    } else {
+        log::warn!(
+            "armed hold: off; the user's window couldn't be confirmed key, so the held key downs were dropped rather than sent to the agent's window: {stats:?}"
+        );
+    }
+    *LAST.lock().unwrap_or_else(|e| e.into_inner()) = Some(stats);
+}
+
+/// Send on `held` in order, tagged so the tap lets it pass; without
+/// `confirmed`, the key downs are dropped.
+fn send(held: &[(Kind, Held)], pointer: Option<(f64, f64)>, confirmed: bool) {
+    for (kind, Held(event)) in held {
         if !confirmed && !sent_on_discard(*kind) {
             continue;
         }
@@ -178,16 +224,6 @@ fn send_on(
         CGEvent::set_integer_value_field(Some(event), CGEventField::EventSourceUserData, TAG);
         CGEvent::post(CGEventTapLocation::HIDEventTap, Some(event));
     }
-    if held.is_empty() {
-        log::info!("armed hold: off, nothing held");
-    } else if confirmed {
-        log::info!("armed hold: off, sent on {stats:?}");
-    } else {
-        log::warn!(
-            "armed hold: off; the user's window couldn't be confirmed key, so the held key downs were dropped rather than sent to the agent's window: {stats:?}"
-        );
-    }
-    *LAST.lock().unwrap_or_else(|e| e.into_inner()) = Some(stats);
 }
 
 fn millis(since: Instant) -> u64 {
@@ -343,6 +379,17 @@ unsafe extern "C-unwind" fn seen(
         return event.as_ptr();
     };
     let mut guard = state();
+    if let State::Draining { held } = &mut *guard {
+        // Behind what `finish` is sending on.
+        if let ArmedEvent::Input(input) = seen
+            && held.len() < agent_screen_model::key_hold::MAX_EVENTS
+            && let Some(copy) = CGEvent::new_copy(Some(cg))
+        {
+            held.push((input, Held(copy)));
+            return std::ptr::null_mut();
+        }
+        return event.as_ptr();
+    }
     let State::Armed {
         id,
         mode,
@@ -369,7 +416,8 @@ unsafe extern "C-unwind" fn seen(
             std::ptr::null_mut()
         }
         ArmedVerdict::Pass | ArmedVerdict::Touched => event.as_ptr(),
-        ArmedVerdict::Hold | ArmedVerdict::HoldAndEnd => {
+        ArmedVerdict::Drop => std::ptr::null_mut(),
+        verdict @ (ArmedVerdict::Hold | ArmedVerdict::HoldAndEnd) => {
             let Some(copy) = CGEvent::new_copy(Some(cg)) else {
                 return event.as_ptr();
             };
@@ -392,6 +440,11 @@ unsafe extern "C-unwind" fn seen(
                 }
             } else {
                 super::real_input::user_event(kind);
+            }
+            if verdict == ArmedVerdict::HoldAndEnd {
+                log::warn!("armed hold: full; the operation ends now");
+                dispatch2::DispatchQueue::main()
+                    .exec_async(|| super::native::send(super::native::Native::GraceOver));
             }
             std::ptr::null_mut()
         }

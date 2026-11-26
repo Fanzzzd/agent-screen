@@ -4031,6 +4031,11 @@ async fn ask_window(
         }
         (Resolution::HandedOver(_), None) => {}
         (Resolution::Declined, Some(held)) => {
+            // A Review Display's window is the user's to keep: no mode
+            // takes it on a repeat (ADR 0025).
+            if held.place == held::Place::Review {
+                core.update(cx, |c, _| c.autonomy.keep(target.window_id));
+            }
             return Err(ControlError::failed(held::declined_message(&app, held)));
         }
         (Resolution::Declined, None) => {
@@ -4301,6 +4306,41 @@ async fn hand_over(
             .or_else(|| crate::dismissal::home_of(target, Some(bounds)))
     })
     .await;
+    // The mode decided before that read: decide again, with no await
+    // between this and the move, in case the user pressed Stop or started
+    // using the window meanwhile.
+    if let Authority::Mode(_) = authority {
+        let w = target.window_id;
+        let kept = core.read_with(cx, |c, _| c.autonomy.kept.contains(w));
+        let (in_use, pressed, hands) = off(cx, move || {
+            (
+                crate::mac::activity::in_use(w),
+                crate::mac::activity::pressed_on(w),
+                crate::mac::activity::hands(),
+            )
+        })
+        .await;
+        let subject = autonomy::Subject {
+            kept,
+            in_use,
+            pressed,
+            ..autonomy::Subject::default()
+        };
+        let again = autonomy::decide(
+            crate::autonomy::mode(),
+            autonomy::Crossing::UserWindow,
+            subject,
+            &hands,
+        );
+        if again != autonomy::Decision::Go {
+            log::info!(
+                "display {id}: window {w} ({app_name}) not taken: the mode decided {again:?} at the move"
+            );
+            return Err(ControlError::failed(format!(
+                "the {app_name} window wasn't moved: the user changed the Autonomy Mode or started using it. Call place_window again to ask for it"
+            )));
+        }
+    }
     let from_dock = home.as_ref().is_some_and(|h| h.minimized);
     let ticket = core
         .update(cx, |c, cx| {
@@ -8138,12 +8178,6 @@ async fn through_input_method(
     source: Option<String>,
     cx: &mut AsyncApp,
 ) -> Result<Params, ControlError> {
-    // In Auto the borrow waits up to `BORROW_WAIT_MS` for 2 s of quiet and
-    // no composition, then runs (ADR 0025); in Ask it fails at once, as
-    // ADR 0008 says.
-    borrow_wait(cx).await;
-    // Refused before the glow shows: no flash for a call that sends nothing.
-    crate::mac::ime::may_borrow(keys.len()).map_err(ControlError::failed)?;
     let forwarder = core.update(cx, |c, _| c.forwarder(id));
     let bounds = cg::display_bounds(id);
     keys_allowed(&forwarder, bounds, cx).await?;
@@ -8151,6 +8185,22 @@ async fn through_input_method(
         forwarder.keys_done().await;
         return Err(no_keyboard_target());
     };
+    // The target first: a Protected App keeps Ask's rules, ADR 0008's 2 s
+    // of quiet included, in every mode (ADR 0025).
+    let bundle = off(cx, move || app::bundle_id(target.pid)).await;
+    let protected = core.read_with(cx, |c, _| c.autonomy.protected(bundle.as_deref()));
+    let mode = autonomy::for_target(crate::autonomy::mode(), protected);
+    // In Auto the borrow waits up to `BORROW_WAIT_MS` for 2 s of quiet and
+    // no composition, then runs (ADR 0025); in Ask it fails at once, as
+    // ADR 0008 says.
+    borrow_wait(mode, cx).await;
+    // The user may have changed the mode meanwhile.
+    let mode = autonomy::for_target(crate::autonomy::mode(), protected);
+    // Refused before the glow shows: no flash for a call that sends nothing.
+    if let Err(why) = crate::mac::ime::may_borrow(keys.len(), mode) {
+        forwarder.keys_done().await;
+        return Err(ControlError::failed(why));
+    }
     // Calls can overlap, and one that loses the session's input lock
     // returns while another types: each returns only its own borrow, so
     // the glow stays while any runs. The worker holds `borrow` until it
@@ -8193,7 +8243,7 @@ async fn through_input_method(
     let typed = cx
         .background_executor()
         .spawn(async move {
-            let typed = crate::mac::ime::type_keys(target, &keys, source.as_deref(), wake);
+            let typed = crate::mac::ime::type_keys(target, &keys, source.as_deref(), wake, mode);
             drop(borrow);
             typed
         })
@@ -8215,9 +8265,9 @@ async fn through_input_method(
 
 /// In Auto, wait for the hands to be quiet enough for a Keyboard Borrow,
 /// at most `BORROW_WAIT_MS`. Ask and YOLO don't wait.
-async fn borrow_wait(cx: &mut AsyncApp) {
+async fn borrow_wait(mode: autonomy::Mode, cx: &mut AsyncApp) {
     use agent_screen_model::user_activity::{BORROW_WAIT_MS, WAITING_SAMPLE_MS};
-    if crate::autonomy::mode() != autonomy::Mode::Auto {
+    if mode != autonomy::Mode::Auto {
         return;
     }
     let _waiting = crate::mac::activity::Waiting::start();
@@ -8225,7 +8275,7 @@ async fn borrow_wait(cx: &mut AsyncApp) {
     loop {
         let hands = off(cx, crate::mac::activity::hands).await;
         let decision = autonomy::decide(
-            crate::autonomy::mode(),
+            mode,
             autonomy::Crossing::KeyboardBorrow,
             autonomy::Subject::default(),
             &hands,

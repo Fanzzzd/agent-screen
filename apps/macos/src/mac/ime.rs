@@ -237,7 +237,8 @@ fn find_source(id: &str) -> Option<Source> {
 
 /// Whether `count` keys may borrow the user's keyboard now: why not, else
 /// Ok. Checked before the Red Glow shows, and again by `type_keys`.
-pub fn may_borrow(count: usize) -> Result<(), String> {
+/// `mode` is the one the borrow runs under: Ask for a Protected App.
+pub fn may_borrow(count: usize, mode: agent_screen_model::autonomy::Mode) -> Result<(), String> {
     if PER_KEY * count as u32 > LONGEST {
         return Err(format!(
             "at most {} keys go through the input method in one call; split the text",
@@ -256,7 +257,7 @@ pub fn may_borrow(count: usize) -> Result<(), String> {
     // YOLO overrides ADR 0008's 2 s of quiet: the user's keys are held
     // meanwhile (ADR 0025).
     let idle = user_idle();
-    let yolo = crate::autonomy::mode() == agent_screen_model::autonomy::Mode::Yolo;
+    let yolo = mode == agent_screen_model::autonomy::Mode::Yolo;
     if idle < QUIET.as_secs_f64() && !yolo {
         return Err(format!(
             "the user is using the keyboard or pointer (last input {idle:.1} s ago), and typing through the input method takes their keyboard; try again in a few seconds"
@@ -273,16 +274,16 @@ pub fn type_keys(
     keys: &[KeyChord],
     source: Option<&str>,
     wake: impl FnOnce(),
+    mode: agent_screen_model::autonomy::Mode,
 ) -> Result<Typed, String> {
     let _session = super::real_input::SESSION_INPUT.try_lock().map_err(|_| {
         "an operation is using the session's keyboard or pointer; try again after it ends"
             .to_string()
     })?;
-    may_borrow(keys.len())?;
+    may_borrow(keys.len(), mode)?;
     // In Auto and YOLO an armed hold keeps the user's keys from the agent's
     // app; in Auto their first key stops the borrow, in YOLO it runs on
     // for `HELD_GRACE_MS` (ADR 0025).
-    let mode = crate::autonomy::mode();
     let held = mode.acts() && super::armed_hold::start(mode);
     let yolo = held && mode == agent_screen_model::autonomy::Mode::Yolo;
     let release = |front: Option<i32>| {

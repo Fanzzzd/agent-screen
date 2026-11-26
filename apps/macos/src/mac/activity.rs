@@ -180,10 +180,12 @@ pub fn hands() -> Hands {
             s.tracker.observe(&next);
         } else {
             // A one-off read: the facts are this sample's, and it marks
-            // no window.
+            // no window, but for the one a held button presses on, so
+            // YOLO doesn't take a window the user is dragging.
+            let pointer_window = next.pointer_window.filter(|_| next.button_down);
             s.tracker.observe(&Sample {
                 active_window: None,
-                pointer_window: None,
+                pointer_window,
                 ..next
             });
         }
@@ -303,6 +305,17 @@ pub fn debug_json() -> Value {
     })
 }
 
+/// Since the user's last input, read now rather than from the monitor's
+/// last sample; the override's `idleMs` stands in for it.
+pub fn idle_ms_now() -> u64 {
+    let over = state()
+        .over
+        .as_ref()
+        .and_then(|o| o.get("idleMs"))
+        .and_then(Value::as_u64);
+    over.unwrap_or_else(|| (super::ime::user_idle() * 1000.0) as u64)
+}
+
 /// One look at the OS, with the override on top.
 fn sample() -> (Sample, u64) {
     let (over, serial) = {
@@ -327,9 +340,12 @@ fn sample() -> (Sample, u64) {
         }
         None => None,
     };
+    let button_down = flag("buttonDown").unwrap_or_else(super::real_input::user_button_down);
+    // A held button reads the window under it even while the pointer
+    // rests: the user may hold a window they are dragging.
     let pointer_window = match window("pointerWindow") {
         Some(w) => w,
-        None if active && !locked => window_under_pointer(),
+        None if (active || button_down) && !locked => window_under_pointer(),
         None => None,
     };
     let media_windows = match get("mediaWindows").and_then(|v| v.as_array().cloned()) {
@@ -344,7 +360,7 @@ fn sample() -> (Sample, u64) {
         idle_ms,
         active_window,
         pointer_window,
-        button_down: flag("buttonDown").unwrap_or_else(super::real_input::user_button_down),
+        button_down,
         key_down: flag("keyDown").unwrap_or_else(modifier_held),
         composing: flag("composing").unwrap_or_else(composing),
         secure_input: flag("secureInput").unwrap_or_else(super::ime::secure_input),

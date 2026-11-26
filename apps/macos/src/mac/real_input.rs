@@ -347,6 +347,9 @@ pub fn save() -> Saved {
     }
 }
 
+/// After the front app changes back, before held keys go out to it.
+const REPLAY_SETTLE: Duration = Duration::from_millis(200);
+
 /// Put the pointer and front app back. Not after the user took control:
 /// that would undo what they just did.
 pub fn restore(saved: Saved) {
@@ -356,21 +359,31 @@ pub fn restore(saved: Saved) {
 /// Put them back after a grant the Autonomy Mode opened, touched or not:
 /// the user's touch ended it, and their held input goes out once their
 /// pointer, front app and window are back (ADR 0025). Whether their
-/// focused window is key again.
+/// focused window is key again: their app in front, and that window
+/// focused in it. Without both, the held key downs are dropped.
 pub fn restore_by_mode(saved: Saved) -> bool {
+    let before = super::app::frontmost_pid();
     restore_with(saved, || false);
     let Some(front) = saved.front else {
         return true;
     };
-    // Agent Screen itself was in front, which nothing above brings back:
-    // the held keys go out only while it still is, never to the loan's app.
+    // Agent Screen's own window, as its Settings, was in front: the loan
+    // left its app there, so Agent Screen comes back itself.
     if front == std::process::id() as i32 {
-        return super::app::frontmost_pid() == Some(front);
+        super::ime::return_front_unless(front, || false);
     }
-    match saved.window {
-        Some(window) => super::ax::focused_window_id(front) == Some(window),
-        None => super::app::frontmost_pid() == Some(front),
+    // macOS names the app front before its window is key again; a text
+    // field that becomes key then puts its caret back, and the first held
+    // keys would land out of order.
+    if before != Some(front) {
+        std::thread::sleep(REPLAY_SETTLE);
     }
+    agent_screen_model::autonomy::replay_confirmed(
+        front,
+        saved.window,
+        super::app::frontmost_pid(),
+        saved.window.and(super::ax::focused_window_id(front)),
+    )
 }
 
 fn restore_with(saved: Saved, touched: fn() -> bool) {

@@ -233,6 +233,8 @@ pub enum ArmedVerdict {
     Hold,
     /// Held, and the hold is full: restore now.
     HoldAndEnd,
+    /// The hold is full and ending: swallowed, not kept.
+    Drop,
 }
 
 /// The armed hold of a grant, front hold or Keyboard Borrow the Autonomy
@@ -276,6 +278,10 @@ impl Armed {
     /// `HELD_GRACE_MS` after it in YOLO. None before anything is held.
     pub fn deadline(&self, mode: crate::autonomy::Mode) -> Option<u64> {
         let first = self.first?;
+        if self.count >= MAX_EVENTS {
+            // Full: the operation stops now, whatever the mode.
+            return Some(first);
+        }
         Some(match mode {
             crate::autonomy::Mode::Yolo => first + crate::user_activity::HELD_GRACE_MS,
             _ => first,
@@ -302,13 +308,22 @@ impl Armed {
             ArmedEvent::Moved if mode == crate::autonomy::Mode::Yolo => ArmedVerdict::Pass,
             ArmedEvent::Moved => ArmedVerdict::Touched,
             ArmedEvent::Input(Kind::Other) => ArmedVerdict::Pass,
-            ArmedEvent::Input(_) => {
+            ArmedEvent::Input(kind) => {
                 self.first_held(now);
                 self.count += 1;
-                if self.count >= MAX_EVENTS {
-                    ArmedVerdict::HoldAndEnd
-                } else {
+                if self.count < MAX_EVENTS {
                     ArmedVerdict::Hold
+                } else if self.count == MAX_EVENTS {
+                    ArmedVerdict::HoldAndEnd
+                } else if kind != Kind::KeyDown
+                    && kind != Kind::MouseDragged
+                    && self.count < 2 * MAX_EVENTS
+                {
+                    // Until the restore lets go, releases still go out
+                    // after the presses they end; nothing new is kept.
+                    ArmedVerdict::Hold
+                } else {
+                    ArmedVerdict::Drop
                 }
             }
         }
@@ -398,6 +413,29 @@ mod tests {
         assert_eq!(
             armed.see(ArmedEvent::Input(Kind::KeyUp), Mode::Yolo, 999),
             ArmedVerdict::HoldAndEnd
+        );
+        // Full: YOLO's grace is over at once.
+        assert_eq!(armed.deadline(Mode::Yolo), Some(1));
+        // Past the cap a drag or a new key isn't kept; a release is, so
+        // the presses already held end.
+        assert_eq!(
+            armed.see(ArmedEvent::Input(Kind::MouseDragged), Mode::Yolo, 1000),
+            ArmedVerdict::Drop
+        );
+        assert_eq!(
+            armed.see(ArmedEvent::Input(Kind::KeyDown), Mode::Yolo, 1001),
+            ArmedVerdict::Drop
+        );
+        assert_eq!(
+            armed.see(ArmedEvent::Input(Kind::KeyUp), Mode::Yolo, 1002),
+            ArmedVerdict::Hold
+        );
+        for n in 0..2 * MAX_EVENTS {
+            armed.see(ArmedEvent::Input(Kind::KeyUp), Mode::Yolo, 1003 + n as u64);
+        }
+        assert_eq!(
+            armed.see(ArmedEvent::Input(Kind::KeyUp), Mode::Yolo, 9999),
+            ArmedVerdict::Drop
         );
     }
 
