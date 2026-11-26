@@ -3617,7 +3617,7 @@ mod remote_panel_tests {
             hit.target,
             |id| {
                 cg::window_bounds_using(id, Some(hit.target.pid), |option, relative| {
-                    if option == CGWindowListOption::OptionAll {
+                    if option == cg::ALL_BUT_DESKTOP {
                         vec![remote.clone()]
                     } else {
                         assert_eq!(option, CGWindowListOption::OptionIncludingWindow);
