@@ -299,6 +299,20 @@ pub fn user_acted_since(pid: i32, since: std::time::Instant) -> bool {
     user_acted_where(pid, |at| at >= since, false)
 }
 
+/// The windows the user's recent clicks went to, with how many ms ago,
+/// for the activity monitor's start (ADR 0025).
+pub fn recent_windows() -> Vec<(u32, u64)> {
+    USER_INPUT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter_map(|(at, towards)| match towards {
+            Towards::Window(window, _) => Some((*window, at.elapsed().as_millis() as u64)),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Where the user's presses just now went, oldest first, as the agents'
 /// browser instance `pid` comes to the front (ADR 0022).
 pub fn recent_presses(pid: i32) -> Vec<agent_screen_model::agent_browser::Press> {

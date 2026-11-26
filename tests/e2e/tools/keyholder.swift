@@ -2,7 +2,8 @@
 // becomes key, then prints "resign" each time it stops being key, and
 // "done" after the given seconds. With "app", each line starts with the
 // time in ms, and it also prints "inactive" and "active" as the app stops
-// and starts being the active app.
+// and starts being the active app. KEYHOLDER_TEXT=1 also prints
+// "text <value>" as the field changes.
 //
 //     keyholder 10 [app]
 import AppKit
@@ -33,6 +34,12 @@ if appMode {
   }
   NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { _ in
     say("active")
+  }
+}
+// KEYHOLDER_TEXT=1: also print "text <value>" each time the field changes.
+if ProcessInfo.processInfo.environment["KEYHOLDER_TEXT"] == "1" {
+  NotificationCenter.default.addObserver(forName: NSControl.textDidChangeNotification, object: field, queue: .main) { _ in
+    say("text \(field.stringValue)")
   }
 }
 window.makeKeyAndOrderFront(nil)

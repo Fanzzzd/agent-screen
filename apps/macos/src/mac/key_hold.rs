@@ -414,6 +414,24 @@ unsafe extern "C-unwind" fn seen(
             CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&copy));
             std::ptr::null_mut()
         }
+        // The Stop chord while the mode acts: this tap would keep it from
+        // the hot key, so it stops here, as in the armed hold.
+        State::Holding { .. }
+            if kind == CGEventType::KeyDown
+                && !ours
+                && super::hotkey::registered()
+                && agent_screen_model::autonomy::stop_chord(
+                    CGEvent::integer_value_field(Some(cg), CGEventField::KeyboardEventKeycode)
+                        as u16,
+                    CGEvent::flags(Some(cg)).0,
+                ) =>
+        {
+            drop(state);
+            log::info!("autonomy: the Stop chord, during a key hold");
+            dispatch2::DispatchQueue::main()
+                .exec_async(|| super::native::send(super::native::Native::StopChord));
+            std::ptr::null_mut()
+        }
         State::Holding {
             id,
             hold,

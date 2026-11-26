@@ -1,8 +1,10 @@
 //! macOS: CGVirtualDisplay, ScreenCaptureKit, SkyLight input, Accessibility.
 
+pub mod activity;
 pub mod aerospace;
 pub mod alerts;
 pub mod app;
+pub mod armed_hold;
 pub mod assist;
 pub mod ax;
 pub mod capture;
@@ -14,6 +16,7 @@ pub mod colorsync;
 pub mod devtools;
 pub mod display;
 pub mod hang;
+pub mod hotkey;
 pub mod ime;
 pub mod input;
 pub mod key_hold;

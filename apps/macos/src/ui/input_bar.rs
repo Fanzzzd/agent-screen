@@ -36,7 +36,25 @@ pub fn preview_keyboard(display: Option<DisplayId>) {
 }
 
 pub fn previewing() -> bool {
-    KEYBOARD_PREVIEW.with(Cell::get).is_some()
+    KEYBOARD_PREVIEW.with(Cell::get).is_some() || switched()
+}
+
+/// How long the bar says "Switched to Ask" after Stop in Auto or YOLO.
+pub const SWITCHED_MS: u64 = 3_000;
+
+thread_local! {
+    static SWITCHED: Cell<Option<std::time::Instant>> = const { Cell::new(None) };
+}
+
+/// Stop in Auto or YOLO switched to Ask: the bar says so for 3 s.
+pub fn note_switched() {
+    SWITCHED.with(|s| s.set(Some(std::time::Instant::now())));
+}
+
+fn switched() -> bool {
+    SWITCHED
+        .with(Cell::get)
+        .is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(SWITCHED_MS))
 }
 
 /// The bar's Stop during a Keyboard Borrow: no key goes after the one
@@ -46,11 +64,14 @@ pub fn stop_keyboard() {
     preview_keyboard(None);
 }
 
-/// What the bar's Stop ends.
+/// What the bar's Stop ends: in Auto and YOLO, Stop also switches to Ask
+/// (ADR 0025).
 #[derive(Clone, Copy)]
 enum Stops {
     Grant,
     Keyboard,
+    Autonomy,
+    Nothing,
 }
 
 /// The pill's height; its ends are round.
@@ -90,10 +111,15 @@ impl Render for InputBar {
             .list
             .iter()
             .find(|d| (d.keyboard_borrowed() || preview == Some(d.id)) && !d.is_ended());
+        use agent_screen_model::autonomy::Mode;
+        let mode = crate::autonomy::mode();
+        let chord = t("⌃⌥⌘. to stop", "按 ⌃⌥⌘. 停止");
+        let chip = core.input_queue.queue.mode_grant();
         let (title, how, clock, stops) = if core.input_queue.queue.grant().is_some() {
             let view = help_card::queue_view(core, None);
             let title = help_card::queue_title(&view);
             let (how, clock) = match view.phase {
+                _ if mode == Mode::Yolo => (Some(chord), None),
                 help_card::Phase::Waiting { idle } => (
                     None,
                     Some(format!(
@@ -104,15 +130,35 @@ impl Render for InputBar {
                 ),
                 _ => (Some(t("Move the mouse to stop", "动鼠标即可停止")), None),
             };
-            (title, how, clock, Stops::Grant)
+            let stops = if mode.acts() {
+                Stops::Autonomy
+            } else {
+                Stops::Grant
+            };
+            (title, how, clock, stops)
         } else if borrowing.is_some() || crate::mac::ime::borrowing() {
             // The display can end while its worker still types.
             let agent = shown_client(borrowing.map_or(UNNAMED_CLIENT, |d| d.agent_name()));
             (
                 tf!("{agent} is using your keyboard", "{agent} 正在用你的键盘"),
-                Some(t("Press a key to stop", "按任意键停止")),
+                Some(if mode == Mode::Yolo {
+                    chord
+                } else {
+                    t("Press a key to stop", "按任意键停止")
+                }),
                 None,
-                Stops::Keyboard,
+                if mode.acts() {
+                    Stops::Autonomy
+                } else {
+                    Stops::Keyboard
+                },
+            )
+        } else if switched() {
+            (
+                t("Switched to Ask", "已切换到询问").to_string(),
+                None,
+                None,
+                Stops::Nothing,
             )
         } else {
             return div().into_any_element();
@@ -164,6 +210,25 @@ impl Render for InputBar {
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .child(title),
                     )
+                    // A grant the mode opened: Auto neutral, YOLO red.
+                    .when_some(chip, |d, chip| {
+                        let (label, color) = match chip {
+                            Mode::Yolo => ("YOLO", theme.red),
+                            _ => (t("Auto", "自动"), theme.secondary),
+                        };
+                        d.child(
+                            div()
+                                .flex_none()
+                                .px(px(7.))
+                                .py(px(1.))
+                                .rounded_full()
+                                .bg(color.opacity(0.16))
+                                .text_size(px(10.5))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(color)
+                                .child(label),
+                        )
+                    })
                     .when_some(how, |d, how| {
                         d.child(div().flex_none().text_color(theme.secondary).child(how))
                     })
@@ -176,8 +241,14 @@ impl Render for InputBar {
                                 .child(clock),
                         )
                     })
-                    .child(
-                        help_card::button("input-bar-stop", t("Stop", "停止"), Tone::Stop, &theme)
+                    .when(!matches!(stops, Stops::Nothing), |d| {
+                        d.child(
+                            help_card::button(
+                                "input-bar-stop",
+                                t("Stop", "停止"),
+                                Tone::Stop,
+                                &theme,
+                            )
                             .flex_none()
                             .h(px(30.))
                             .px(px(13.))
@@ -189,8 +260,17 @@ impl Render for InputBar {
                                         shell.sync_glow(cx);
                                     })
                                 }
+                                Stops::Autonomy => {
+                                    preview_keyboard(None);
+                                    tell(&stop, cx, |shell, cx| {
+                                        shell.stop_autonomy(crate::autonomy::Source::InputBar, cx)
+                                    })
+                                }
+                                Stops::Nothing => {}
                             }),
-                    )
+                        )
+                    })
+                    .when(matches!(stops, Stops::Nothing), |d| d.pr(px(14.)))
                     .child(
                         canvas(
                             move |bounds, _, cx| {

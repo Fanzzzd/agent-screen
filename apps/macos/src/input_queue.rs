@@ -78,6 +78,12 @@ pub struct InputQueue {
     /// How long a front request waits before its display's card says so:
     /// `WAITING_LINE_MS`, shorter in scripts (`debugFrontWait`).
     line_ms: u64,
+    /// In Auto or YOLO, what a request waiting for the mode waits on, as
+    /// `waitingOn` (`autonomy::Busy::waiting_on`), from the last look at
+    /// the hands.
+    pub waiting_on: Option<&'static str>,
+    /// Displays `debugShow hands-wait` shows the hands line on.
+    pub hands_preview: BTreeSet<DisplayId>,
 }
 
 /// What a front request's background run came to: the reply's result, or
@@ -186,6 +192,15 @@ pub struct Click {
 }
 
 impl Plan {
+    /// The window the loan acts on first.
+    pub fn target(&self) -> WindowTarget {
+        match self {
+            Plan::Drag(d) => d.target,
+            Plan::MenuItem(m) => m.target,
+            Plan::Click(c) => c.target,
+        }
+    }
+
     /// Whether the loan acts on window `window`: a drag's start or drop,
     /// a menu item's window, a click's window.
     pub fn touches(&self, window: u32) -> bool {
@@ -225,6 +240,8 @@ impl Default for InputQueue {
             outcomes: BTreeMap::new(),
             hold: None,
             line_ms: WAITING_LINE_MS,
+            waiting_on: None,
+            hands_preview: BTreeSet::new(),
         }
     }
 }
@@ -276,7 +293,12 @@ impl InputQueue {
             ));
         }
         let now = self.now();
-        let id = self.queue.enqueue(owner, operation, reason.into(), now).map_err(|why| {
+        // Real input into a Protected App's window asks the user in every
+        // mode (ADR 0025).
+        let ask_only = plan
+            .as_ref()
+            .is_some_and(|p| crate::autonomy::protected_pid(p.target().pid));
+        let id = self.queue.enqueue_for(owner, operation, reason.into(), ask_only, now).map_err(|why| {
             match why {
                 EnqueueError::Full => "the input queue is full; use input_queue done when your session no longer needs its requests, or wait for other sessions to clear theirs",
                 EnqueueError::SessionFull => "this connection holds 64 input requests across its displays, including finished ones it has not cleared; use input_queue done on each display once it has read their results, then request again",
@@ -335,6 +357,18 @@ impl InputQueue {
                 .fronts()
                 .filter_map(|r| Some((r.owner.display, self.fronts.get(&r.id)?.pid))),
         )
+    }
+
+    /// The oldest waiting front request's display and the app it waits
+    /// on, for a front hold the mode starts: oldest first, one at a time.
+    pub fn first_front(&self) -> Option<(DisplayId, i32)> {
+        self.queue
+            .fronts()
+            .filter(|r| r.status == Status::Queued)
+            .find_map(|r| {
+                let pid = self.fronts.get(&r.id)?.pid;
+                (pid > 0).then_some((r.owner.display, pid))
+            })
     }
 
     /// Display `display`'s front requests on app `app` still waiting or
@@ -839,10 +873,50 @@ impl InputQueue {
     pub fn asks(&self, id: RequestId) -> bool {
         self.queue.grant().is_none()
             && !self.approved.contains(&id)
+            && self.queue.request(id).is_some_and(|r| {
+                r.status == Status::Queued && (r.ask_only || !crate::autonomy::mode().acts())
+            })
+    }
+
+    /// In Auto or YOLO, a runnable request waiting for the mode to open a
+    /// grant: no card, and the call keeps waiting.
+    pub fn mode_waits(&self, id: RequestId) -> bool {
+        crate::autonomy::mode().acts()
+            && self.queue.grant().is_none()
+            && self.plans.contains_key(&id)
             && self
                 .queue
                 .request(id)
-                .is_some_and(|r| r.status == Status::Queued)
+                .is_some_and(|r| r.status == Status::Queued && !r.front && !r.ask_only)
+    }
+
+    /// In Auto, whether real input on display `display` has waited
+    /// `HANDS_LINE_MS` for the user's hands: its tile says so, with "Let
+    /// the agent continue", which is the user's Allow.
+    pub fn hands_line(&self, display: DisplayId) -> bool {
+        self.hands_preview.contains(&display)
+            || (crate::autonomy::mode() == agent_screen_model::autonomy::Mode::Auto
+                && self.queue.waiting().any(|r| {
+                    r.owner.display == display
+                        && self.mode_waits(r.id)
+                        && r.times.elapsed_ms(self.now())
+                            >= agent_screen_model::user_activity::HANDS_LINE_MS
+                }))
+    }
+
+    /// Whether any request waits for the mode.
+    pub fn mode_wanted(&self) -> bool {
+        self.queue
+            .waiting()
+            .any(|r| self.mode_waits(r.id) && r.attached)
+    }
+
+    /// The mode opens a grant: no card, no Allow.
+    pub fn open_by_mode(&mut self, mode: agent_screen_model::autonomy::Mode) -> bool {
+        let opened = self.queue.open_by_mode(mode, self.now());
+        self.waiting_on = None;
+        self.tick();
+        opened
     }
 
     /// Whether a call waiting on `id` should keep waiting: for the user's
@@ -856,7 +930,7 @@ impl InputQueue {
             Status::Queued if paused => false,
             Status::Queued if r.front => r.attached,
             Status::Queued if self.queue.grant().is_some() => self.plans.contains_key(&id),
-            Status::Queued => self.asks(id),
+            Status::Queued => self.asks(id) || self.mode_waits(id),
             Status::Running | Status::Stopping(_) => true,
             _ => false,
         }
@@ -970,12 +1044,25 @@ impl InputQueue {
                         || self.fronts.contains_key(&request.id),
                     "elapsedSeconds": seconds(request.times.elapsed_ms(self.now())),
                     "timing": self.timing(request.id, &request.times),
+                    "waitingOn": match state {
+                        "queued" if self.mode_waits(request.id) => {
+                            Some(self.waiting_on.unwrap_or("userActive"))
+                        }
+                        "queued" if self.asks(request.id) => Some("approval"),
+                        "approved" => Some("turn"),
+                        _ => None,
+                    },
                 })
             })
             .collect();
         json!({
             "executorAvailable": EXECUTOR_AVAILABLE,
+            "mode": crate::autonomy::mode().as_str(),
             "grantActive": self.queue.grant().is_some(),
+            "openedBy": self.queue.grant().map(|_| match self.queue.mode_grant() {
+                Some(_) => "mode",
+                None => "user",
+            }),
             "elapsedSeconds": self.elapsed_seconds(),
             "waiting": self.queue.waiting().count(),
             "requests": requests,
@@ -1000,6 +1087,37 @@ mod tests {
             title: "Queue".into(),
             connection,
         }
+    }
+
+    /// Ask's reference for crossing (d), from 0.1.44: a request asks for
+    /// the user's Allow, never waits for a mode, and its grant is the
+    /// user's, which a touch ends without restoring (ADR 0013).
+    #[test]
+    fn in_ask_a_request_asks_and_no_mode_opens_a_grant() {
+        assert_eq!(
+            crate::autonomy::mode(),
+            agent_screen_model::autonomy::Mode::Ask
+        );
+        let mut input = InputQueue::default();
+        input.register(1, &display_owner(1));
+        let owner = input.owner(1, 1).unwrap();
+        let id = input
+            .submit(owner.clone(), "drag".into(), "Move a card".into(), None)
+            .unwrap();
+        assert!(input.asks(id));
+        assert!(!input.mode_waits(id));
+        assert!(!input.mode_wanted());
+        assert_eq!(
+            input.status(&owner, Some(id), false)["requests"][0]["waitingOn"],
+            "approval"
+        );
+        assert!(input.approve(input.queue.approval()));
+        assert_eq!(input.queue.mode_grant(), None);
+        input.revoke();
+        assert_eq!(
+            input.queue.pending_end().map(|end| end.restore),
+            Some(false)
+        );
     }
 
     #[test]

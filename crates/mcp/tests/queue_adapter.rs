@@ -4,6 +4,19 @@
 
 use agent_screen_model::model;
 
+/// The app's Autonomy Mode, which reads OS state there: Ask here, and no
+/// Protected App, so the coordinator decides as 0.1.44 did.
+#[allow(dead_code)]
+mod autonomy {
+    pub fn mode() -> agent_screen_model::autonomy::Mode {
+        agent_screen_model::autonomy::Mode::Ask
+    }
+
+    pub fn protected_pid(_pid: i32) -> bool {
+        false
+    }
+}
+
 #[path = "../../../apps/macos/src/input_queue.rs"]
 mod app_input_queue;
 
@@ -826,4 +839,43 @@ fn a_front_hold_counts_the_actions_on_its_app_and_stops_new_ones_as_it_ends() {
     input.clear_hold();
     assert!(input.hold().is_none());
     assert!(input.may_start(2, 42));
+}
+
+/// Ask's reference (ADR 0025): with the mode at Ask no tile says it waits
+/// for the user's hands, and the oldest front request is the one a hold
+/// would serve. A grant the mode opens admits the waiting drag and ends,
+/// once it ran, with restoration.
+#[test]
+fn the_mode_hooks_keep_asks_decisions_and_a_mode_grant_restores() {
+    let mut input = InputQueue::default();
+    input.register(1, &owner(1));
+    let a = input.owner(1, 1).unwrap();
+    assert!(!input.hands_line(1));
+    input.hands_preview.insert(1);
+    assert!(input.hands_line(1), "the preview shows the line");
+    input.hands_preview.clear();
+    let front = Front {
+        method: "click".into(),
+        params: serde_json::json!({ "displayId": 1, "x": 10, "y": 20 }),
+        pid: 42,
+        app: "Dia".into(),
+        look: None,
+    };
+    input
+        .submit_front(a.clone(), "click 1 2".into(), "Click in Dia".into(), front)
+        .unwrap();
+    assert_eq!(input.first_front(), Some((1, 42)));
+    let id = input
+        .submit(a.clone(), "drag".into(), "Drag A".into(), Some(plan(1.0)))
+        .unwrap();
+    assert!(input.asks(id), "Ask shows the card");
+    assert!(input.open_by_mode(agent_screen_model::autonomy::Mode::Auto));
+    assert_eq!(
+        input.queue.mode_grant(),
+        Some(agent_screen_model::autonomy::Mode::Auto)
+    );
+    let (loan, _) = input.start_loan().expect("the drag runs");
+    assert_eq!(loan, id);
+    input.finish_loan(id, None);
+    assert_eq!(input.ending().map(|end| end.restore), Some(true));
 }

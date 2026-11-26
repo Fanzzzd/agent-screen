@@ -6,7 +6,7 @@
 //   hid scroll X Y STEPS       a trackpad gesture: began, STEPS changes, ended
 //   hid wheel X Y TICKS        mouse wheel ticks, no phases
 //   hid replay LOG FROM TO X Y replay scroll events recorded by `probe tap`
-//   hid key CODE               press and release a key, the pointer untouched
+//   hid key CODE [FLAGS]       press and release a key, the pointer untouched
 //   hid type TEXT MS           type ASCII TEXT with real key codes, MS between characters
 //   hid source [ID]            print the keyboard input source, or select ID
 //   hid where                  print the pointer's location "x y"
@@ -49,11 +49,29 @@ func field(_ line: Substring, _ key: String) -> String {
   return "0"
 }
 
+// key <keycode> [flags]: flags, as CGEventFlags' raw value, ride on both
+// events, as a chord pressed with its modifiers held.
 if args[1] == "key" {
   let code = CGKeyCode(Int(args[2])!)
-  CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: true)!.post(tap: .cghidEventTap)
-  usleep(30_000)
-  CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: false)!.post(tap: .cghidEventTap)
+  let flags = args.count > 3 ? CGEventFlags(rawValue: UInt64(args[3])!) : nil
+  for down in [true, false] {
+    let event = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: down)!
+    if let flags { event.flags = flags }
+    event.post(tap: .cghidEventTap)
+    if down { usleep(30_000) }
+  }
+  // A chord's modifiers stay set in the HID state until each modifier
+  // key is released; left set, macOS reads them as held, the user's own
+  // keys included. Shift, Control, Option, Command.
+  if flags != nil {
+    for modifier: CGKeyCode in [56, 59, 58, 55] {
+      let clear = CGEvent(keyboardEventSource: nil, virtualKey: modifier, keyDown: false)!
+      clear.type = .flagsChanged
+      clear.flags = []
+      clear.post(tap: .cghidEventTap)
+      usleep(10_000)
+    }
+  }
   exit(0)
 }
 

@@ -61,6 +61,11 @@ const OTHER: u8 = 4;
 fn user_holds(bits: u8) -> bool {
     USER_DOWN.load(Ordering::SeqCst) & bits != 0
 }
+/// The user holds a mouse button, as the observer saw it.
+pub fn user_button_down() -> bool {
+    user_holds(LEFT | RIGHT | OTHER)
+}
+
 /// The app a loan is pressing in, 0 for none. The guard that gives the
 /// front back to the user's app and the reminder leave it alone.
 static HOLDING: AtomicI32 = AtomicI32::new(0);
@@ -183,6 +188,15 @@ pub fn debug_observer_timeout() {
 /// input while a grant is armed. The Viewer's private press calls it for
 /// the presses it takes before this observer could see them.
 pub fn user_event(kind: CGEventType) {
+    user_buttons(kind);
+    if ARMED.load(Ordering::SeqCst) && !TOUCHED.swap(true, Ordering::SeqCst) {
+        notify_user_took_input();
+    }
+}
+
+/// Note the buttons the user holds, from one event of theirs, and nothing
+/// else: in YOLO a held press doesn't end the grant at once.
+pub fn user_buttons(kind: CGEventType) {
     let (down, bit) = match kind {
         CGEventType::LeftMouseDown => (Some(true), LEFT),
         CGEventType::LeftMouseUp => (Some(false), LEFT),
@@ -201,9 +215,13 @@ pub fn user_event(kind: CGEventType) {
         }
         None => {}
     }
-    if ARMED.load(Ordering::SeqCst) && !TOUCHED.swap(true, Ordering::SeqCst) {
-        notify_user_took_input();
-    }
+}
+
+/// Detach the mouse from the cursor for a YOLO loan, so the user's hand
+/// can't bend a drag's path, or attach it again (ADR 0025). Whether
+/// WindowServer took it.
+pub fn associate_mouse(connected: bool) -> bool {
+    unsafe { CGAssociateMouseAndMouseCursorPosition(connected) == 0 }
 }
 
 /// Observe HID events before AppKit manufactures pointer moves when a
@@ -329,9 +347,46 @@ pub fn save() -> Saved {
     }
 }
 
+/// After the front app changes back, before held keys go out to it.
+const REPLAY_SETTLE: Duration = Duration::from_millis(200);
+
 /// Put the pointer and front app back. Not after the user took control:
 /// that would undo what they just did.
 pub fn restore(saved: Saved) {
+    restore_with(saved, touched);
+}
+
+/// Put them back after a grant the Autonomy Mode opened, touched or not:
+/// the user's touch ended it, and their held input goes out once their
+/// pointer, front app and window are back (ADR 0025). Whether their
+/// focused window is key again: their app in front, and that window
+/// focused in it. Without both, the held key downs are dropped.
+pub fn restore_by_mode(saved: Saved) -> bool {
+    let before = super::app::frontmost_pid();
+    restore_with(saved, || false);
+    let Some(front) = saved.front else {
+        return true;
+    };
+    // Agent Screen's own window, as its Settings, was in front: the loan
+    // left its app there, so Agent Screen comes back itself.
+    if front == std::process::id() as i32 {
+        super::ime::return_front_unless(front, || false);
+    }
+    // macOS names the app front before its window is key again; a text
+    // field that becomes key then puts its caret back, and the first held
+    // keys would land out of order.
+    if before != Some(front) {
+        std::thread::sleep(REPLAY_SETTLE);
+    }
+    agent_screen_model::autonomy::replay_confirmed(
+        front,
+        saved.window,
+        super::app::frontmost_pid(),
+        saved.window.and(super::ax::focused_window_id(front)),
+    )
+}
+
+fn restore_with(saved: Saved, touched: fn() -> bool) {
     let now = CGEvent::new(None).map(|e| CGEvent::location(Some(&e)));
     log::info!(
         "input queue: restoring the pointer and front app; pointer at {:?}",

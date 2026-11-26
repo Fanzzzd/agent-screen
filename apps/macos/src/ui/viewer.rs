@@ -3,7 +3,7 @@
 
 use super::pointer;
 use super::shell::{Shell, tell};
-use super::status::{AccessLine, Kind, Status};
+use super::status::{AccessLine, Kind, Status, Wait};
 use super::stream::{NewFrame, Streams};
 use super::theme::{self, Theme};
 use crate::core::Core;
@@ -193,10 +193,8 @@ impl Render for Viewer {
         let Some(display) = core.displays.get(id) else {
             return div().size_full().into_any_element();
         };
-        let line = core.input_queue.waiting_line(id);
-        let status = Status::of(display, self.count, &theme);
-        let waiting = line.is_some() && status.kind == Kind::Agent;
-        let status = status.waiting_for(display.agent_name(), line);
+        let (status, waiting) =
+            super::status::with_waits(core, id, Status::of(display, self.count, &theme));
         let label = display.label();
         let agent = display.agent_name().to_string();
         // The Help Request's steps, for the user to follow while in control.
@@ -447,7 +445,7 @@ fn header(
     recording: bool,
     status: gpui::AnyElement,
     kind: Kind,
-    waiting: bool,
+    waiting: Wait,
     agent: &str,
     theme: &Theme,
     shell: &WeakEntity<Shell>,
@@ -512,11 +510,51 @@ fn header(
         )
         // The agent waits for the user to leave an app: they may let it
         // continue now instead (`control::front_hold`).
-        .when(!waiting, |d| {
+        .when(waiting != Wait::Front, |d| {
             LET_CONTINUE.with(|b| b.set(None));
             d
         })
-        .when(waiting, |d| {
+        // In Auto: a Window Request waits for a window the user is using,
+        // or real input for their hands (ADR 0025).
+        .when(waiting == Wait::Window, |d| {
+            let (give, keep) = (shell.clone(), shell.clone());
+            d.child(button(
+                "window-wait-give",
+                t("Hand Over", "交给它").to_string(),
+                None,
+                Some(theme.accent),
+                theme,
+                move |cx| {
+                    tell(&give, cx, move |shell, cx| {
+                        shell.answer_window_wait(id, crate::autonomy::WaitAnswer::HandOver, cx);
+                    })
+                },
+            ))
+            .child(button(
+                "window-wait-keep",
+                t("Keep", "保留").to_string(),
+                None,
+                None,
+                theme,
+                move |cx| {
+                    tell(&keep, cx, move |shell, cx| {
+                        shell.answer_window_wait(id, crate::autonomy::WaitAnswer::Keep, cx);
+                    })
+                },
+            ))
+        })
+        .when(waiting == Wait::Hands, |d| {
+            let allow = shell.clone();
+            d.child(button(
+                "hands-continue",
+                t("Let the agent continue", "让 Agent 继续").to_string(),
+                Some("icons/play.svg"),
+                Some(theme.accent),
+                theme,
+                move |cx| tell(&allow, cx, move |shell, cx| shell.allow_hands(id, cx)),
+            ))
+        })
+        .when(waiting == Wait::Front, |d| {
             let shell = shell.clone();
             d.child(
                 button(

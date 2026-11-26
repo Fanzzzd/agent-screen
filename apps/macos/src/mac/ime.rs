@@ -37,6 +37,7 @@ unsafe extern "C" {
         key: *const std::ffi::c_void,
     ) -> *const std::ffi::c_void;
     static kTISPropertyInputSourceID: *const std::ffi::c_void;
+    static kTISPropertyBundleID: *const std::ffi::c_void;
     static kTISPropertyInputSourceType: *const std::ffi::c_void;
     static kTISTypeKeyboardLayout: *const std::ffi::c_void;
     fn CFArrayGetCount(array: &CFArray) -> isize;
@@ -177,6 +178,23 @@ pub fn current_kind() -> agent_screen_model::viewer_keys::Source {
     }
 }
 
+/// The bundle id of the current input source when it is an input method,
+/// whose process draws its candidate window. Any thread.
+pub fn input_method_bundle() -> Option<String> {
+    on_main(|| {
+        if current_kind() != agent_screen_model::viewer_keys::Source::InputMethod {
+            return None;
+        }
+        let source = unsafe { TISCopyCurrentKeyboardInputSource() };
+        if source.is_null() {
+            return None;
+        }
+        let source = Source(source);
+        let id = unsafe { TISGetInputSourceProperty(source.0, kTISPropertyBundleID) };
+        (!id.is_null()).then(|| unsafe { &*(id as *const CFString) }.to_string())
+    })
+}
+
 fn current_source() -> Source {
     on_main(|| Source(unsafe { TISCopyCurrentKeyboardInputSource() }))
 }
@@ -219,7 +237,8 @@ fn find_source(id: &str) -> Option<Source> {
 
 /// Whether `count` keys may borrow the user's keyboard now: why not, else
 /// Ok. Checked before the Red Glow shows, and again by `type_keys`.
-pub fn may_borrow(count: usize) -> Result<(), String> {
+/// `mode` is the one the borrow runs under: Ask for a Protected App.
+pub fn may_borrow(count: usize, mode: agent_screen_model::autonomy::Mode) -> Result<(), String> {
     if PER_KEY * count as u32 > LONGEST {
         return Err(format!(
             "at most {} keys go through the input method in one call; split the text",
@@ -235,8 +254,11 @@ pub fn may_borrow(count: usize) -> Result<(), String> {
     if super::real_input::armed() {
         return Err("an approved Input Queue drag may be using the user's pointer; try again when the approval ends".into());
     }
+    // YOLO overrides ADR 0008's 2 s of quiet: the user's keys are held
+    // meanwhile (ADR 0025).
     let idle = user_idle();
-    if idle < QUIET.as_secs_f64() {
+    let yolo = mode == agent_screen_model::autonomy::Mode::Yolo;
+    if idle < QUIET.as_secs_f64() && !yolo {
         return Err(format!(
             "the user is using the keyboard or pointer (last input {idle:.1} s ago), and typing through the input method takes their keyboard; try again in a few seconds"
         ));
@@ -252,16 +274,43 @@ pub fn type_keys(
     keys: &[KeyChord],
     source: Option<&str>,
     wake: impl FnOnce(),
+    mode: agent_screen_model::autonomy::Mode,
 ) -> Result<Typed, String> {
     let _session = super::real_input::SESSION_INPUT.try_lock().map_err(|_| {
         "an operation is using the session's keyboard or pointer; try again after it ends"
             .to_string()
     })?;
-    may_borrow(keys.len())?;
+    may_borrow(keys.len(), mode)?;
+    // In Auto and YOLO an armed hold keeps the user's keys from the agent's
+    // app; in Auto their first key stops the borrow, in YOLO it runs on
+    // for `HELD_GRACE_MS` (ADR 0025). Not after a Stop, nor once the mode
+    // the call was decided in has changed: the tap isn't armed then.
+    if mode.acts() {
+        if STOP.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(Typed::Halted(0));
+        }
+        if crate::autonomy::mode() != mode {
+            return Err(
+                "the user changed the Autonomy Mode before the keys went, so nothing was typed; try again".into(),
+            );
+        }
+    }
+    let held = mode.acts() && super::armed_hold::start(mode);
+    let yolo = held && mode == agent_screen_model::autonomy::Mode::Yolo;
+    let release = |front: Option<i32>| {
+        if held {
+            let confirmed = front.is_none_or(|f| app::frontmost_pid() == Some(f));
+            super::armed_hold::finish(None, confirmed);
+        }
+    };
     let wanted = match source {
-        Some(id) => Some(
-            on_main(|| find_source(id)).ok_or_else(|| format!("no enabled input source {id}"))?,
-        ),
+        Some(id) => match on_main(|| find_source(id)) {
+            Some(found) => Some(found),
+            None => {
+                release(None);
+                return Err(format!("no enabled input source {id}"));
+            }
+        },
         None => None,
     };
     let front = app::frontmost_pid();
@@ -285,6 +334,7 @@ pub fn type_keys(
         if asked.elapsed() > Duration::from_secs(1) {
             let holder = ax::focused_app_pid();
             give_back(front, target.pid, wanted.is_some().then_some(&before));
+            release(front);
             return Err(format!(
                 "the app couldn't take keyboard focus: {} keeps it, so nothing was typed",
                 holder
@@ -319,7 +369,14 @@ pub fn type_keys(
             break;
         }
         // The user came back: their keys must not reach the agent's app.
-        if user_idle() < started.elapsed().as_secs_f64()
+        // In YOLO a touch doesn't stop it; the grace after their first
+        // held key does.
+        let touched = if yolo {
+            super::armed_hold::grace_over()
+        } else {
+            user_idle() < started.elapsed().as_secs_f64() || (held && super::armed_hold::holding())
+        };
+        if touched
             || started.elapsed() > LONGEST
             || ax::focused_app_pid() != Some(target.pid)
             || secure_input()
@@ -334,6 +391,12 @@ pub fn type_keys(
                 continue;
             };
             CGEvent::set_flags(Some(&event), super::input::flags(chord.modifiers));
+            // Agent Screen's own: an armed hold lets it pass.
+            CGEvent::set_integer_value_field(
+                Some(&event),
+                objc2_core_graphics::CGEventField::EventSourceUserData,
+                super::real_input::TAG,
+            );
             note_posted();
             CGEvent::post(CGEventTapLocation::SessionEventTap, Some(&event));
             thread::sleep(Duration::from_millis(10));
@@ -344,6 +407,7 @@ pub fn type_keys(
     thread::sleep(Duration::from_millis(100));
 
     give_back(front, target.pid, wanted.is_some().then_some(&before));
+    release(front);
     log::info!(
         "typed {sent} of {} keys through the input method into pid {}; front app back to {front:?}",
         keys.len(),

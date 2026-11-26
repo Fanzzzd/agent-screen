@@ -58,6 +58,14 @@ pub enum Native {
     Menu(MenuAction),
     /// The user touched the mouse or keyboard during an Input Grant.
     UserTookInput,
+    /// The Mac locked or slept, or the session was switched out: YOLO
+    /// ends (ADR 0025).
+    YoloEnds(agent_screen_model::autonomy::YoloEnd),
+    /// The Stop chord, ⌃⌥⌘.: Stop, and the mode goes to Ask.
+    StopChord,
+    /// In YOLO, `HELD_GRACE_MS` passed since the user's first held key or
+    /// press: the operation the mode opened ends.
+    GraceOver,
     /// The user typed in a launcher such as Raycast.
     LauncherTyped,
     /// A left click of the user's at a global point (top-left origin),
@@ -113,6 +121,12 @@ pub enum MenuAction {
     },
     /// Turn agents' bug reports on or off.
     ToggleReports,
+    /// Stop and Switch to Ask, in Auto and YOLO (ADR 0025).
+    StopAutonomy,
+    /// Ask or Auto at once; YOLO opens Settings with its confirmation.
+    ChooseAutonomy {
+        mode: agent_screen_model::autonomy::Mode,
+    },
     CheckForUpdates,
     /// Install the downloaded update and restart.
     InstallUpdate,
@@ -172,7 +186,7 @@ pub fn keep_monitor(object: Retained<AnyObject>) {
     keep(object);
 }
 
-fn keep(object: Retained<AnyObject>) {
+pub(crate) fn keep(object: Retained<AnyObject>) {
     KEEP.with(|k| k.borrow_mut().push(object));
 }
 
@@ -262,6 +276,8 @@ pub struct StatusIcon {
     asking_count: Cell<usize>,
     needs_setup: Cell<bool>,
     working: Cell<bool>,
+    /// YOLO is on: the icon is red in every state (ADR 0025).
+    yolo: Cell<bool>,
 }
 
 /// The icon's pictures, made by assets/status/make.py.
@@ -348,6 +364,7 @@ impl StatusIcon {
             asking_count: Cell::new(0),
             needs_setup: Cell::new(false),
             working: Cell::new(false),
+            yolo: Cell::new(false),
         };
         icon.redraw();
         icon
@@ -392,6 +409,17 @@ impl StatusIcon {
         } else {
             "idle"
         }
+    }
+
+    /// Red while YOLO is on.
+    pub fn set_yolo(&self, yolo: bool) {
+        self.yolo.set(yolo);
+        self.redraw();
+    }
+
+    /// The icon's tint for `debugIcon`: "red" while YOLO is on.
+    pub fn tint(&self) -> Option<&'static str> {
+        self.yolo.get().then_some("red")
     }
 
     /// The front screen filled while any display is in use.
@@ -476,7 +504,9 @@ impl StatusIcon {
         }
         button.setToolTip(Some(&NSString::from_str(&description)));
         // A development build shows purple, to tell it from the installed app.
-        let tint = if self.needs_setup.get() || asking_count > 0 {
+        let tint = if self.yolo.get() {
+            Some(NSColor::systemRedColor())
+        } else if self.needs_setup.get() || asking_count > 0 {
             Some(NSColor::systemOrangeColor())
         } else {
             agent_screen_mcp::endpoint::is_dev_build().then(NSColor::systemPurpleColor)
@@ -759,11 +789,27 @@ pub fn watch_mouse() {
             return;
         }
         let kind = unsafe { event.as_ref() }.r#type();
+        let mtm = MainThreadMarker::new().expect("monitors run on the main thread");
+        // A scroll is use of the window under the pointer, for the
+        // activity monitor only: it tells the catches nothing.
+        if kind == NSEventType::ScrollWheel {
+            if !super::activity::running() {
+                return;
+            }
+            let number = NSWindow::windowNumberAtPoint_belowWindowWithWindowNumber(
+                NSEvent::mouseLocation(),
+                0,
+                mtm,
+            );
+            if let Ok(window) = u32::try_from(number) {
+                super::activity::pressed(window);
+            }
+            return;
+        }
         let towards = if kind == NSEventType::KeyDown {
             super::catch::user_pressed_key();
             return;
         } else {
-            let mtm = MainThreadMarker::new().expect("monitors run on the main thread");
             if kind == NSEventType::LeftMouseDown {
                 let at = NSEvent::mouseLocation();
                 let top = super::cg::display_bounds(super::cg::main_display()).height;
@@ -778,11 +824,17 @@ pub fn watch_mouse() {
                 mtm,
             );
             let front = super::input::front();
+            if let Ok(window) = u32::try_from(number) {
+                super::activity::pressed(window);
+            }
             u32::try_from(number).map_or(Towards::Unknown, |n| Towards::Window(n, front))
         };
         super::catch::user_acted(towards);
     });
-    let presses = NSEventMask::LeftMouseDown | NSEventMask::RightMouseDown | NSEventMask::KeyDown;
+    let presses = NSEventMask::LeftMouseDown
+        | NSEventMask::RightMouseDown
+        | NSEventMask::KeyDown
+        | NSEventMask::ScrollWheel;
     if let Some(monitor) = NSEvent::addGlobalMonitorForEventsMatchingMask_handler(presses, &user) {
         keep(monitor);
     }
@@ -1721,6 +1773,55 @@ pub fn order_front(window: &NSWindow) {
 
 pub fn order_out(window: &NSWindow) {
     window.orderOut(None);
+}
+
+thread_local! {
+    static ANCHOR: RefCell<Option<Retained<NSWindow>>> = const { RefCell::new(None) };
+}
+
+/// The window a front hold the Autonomy Mode started takes the front with,
+/// as no press of the user's names one (ADR 0025): 1 by 1 point, clear, at
+/// the main screen's bottom-left corner, ignoring the mouse. Ordered in;
+/// its window number. Main thread.
+pub fn front_anchor() -> Option<u32> {
+    use objc2_app_kit::{NSBackingStoreType, NSWindowStyleMask};
+    let mtm = MainThreadMarker::new()?;
+    ANCHOR.with(|anchor| {
+        let mut anchor = anchor.borrow_mut();
+        let window = anchor.get_or_insert_with(|| {
+            let window = unsafe {
+                NSWindow::initWithContentRect_styleMask_backing_defer(
+                    NSWindow::alloc(mtm),
+                    NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1.0, 1.0)),
+                    NSWindowStyleMask::Borderless,
+                    NSBackingStoreType::Buffered,
+                    false,
+                )
+            };
+            unsafe { window.setReleasedWhenClosed(false) };
+            window.setOpaque(false);
+            window.setBackgroundColor(Some(&NSColor::clearColor()));
+            window.setIgnoresMouseEvents(true);
+            window.setHasShadow(false);
+            window.setCollectionBehavior(
+                NSWindowCollectionBehavior::CanJoinAllSpaces
+                    | NSWindowCollectionBehavior::Transient
+                    | NSWindowCollectionBehavior::IgnoresCycle,
+            );
+            window
+        });
+        window.orderFrontRegardless();
+        Some(window.windowNumber() as u32)
+    })
+}
+
+/// The hold ended: the anchor goes.
+pub fn front_anchor_away() {
+    ANCHOR.with(|anchor| {
+        if let Some(window) = anchor.borrow().as_ref() {
+            window.orderOut(None);
+        }
+    });
 }
 
 pub fn make_key(window: &NSWindow) {

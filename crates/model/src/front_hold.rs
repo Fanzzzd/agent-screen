@@ -5,6 +5,7 @@
 //! background route, then gives the front back with the user's window key.
 //! The user's keys typed meanwhile are held and go to their window after.
 
+use crate::autonomy::Mode;
 use crate::key_hold;
 use crate::model::DisplayId;
 
@@ -161,14 +162,41 @@ pub enum Next {
     End(End),
 }
 
+/// Who started a hold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Initiator {
+    /// The user, with "Let the agent continue".
+    User,
+    /// The Autonomy Mode, by itself (ADR 0025).
+    Mode(Mode),
+}
+
+impl Initiator {
+    /// Whether the user's typing or press ends the hold: not in YOLO,
+    /// where it runs to its end and their input goes out after.
+    pub fn yields(self) -> bool {
+        self != Initiator::Mode(Mode::Yolo)
+    }
+}
+
 /// The step after one look at the hold, `elapsed` ms after it started.
 /// `own_front`: Agent Screen is WindowServer's front process. `pending`:
-/// actions still waiting or running. The user's input ends it first.
-pub fn next(phase: Phase, elapsed: u64, own_front: bool, pending: usize, keys: Keys) -> Next {
+/// actions still waiting or running. The user's input ends it first when
+/// the hold `yields`; in YOLO it doesn't, and the key hold ending still
+/// does.
+pub fn next(
+    phase: Phase,
+    elapsed: u64,
+    own_front: bool,
+    pending: usize,
+    keys: Keys,
+    yields: bool,
+) -> Next {
     match keys {
         Keys::Quiet => {}
         Keys::Ended => return Next::End(End::KeysEnded),
-        acted => return Next::End(End::UserActed(acted)),
+        acted if yields => return Next::End(End::UserActed(acted)),
+        _ => {}
     }
     match phase {
         Phase::Taking if own_front => Next::Run,
@@ -217,19 +245,28 @@ mod tests {
 
     #[test]
     fn the_actions_run_once_agent_screen_is_in_front() {
-        assert_eq!(next(Phase::Taking, 0, false, 2, Keys::Quiet), Next::Wait);
-        assert_eq!(next(Phase::Taking, 30, true, 2, Keys::Quiet), Next::Run);
         assert_eq!(
-            next(Phase::Taking, TAKE_MS, false, 2, Keys::Quiet),
+            next(Phase::Taking, 0, false, 2, Keys::Quiet, true),
+            Next::Wait
+        );
+        assert_eq!(
+            next(Phase::Taking, 30, true, 2, Keys::Quiet, true),
+            Next::Run
+        );
+        assert_eq!(
+            next(Phase::Taking, TAKE_MS, false, 2, Keys::Quiet, true),
             Next::End(End::NoFront)
         );
     }
 
     #[test]
     fn the_hold_ends_when_every_action_ran() {
-        assert_eq!(next(Phase::Running, 50, true, 1, Keys::Quiet), Next::Wait);
         assert_eq!(
-            next(Phase::Running, 90, true, 0, Keys::Quiet),
+            next(Phase::Running, 50, true, 1, Keys::Quiet, true),
+            Next::Wait
+        );
+        assert_eq!(
+            next(Phase::Running, 90, true, 0, Keys::Quiet, true),
             Next::End(End::Ran)
         );
     }
@@ -239,7 +276,7 @@ mod tests {
         for phase in [Phase::Taking, Phase::Running] {
             for keys in [Keys::Typed, Keys::Pressed] {
                 assert_eq!(
-                    next(phase, 10, true, 0, keys),
+                    next(phase, 10, true, 0, keys, true),
                     Next::End(End::UserActed(keys))
                 );
             }
@@ -249,11 +286,11 @@ mod tests {
     #[test]
     fn a_lost_front_or_the_time_limit_ends_it() {
         assert_eq!(
-            next(Phase::Running, 10, false, 1, Keys::Quiet),
+            next(Phase::Running, 10, false, 1, Keys::Quiet, true),
             Next::End(End::FrontLost)
         );
         assert_eq!(
-            next(Phase::Running, RUN_END_MS, true, 1, Keys::Quiet),
+            next(Phase::Running, RUN_END_MS, true, 1, Keys::Quiet, true),
             Next::End(End::TimedOut)
         );
     }
@@ -269,7 +306,7 @@ mod tests {
         // The run's limit counts from the hold's start, so a slow take
         // doesn't add to it.
         assert_eq!(
-            next(Phase::Running, RUN_END_MS, true, 1, Keys::Quiet),
+            next(Phase::Running, RUN_END_MS, true, 1, Keys::Quiet, true),
             Next::End(End::TimedOut)
         );
     }
@@ -278,7 +315,7 @@ mod tests {
     fn a_key_hold_timing_out_is_not_a_press_and_the_front_still_goes_back() {
         for phase in [Phase::Taking, Phase::Running] {
             assert_eq!(
-                next(phase, 10, true, 1, Keys::Ended),
+                next(phase, 10, true, 1, Keys::Ended, true),
                 Next::End(End::KeysEnded)
             );
         }
@@ -325,6 +362,35 @@ mod tests {
         };
         assert!(!may_start(Some(&ending), 1, DIA));
         assert!(may_start(None, 2, DIA));
+    }
+
+    #[test]
+    fn a_yolo_hold_runs_through_typed_keys_and_an_auto_hold_ends_on_one() {
+        let yolo = Initiator::Mode(Mode::Yolo);
+        assert!(!yolo.yields());
+        assert!(Initiator::Mode(Mode::Auto).yields());
+        assert!(Initiator::User.yields());
+        for keys in [Keys::Typed, Keys::Pressed] {
+            assert_eq!(next(Phase::Taking, 10, true, 1, keys, false), Next::Run);
+            assert_eq!(next(Phase::Running, 10, true, 1, keys, false), Next::Wait);
+            assert_eq!(
+                next(Phase::Running, 20, true, 0, keys, false),
+                Next::End(End::Ran)
+            );
+            assert_eq!(
+                next(Phase::Running, RUN_END_MS, true, 1, keys, false),
+                Next::End(End::TimedOut)
+            );
+            assert_eq!(
+                next(Phase::Running, 10, true, 1, keys, true),
+                Next::End(End::UserActed(keys))
+            );
+        }
+        // The key hold's own limit still ends a YOLO hold.
+        assert_eq!(
+            next(Phase::Running, 10, true, 1, Keys::Ended, false),
+            Next::End(End::KeysEnded)
+        );
     }
 
     #[test]

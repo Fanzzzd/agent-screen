@@ -357,6 +357,27 @@ pub(super) async fn handle(
         "debugIcon" => debug_icon(cx),
         "debugShow" => debug_show(core, connection, p, cx).await,
         "debugGlow" => debug_glow(p, cx).await,
+        // The e2e instance only: it shows the user's activity, Kept
+        // Windows and agent clients.
+        "debugAutonomy" => {
+            if agent_screen_mcp::endpoint::instance().as_deref() != Some("e2e") {
+                return Some(Err(ControlError::invalid(
+                    "debugAutonomy requires the isolated e2e instance",
+                )));
+            }
+            Ok(debug_autonomy(core, cx))
+        }
+        // The e2e instance only: a release build with debug methods on the
+        // default instance can't fake the user's idle time.
+        "debugActivity" => {
+            if agent_screen_mcp::endpoint::instance().as_deref() != Some("e2e") {
+                return Some(Err(ControlError::invalid(
+                    "debugActivity requires the isolated e2e instance",
+                )));
+            }
+            crate::mac::activity::set_override(p.0);
+            Ok(json!({ "override": crate::mac::activity::overridden() }))
+        }
         _ => return None,
     };
     Some(result)
@@ -785,14 +806,65 @@ fn debug_card(cx: &mut AsyncApp) -> Result<Value, ControlError> {
     }))
 }
 
+/// The Autonomy Mode as it is: the setting, whether the Stop chord is
+/// registered, the Kept Windows, the Protected Apps resolved and the
+/// clients' apps, and the monitor's tracker.
+fn debug_autonomy(core: &Entity<Core>, cx: &mut AsyncApp) -> Value {
+    let mut reply = core.read_with(cx, |c, _| {
+        let a = &c.autonomy;
+        let mut reply = a.json();
+        reply["hotkey"] = json!(crate::mac::hotkey::registered());
+        reply["kept"] = json!(a.kept.ids().collect::<Vec<_>>());
+        reply["protected"] = json!(a.protected_list());
+        reply["clients"] = json!(crate::autonomy::clients());
+        reply["tracker"] = crate::mac::activity::debug_json();
+        use crate::mac::armed_hold;
+        reply["armedHold"] = json!({
+            "armed": armed_hold::armed(),
+            "held": armed_hold::held(),
+            "last": armed_hold::last().map(|s| json!({
+                "events": s.events,
+                "keyDowns": s.key_downs,
+                "ms": s.ms,
+                "sent": s.sent,
+                "discarded": s.discarded,
+            })),
+        });
+        reply["grant"] = json!(c.input_queue.queue.mode_grant().map(|m| m.as_str()));
+        reply
+    });
+    // The menu bar icon's menu, as it would open now.
+    if let Some(shell) = crate::ui::shell::current() {
+        let menu = shell.update(cx, |shell, cx| {
+            let items = shell.autonomy_items(cx);
+            json!({
+                "stop": items.stop,
+                "title": items.title,
+                "modes": items.modes.iter().map(|(mode, title, checked)| json!({
+                    "mode": mode.as_str(), "title": title, "checked": checked,
+                })).collect::<Vec<_>>(),
+                "ended": items.ended,
+            })
+        });
+        if let Ok(menu) = menu {
+            reply["menu"] = menu;
+        }
+    }
+    reply
+}
+
 fn debug_icon(cx: &mut AsyncApp) -> Result<Value, ControlError> {
     let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
-    let (state, asking_count) = shell
-        .update(cx, |shell, _| (shell.icon_state(), shell.asking_count()))
+    let (state, asking_count, tint) = shell
+        .update(cx, |shell, _| {
+            (shell.icon_state(), shell.asking_count(), shell.icon_tint())
+        })
         .map_err(|e| ControlError::failed(e.to_string()))?;
     Ok(json!({
         "state": state,
         "askingCount": asking_count,
+        "mode": crate::autonomy::mode().as_str(),
+        "tint": tint,
     }))
 }
 
@@ -1003,6 +1075,112 @@ async fn debug_show(
             Ok(())
         })?;
     }
+    // The mode, as the user would change it, on the e2e instance only:
+    // a test never changes the developer's mode (ADR 0025).
+    if let Some(change) = autonomy_surface(&surface) {
+        if agent_screen_mcp::endpoint::instance().as_deref() != Some("e2e") {
+            return Err(ControlError::invalid(
+                "autonomy previews require the isolated e2e instance",
+            ));
+        }
+        use crate::autonomy::Source;
+        use agent_screen_model::autonomy::YoloEnd;
+        let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
+        let before = crate::autonomy::mode();
+        let done = shell
+            .update(cx, |shell, cx| -> Result<(), ControlError> {
+                match change {
+                    AutonomyChange::Setup => shell.open_setup(cx),
+                    AutonomyChange::Choose(mode) => {
+                        shell.choose_autonomy(mode, Source::Settings, cx)
+                    }
+                    AutonomyChange::Confirm if !shell.yolo_confirming() => {
+                        return Err(ControlError::invalid(
+                            "YOLO's confirmation is not showing: debugShow autonomy-yolo first",
+                        ));
+                    }
+                    AutonomyChange::Confirm => shell.confirm_yolo(Source::Settings, cx),
+                    AutonomyChange::Cancel => shell.cancel_yolo(cx),
+                    AutonomyChange::Stop => shell.stop_autonomy(Source::Chord, cx),
+                    AutonomyChange::Lock => shell.yolo_ends(YoloEnd::Locked, cx),
+                    AutonomyChange::Sleep => shell.yolo_ends(YoloEnd::Slept, cx),
+                }
+                Ok(())
+            })
+            .map_err(|e| ControlError::failed(e.to_string()))?;
+        done?;
+        let confirming = shell
+            .update(cx, |shell, _| shell.yolo_confirming())
+            .unwrap_or(false);
+        let mode = crate::autonomy::mode();
+        return Ok(json!({
+            "changed": mode != before,
+            "mode": mode.as_str(),
+            "confirming": confirming,
+        }));
+    }
+    // The display's waiting Window Request in Auto, and its buttons.
+    if let Some(answer) = match surface.as_str() {
+        "window-wait-give" => Some(Some(crate::autonomy::WaitAnswer::HandOver)),
+        "window-wait-keep" => Some(Some(crate::autonomy::WaitAnswer::Keep)),
+        "window-wait" => Some(None),
+        _ => None,
+    } {
+        // Any session's display: a script reads an MCP session's line.
+        display(core, p, true, cx)?;
+        let app = p.string("app").unwrap_or_else(|| "Finder".into());
+        return core.update(cx, |c, cx| {
+            // With none waiting, a preview: window 0, which nothing moves.
+            if !c.window_waits.contains_key(&id) {
+                if answer.is_some() {
+                    return Err(ControlError::invalid(
+                        "no Window Request is waiting on this display",
+                    ));
+                }
+                let named = agent_screen_model::request::NamedWindow {
+                    target: crate::model::WindowTarget {
+                        pid: 0,
+                        window_id: 0,
+                    },
+                    app,
+                    title: String::new(),
+                };
+                let _ = c.wait_for_window(id, named, cx);
+            }
+            let Some(wait) = c.window_waits.get(&id) else {
+                return Err(ControlError::invalid("no Window Request is waiting"));
+            };
+            let preview = wait.window.target.window_id == 0;
+            let line = json!({
+                "windowId": wait.window.target.window_id,
+                "app": wait.window.app,
+                "sinceS": wait.since.elapsed().as_secs(),
+                "preview": preview,
+            });
+            let serial = wait.serial;
+            let answered = answer.is_some_and(|a| c.answer_window_wait(id, a, cx));
+            if answer.is_some() && preview {
+                c.end_window_wait(id, serial, cx);
+            }
+            Ok(json!({ "wait": line, "answered": answered }))
+        });
+    }
+    // In Auto, real input waiting for the user's hands: its line, and "Let
+    // the agent continue", which is the user's Allow.
+    if matches!(surface.as_str(), "hands-wait" | "hands-wait-continue") {
+        display(core, p, true, cx)?;
+        if surface == "hands-wait" {
+            core.update(cx, |c, cx| {
+                c.input_queue.hands_preview.insert(id);
+                cx.notify();
+            });
+        } else {
+            let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
+            let _ = shell.update(cx, |shell, cx| shell.allow_hands(id, cx));
+        }
+        let line = core.read_with(cx, |c, _| c.input_queue.hands_line(id));
+        return Ok(json!({ "line": line }));
+    }
     // Allow itself, through the shell, comes after this.
     if matches!(surface.as_str(), "input-queue" | "input-queue-approved") {
         core.update(cx, |c, cx| -> Result<(), ControlError> {
@@ -1078,6 +1256,34 @@ async fn debug_show(
         .timer(Duration::from_millis(900))
         .await;
     Ok(json!({}))
+}
+
+/// A debugShow surface that changes the Autonomy Mode as the user would.
+#[derive(Clone, Copy)]
+enum AutonomyChange {
+    Setup,
+    Choose(agent_screen_model::autonomy::Mode),
+    Confirm,
+    Cancel,
+    Stop,
+    Lock,
+    Sleep,
+}
+
+fn autonomy_surface(surface: &str) -> Option<AutonomyChange> {
+    use agent_screen_model::autonomy::Mode;
+    Some(match surface {
+        "setup-autonomy" => AutonomyChange::Setup,
+        "autonomy-ask" => AutonomyChange::Choose(Mode::Ask),
+        "autonomy-auto" => AutonomyChange::Choose(Mode::Auto),
+        "autonomy-yolo" => AutonomyChange::Choose(Mode::Yolo),
+        "autonomy-yolo-confirm" => AutonomyChange::Confirm,
+        "autonomy-yolo-cancel" => AutonomyChange::Cancel,
+        "autonomy-stop" => AutonomyChange::Stop,
+        "autonomy-lock" => AutonomyChange::Lock,
+        "autonomy-sleep" => AutonomyChange::Sleep,
+        _ => return None,
+    })
 }
 
 /// The Red Glow as it is: its state and preview, and per user screen its

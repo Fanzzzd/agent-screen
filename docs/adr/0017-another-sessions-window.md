@@ -17,3 +17,5 @@ The holder learns what happened through the calls it already makes, without a pu
 A window the user handed over to the holder stays a Handover for the asker, with its original return location. When the asker's display ends, the window goes back to the user, never to the holder: the holder's claim on it was the user's gift, and the user now gave it elsewhere. Any other window becomes a Placement on the asker's display and stays for review when that display ends.
 
 The same rule answers the reverse case. A holder that wants the window back calls `place_window` for it, which asks the user in the same way.
+
+No Autonomy Mode moves a window a live session holds. YOLO moves a Review Display's window without the card ([ADR 0025](0025-autonomy-modes.md)).

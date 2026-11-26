@@ -2,7 +2,7 @@
 
 use super::pointer;
 use super::shell::{Shell, tell};
-use super::status::{AccessLine, Status};
+use super::status::{AccessLine, Status, Wait};
 use super::stream::{NewFrame, Streams};
 use super::theme::{self, Theme};
 use crate::core::Core;
@@ -10,8 +10,8 @@ use crate::i18n::t;
 use crate::model::{DisplayId, Rect, WindowTarget};
 use gpui::{
     AnimationExt, Context, Entity, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent,
-    MouseButton, ObjectFit, ParentElement, Render, Role, StatefulInteractiveElement, Styled,
-    WeakEntity, Window, div, prelude::FluentBuilder, px, surface, svg,
+    MouseButton, ObjectFit, ParentElement, Render, Role, SharedString, StatefulInteractiveElement,
+    Styled, WeakEntity, Window, div, prelude::FluentBuilder, px, surface, svg,
 };
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -279,12 +279,10 @@ impl Render for Peek {
                 continue;
             };
             let count = self.counts.get(id).copied().unwrap_or(0);
-            let line = core.input_queue.waiting_line(*id);
-            let status = Status::of(display, count, &theme);
-            // The agent waits for the user to leave an app: they may let it
-            // continue now instead.
-            let waiting = line.is_some() && status.kind == super::status::Kind::Agent;
-            let status = status.waiting_for(display.agent_name(), line);
+            // The agent waits for the user to leave an app, or in Auto for
+            // a window or their hands: they may answer it now.
+            let (status, waiting) =
+                super::status::with_waits(core, *id, Status::of(display, count, &theme));
             let pointer = (!display.takeover && !display.is_ended())
                 .then_some(display.pointer)
                 .flatten();
@@ -334,7 +332,7 @@ impl Render for Peek {
                     false,
                     None,
                     look.status,
-                    false,
+                    Wait::None,
                     look.frame,
                     None,
                     look.size,
@@ -413,13 +411,25 @@ impl Render for Peek {
                 tell(&shell, cx, move |shell, cx| shell.card_hover(hovered, cx));
             })
             .children(tiles)
-            .child(add_tile(
-                narrow,
-                self.tile,
-                add_focused,
-                &theme,
-                &self.shell,
-            ));
+            .child(
+                div()
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .child(add_tile(
+                        narrow,
+                        self.tile,
+                        add_focused,
+                        &theme,
+                        &self.shell,
+                    ))
+                    .children(mode_pill(
+                        crate::autonomy::mode(),
+                        narrow,
+                        &theme,
+                        &self.shell,
+                    )),
+            );
         let viewport = f32::from(window.viewport_size().width) - left - right;
         // A slide that has ended keeps the card where it stopped until the
         // window takes the card's frame.
@@ -513,7 +523,7 @@ fn tile(
     recording: bool,
     access: Option<AccessLine>,
     status: Status,
-    lets_continue: bool,
+    wait: Wait,
     frame: Option<core_video::pixel_buffer::CVPixelBuffer>,
     pointer: Option<crate::model::AgentPointer>,
     size: (f64, f64),
@@ -607,13 +617,13 @@ fn tile(
                         .when_some(remind, |d, remind| {
                             d.child(reminder(remind, size, fit, theme, shell))
                         })
-                        .when(lets_continue && remind.is_none(), |d| {
-                            d.child(continue_pill(id, theme, shell))
+                        .when(wait != Wait::None && remind.is_none(), |d| {
+                            d.child(wait_pills(id, &wait, theme, shell))
                         })
                         // Keep the reminder's Take Back button, and the one
                         // that lets the agent continue, visible.
                         .when_some(
-                            access.filter(|_| remind.is_none() && !lets_continue),
+                            access.filter(|_| remind.is_none() && wait == Wait::None),
                             |d, access| d.child(access_pill(id, access, theme, revoke)),
                         )
                         // Hover and "currently open" both show as a ring.
@@ -726,50 +736,114 @@ fn tile(
         )
 }
 
-/// "Let the agent continue" on a tile whose agent waits for the user to
-/// leave an app: a pill at the bottom of the picture. Its press runs the
-/// waiting actions now, with Agent Screen in front for a moment
-/// (`control::front_hold`).
-fn continue_pill(id: DisplayId, theme: &Theme, shell: &WeakEntity<Shell>) -> impl IntoElement {
-    let shell = shell.clone();
-    let title = t("Let the agent continue", "让 Agent 继续");
-    div()
-        .id(gpui::ElementId::Name(format!("let-continue-{id}").into()))
-        .role(Role::Button)
-        .aria_label(title)
+/// The pills at the bottom of the picture of a tile whose agent waits.
+/// "Let the agent continue", for an action waiting on the user's front
+/// app, runs it now with Agent Screen in front for a moment
+/// (`control::front_hold`); for real input waiting in Auto it is the
+/// user's Allow. Hand Over and Keep answer a Window Request waiting in
+/// Auto (ADR 0025).
+fn wait_pills(
+    id: DisplayId,
+    wait: &Wait,
+    theme: &Theme,
+    shell: &WeakEntity<Shell>,
+) -> impl IntoElement {
+    let row = div()
         .absolute()
         .bottom(px(6.))
         .left_0()
         .right_0()
         .flex()
         .justify_center()
+        .gap(px(6.));
+    match wait {
+        Wait::Window => row
+            .child(pill(
+                format!("window-wait-give-{id}"),
+                t("Hand Over", "交给它"),
+                None,
+                theme.accent,
+                {
+                    let shell = shell.clone();
+                    move |_, cx| {
+                        tell(&shell, cx, move |shell, cx| {
+                            shell.answer_window_wait(id, crate::autonomy::WaitAnswer::HandOver, cx);
+                        })
+                    }
+                },
+            ))
+            .child(pill(
+                format!("window-wait-keep-{id}"),
+                t("Keep", "保留"),
+                None,
+                theme.secondary,
+                {
+                    let shell = shell.clone();
+                    move |_, cx| {
+                        tell(&shell, cx, move |shell, cx| {
+                            shell.answer_window_wait(id, crate::autonomy::WaitAnswer::Keep, cx);
+                        })
+                    }
+                },
+            )),
+        Wait::Hands => row.child(pill(
+            format!("hands-continue-{id}"),
+            t("Let the agent continue", "让 Agent 继续"),
+            Some("icons/play.svg"),
+            theme.accent,
+            {
+                let shell = shell.clone();
+                move |_, cx| tell(&shell, cx, move |shell, cx| shell.allow_hands(id, cx))
+            },
+        )),
+        _ => row.child(pill(
+            format!("let-continue-{id}"),
+            t("Let the agent continue", "让 Agent 继续"),
+            Some("icons/play.svg"),
+            theme.accent,
+            {
+                let shell = shell.clone();
+                move |window, cx| super::shell::let_continue(&shell, id, window, cx)
+            },
+        )),
+    }
+}
+
+fn pill(
+    id: String,
+    title: &'static str,
+    icon: Option<&'static str>,
+    color: gpui::Hsla,
+    action: impl Fn(&mut Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(gpui::ElementId::Name(id.into()))
+        .role(Role::Button)
+        .aria_label(title)
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(move |_, window, cx| {
             cx.stop_propagation();
-            super::shell::let_continue(&shell, id, window, cx);
+            action(window, cx);
         })
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(4.))
-                .px(px(10.))
-                .py(px(3.))
-                .rounded_full()
-                .bg(theme.accent.opacity(0.88))
-                .hover(|s| s.bg(theme.accent))
-                .text_size(px(11.))
-                .font_weight(gpui::FontWeight::MEDIUM)
+        .flex()
+        .items_center()
+        .gap(px(4.))
+        .px(px(10.))
+        .py(px(3.))
+        .rounded_full()
+        .bg(color.opacity(0.88))
+        .hover(move |s| s.bg(color))
+        .text_size(px(11.))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(gpui::white())
+        .children(icon.map(|icon| {
+            svg()
+                .path(icon)
+                .flex_none()
+                .size(px(10.))
                 .text_color(gpui::white())
-                .child(
-                    svg()
-                        .path("icons/play.svg")
-                        .flex_none()
-                        .size(px(10.))
-                        .text_color(gpui::white()),
-                )
-                .child(title),
-        )
+        }))
+        .child(title)
 }
 
 /// The session's Window Access on its tile: a pill at the bottom-left of
@@ -998,6 +1072,56 @@ fn add_tile(
                 .group_hover("add", |s| s.text_color(theme.label))
                 .when(!narrow, |d| d.child(t("New Display", "新建显示器"))),
         )
+}
+
+/// The Autonomy Mode under "+": nothing in Ask, a neutral Auto, a red
+/// YOLO. A click opens Settings at the Autonomy row (ADR 0025). Peek has
+/// no header, so it sits where the add tile's label would.
+fn mode_pill(
+    mode: agent_screen_model::autonomy::Mode,
+    narrow: bool,
+    theme: &Theme,
+    shell: &WeakEntity<Shell>,
+) -> Option<impl IntoElement> {
+    use agent_screen_model::autonomy::Mode;
+    let (label, color) = match mode {
+        Mode::Ask => return None,
+        Mode::Auto => (t("Auto", "自动"), theme.secondary),
+        Mode::Yolo => ("YOLO", theme.red),
+    };
+    let name = super::setup::mode_name(mode);
+    let shell = shell.clone();
+    Some(
+        div()
+            .id("autonomy-pill")
+            .role(Role::Button)
+            .aria_label(SharedString::from(tf!(
+                "Autonomy Mode: {name}. Open Settings",
+                "自主模式：{name}，打开设置"
+            )))
+            .absolute()
+            .when(narrow, |d| d.bottom(px(12.)).left_0().right_0())
+            .when(!narrow, |d| d.top(px(6.)).right(px(6.)))
+            .flex()
+            .justify_center()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(move |_, _, cx| {
+                cx.stop_propagation();
+                tell(&shell, cx, |shell, cx| shell.open_setup(cx));
+            })
+            .child(
+                div()
+                    .px(px(6.))
+                    .py(px(1.))
+                    .rounded_full()
+                    .bg(color.opacity(0.16))
+                    .hover(move |s| s.bg(color.opacity(0.26)))
+                    .text_size(px(9.5))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(color)
+                    .child(label),
+            ),
+    )
 }
 
 /// What stands where display `id`'s picture goes until a frame comes, or

@@ -15,7 +15,7 @@ This file is for agents working on Agent Screen's code. `docs/agents/AGENTS.md` 
 
 ## Constraints
 
-- Agent Screen exists so agents never take the user's pointer, keyboard or focus. Agent input goes to the target process through SkyLight (ADR 0001). Nothing in the app warps the cursor, activates an app, or raises a window on the user's screen to get a job done.
+- Agent Screen exists so agents never take the user's pointer, keyboard or focus. Agent input goes to the target process through SkyLight (ADR 0001). The exceptions are the user-approved Input Queue and Keyboard Borrow (ADR 0013, ADR 0008) and what the user's Autonomy Mode permits (ADR 0025). Nothing in the app warps the cursor, activates an app, or raises a window on the user's screen to get a job done.
 - Displays are addressed by the handle `create_display` returns (ADR 0002). The control socket's NDJSON protocol is the contract between `AgentScreen mcp` and the app (ADR 0005).
 - `crates/model` holds domain rules with no OS calls. Put a rule there when it can be tested without macOS.
 - A display ends in review, and a Takeover ends only when the user hands control back (ADR 0004). A new window belongs to the agent only under ADR 0007's rule.
@@ -28,6 +28,8 @@ This file is for agents working on Agent Screen's code. `docs/agents/AGENTS.md` 
 The developer's Agent Screen, AeroSpace and apps are running while you work.
 
 - Run scripts beside the user's app with `AGENTSCREEN_INSTANCE=e2e`. It is a separate instance with its own socket and displays.
+- The e2e instance keeps its Autonomy Mode in `autonomy-e2e.json`. Never write the default instance's file from a test, and never put the installed app into Auto or YOLO to try something: use the e2e instance and `debugActivity`.
+- `autoinput`, `autofront` and `yoloinput` move the real pointer, and `yoloinput` holds the keyboard for up to 3 s at a time. Run them only when the user is away or asks. Test the lock rule with `autonomy-lock`, never by locking the Mac.
 - `cargo e2e run` moves the real pointer. Run it only when the user is away or asks for it.
 - TextEdit, Safari and Preview may be the user's. The scripts skip when they are running; don't work around that. Quit Calculator after a script that opens it.
 - Don't move the user's windows and don't switch their AeroSpace workspace. If you do, put it back and say so.

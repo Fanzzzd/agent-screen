@@ -3,6 +3,7 @@
 //! The platform must acknowledge release of a cancelled loan before another
 //! loan can begin. Time here is monotonic milliseconds supplied by the caller.
 
+use crate::autonomy::Mode;
 use crate::model::DisplayId;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -82,6 +83,9 @@ pub struct Request {
     /// user's pointer: it runs through the background route once that app
     /// is no longer in front, while the agent's call waits.
     pub front: bool,
+    /// Its target belongs to a Protected App: only the user's Allow covers
+    /// it, never a grant the Autonomy Mode opened (ADR 0025).
+    pub ask_only: bool,
 }
 
 /// Milliseconds on the clock the queue is given as `now`.
@@ -116,11 +120,25 @@ impl Times {
     }
 }
 
+/// Who opened a grant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Opened {
+    /// The user, with Allow.
+    User,
+    /// The Autonomy Mode, with no card (ADR 0025).
+    Mode(Mode),
+}
+
 #[derive(Clone, Debug)]
 pub struct Grant {
     pub id: u64,
     pub since_ms: u64,
     pub idle_since_ms: Option<u64>,
+    pub opened: Opened,
+    /// An armed hold runs for it: the mode opened it. Allow makes the
+    /// grant the user's but leaves this set, so cleanup still ends the
+    /// hold (ADR 0025).
+    pub armed: bool,
     participants: BTreeSet<Owner>,
     done: BTreeSet<Owner>,
 }
@@ -139,6 +157,9 @@ impl Grant {
 pub struct GrantEnd {
     pub id: u64,
     pub restore: bool,
+    pub opened: Opened,
+    /// The grant's armed hold must end with it.
+    pub armed: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -325,7 +346,20 @@ impl Queue {
         reason: String,
         now: u64,
     ) -> Result<RequestId, EnqueueError> {
-        self.insert(owner, operation, reason, now, false, true)
+        self.insert(owner, operation, reason, now, false, true, false)
+    }
+
+    /// As `enqueue`, for a target that belongs to a Protected App when
+    /// `ask_only`: a grant the mode opened does not admit it.
+    pub fn enqueue_for(
+        &mut self,
+        owner: Owner,
+        operation: String,
+        reason: String,
+        ask_only: bool,
+        now: u64,
+    ) -> Result<RequestId, EnqueueError> {
+        self.insert(owner, operation, reason, now, false, true, ask_only)
     }
 
     /// Queue an action that only the user's front app blocks: their window
@@ -340,7 +374,7 @@ impl Queue {
         reason: String,
         now: u64,
     ) -> Result<RequestId, EnqueueError> {
-        self.insert(owner, operation, reason, now, true, true)
+        self.insert(owner, operation, reason, now, true, true, false)
     }
 
     /// As `enqueue_front`, beside the owner's other requests rather than
@@ -353,9 +387,10 @@ impl Queue {
         reason: String,
         now: u64,
     ) -> Result<RequestId, EnqueueError> {
-        self.insert(owner, operation, reason, now, true, false)
+        self.insert(owner, operation, reason, now, true, false, false)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn insert(
         &mut self,
         owner: Owner,
@@ -364,6 +399,7 @@ impl Queue {
         now: u64,
         front: bool,
         replaces: bool,
+        ask_only: bool,
     ) -> Result<RequestId, EnqueueError> {
         if self.owners.get(&owner.display) != Some(&owner) {
             return Err(EnqueueError::Closed);
@@ -435,6 +471,7 @@ impl Queue {
                         ..Times::default()
                     },
                     front: true,
+                    ask_only: false,
                 },
             );
             return Ok(id);
@@ -442,6 +479,7 @@ impl Queue {
         let mut allowed = None;
         if !self.takeovers.contains(&owner.display)
             && let Some(grant) = self.grant.as_mut()
+            && (grant.opened == Opened::User || !ask_only)
         {
             grant.participants.insert(owner.clone());
             grant.done.remove(&owner);
@@ -462,6 +500,7 @@ impl Queue {
                     ..Times::default()
                 },
                 front: false,
+                ask_only,
             },
         );
         self.waiting.push_back(id);
@@ -471,7 +510,36 @@ impl Queue {
 
     /// Only the user's approval calls this. Cleanup of an interrupted loan
     /// must finish first, even if the user immediately approves again.
+    /// Allow while a grant the mode opened is open makes it the user's,
+    /// and admits every waiting owner.
     pub fn allow(&mut self, approval: u64, now: u64) -> bool {
+        if approval == self.approval
+            && self.approval != u64::MAX
+            && self
+                .grant
+                .as_ref()
+                .is_some_and(|g| matches!(g.opened, Opened::Mode(_)))
+        {
+            let waiting: Vec<(RequestId, Owner)> = self
+                .waiting()
+                .filter(|r| !self.takeovers.contains(&r.owner.display))
+                .map(|r| (r.id, r.owner.clone()))
+                .collect();
+            for (id, _) in &waiting {
+                if let Some(r) = self.requests.get_mut(id) {
+                    r.times.allowed.get_or_insert(now);
+                }
+            }
+            self.approval += 1;
+            if let Some(grant) = self.grant.as_mut() {
+                grant.opened = Opened::User;
+                grant
+                    .participants
+                    .extend(waiting.into_iter().map(|(_, o)| o));
+            }
+            self.refresh_idle(now);
+            return true;
+        }
         if approval != self.approval
             || self.approval == u64::MAX
             || self.grant.is_some()
@@ -498,10 +566,68 @@ impl Queue {
             id: self.approval,
             since_ms: now,
             idle_since_ms: None,
+            opened: Opened::User,
+            armed: false,
             participants,
             done: BTreeSet::new(),
         });
         true
+    }
+
+    /// The Autonomy Mode opens a grant, with no card: as `allow`, with no
+    /// approval number, admitting only owners with a waiting request that
+    /// is not `ask_only`. It ends as soon as nothing waits or runs.
+    pub fn open_by_mode(&mut self, mode: Mode, now: u64) -> bool {
+        if mode == Mode::Ask
+            || self.approval == u64::MAX
+            || self.grant.is_some()
+            || self.pending_end.is_some()
+            || self.active.is_some()
+        {
+            return false;
+        }
+        let admitted: Vec<RequestId> = self
+            .waiting()
+            .filter(|r| self.runnable(r) && !r.ask_only)
+            .map(|r| r.id)
+            .collect();
+        if admitted.is_empty() {
+            return false;
+        }
+        let mut participants = BTreeSet::new();
+        for id in &admitted {
+            if let Some(r) = self.requests.get_mut(id) {
+                r.times.allowed = Some(now);
+                participants.insert(r.owner.clone());
+            }
+        }
+        // A card still up for the batch can't approve it a second time.
+        self.approval += 1;
+        self.grant = Some(Grant {
+            id: self.approval,
+            since_ms: now,
+            idle_since_ms: None,
+            opened: Opened::Mode(mode),
+            armed: true,
+            participants,
+            done: BTreeSet::new(),
+        });
+        true
+    }
+
+    /// Whether the open grant is the mode's, and in which mode.
+    pub fn mode_grant(&self) -> Option<Mode> {
+        match self.grant.as_ref()?.opened {
+            Opened::Mode(mode) => Some(mode),
+            Opened::User => None,
+        }
+    }
+
+    /// Waiting requests the open grant doesn't run: in a grant the mode
+    /// opened, those for a Protected App, whose card shows beside it.
+    pub fn outside_grant(&self) -> impl Iterator<Item = &Request> {
+        let mode = self.mode_grant().is_some();
+        self.waiting().filter(move |r| mode && r.ask_only)
     }
 
     /// FIFO among eligible requests. A Takeover cannot block other sessions.
@@ -513,7 +639,7 @@ impl Queue {
         let index = self
             .waiting
             .iter()
-            .position(|id| self.requests.get(id).is_some_and(|r| self.runnable(r)))?;
+            .position(|id| self.requests.get(id).is_some_and(|r| self.covered(r)))?;
         let id = self.waiting.remove(index)?;
         let r = self.requests.get_mut(&id)?;
         r.status = Status::Running;
@@ -612,7 +738,7 @@ impl Queue {
         self.grant.is_some()
             && self.active.is_none()
             && self.pending_end.is_none()
-            && self.waiting().any(|r| self.runnable(r))
+            && self.waiting().any(|r| self.covered(r))
     }
 
     /// Checked before each real event, not just at the beginning of a drag.
@@ -650,18 +776,50 @@ impl Queue {
 
     /// Physical input revokes the whole grant but leaves the other requests
     /// queued for a new approval. The platform must not restore the pointer
-    /// or front app after this user-initiated revocation.
+    /// or front app after this user-initiated revocation of a grant the
+    /// user opened. One the Autonomy Mode opened restores: the user never
+    /// gave them up (ADR 0025).
     pub fn user_input(&mut self) {
         self.approval = self.approval.saturating_add(1);
         self.end_grant(false);
         if let Some(end) = self.pending_end.as_mut() {
-            end.restore = false;
+            end.restore = matches!(end.opened, Opened::Mode(_));
+        }
+        self.stop_active(Stop::User);
+    }
+
+    /// Stop in Auto or YOLO: the chord, the Input Bar's or the menu's. Ends
+    /// any grant, and restores.
+    pub fn stop(&mut self) {
+        self.approval = self.approval.saturating_add(1);
+        self.end_grant(true);
+        if let Some(end) = self.pending_end.as_mut() {
+            end.restore = true;
         }
         self.stop_active(Stop::User);
     }
 
     /// Not Now declines the waiting batch; it is not a timeout.
     pub fn decline(&mut self, approval: u64, now: u64) {
+        if approval == self.approval && self.mode_grant().is_some() {
+            // Beside a grant the mode opened, the card asks only for the
+            // requests it doesn't cover.
+            self.approval = self.approval.saturating_add(1);
+            let requests = &mut self.requests;
+            self.waiting.retain(|id| {
+                let Some(r) = requests.get_mut(id) else {
+                    return false;
+                };
+                if r.ask_only {
+                    r.status = Status::Declined;
+                    r.times.ended = Some(now);
+                    false
+                } else {
+                    true
+                }
+            });
+            return;
+        }
         if approval != self.approval || self.grant.is_some() {
             return;
         }
@@ -728,7 +886,11 @@ impl Queue {
         self.refresh_idle(now);
         let expired = self.grant.as_ref().is_some_and(|grant| {
             grant.idle_since_ms.is_some_and(|idle| {
-                now.saturating_sub(idle) >= IDLE_MS || grant.participants.is_subset(&grant.done)
+                // A grant the mode opened has no idle grace: reopening
+                // costs the user nothing.
+                matches!(grant.opened, Opened::Mode(_))
+                    || now.saturating_sub(idle) >= IDLE_MS
+                    || grant.participants.is_subset(&grant.done)
             })
         });
         if expired {
@@ -750,6 +912,8 @@ impl Queue {
             self.pending_end = Some(GrantEnd {
                 id: grant.id,
                 restore,
+                opened: grant.opened,
+                armed: grant.armed,
             });
         }
     }
@@ -763,6 +927,12 @@ impl Queue {
     /// a Takeover.
     pub fn runnable(&self, r: &Request) -> bool {
         r.status == Status::Queued && r.attached && !self.takeovers.contains(&r.owner.display)
+    }
+
+    /// Runnable, and the open grant covers it: a grant the mode opened
+    /// never runs a request for a Protected App.
+    fn covered(&self, r: &Request) -> bool {
+        self.runnable(r) && !(r.ask_only && self.mode_grant().is_some())
     }
 
     /// The agent's call waits for it again.
@@ -794,7 +964,7 @@ impl Queue {
     }
 
     fn refresh_idle(&mut self, now: u64) {
-        let busy = self.active.is_some() || self.waiting().any(|r| self.runnable(r));
+        let busy = self.active.is_some() || self.waiting().any(|r| self.covered(r));
         if let Some(grant) = self.grant.as_mut() {
             if busy {
                 grant.idle_since_ms = None;
@@ -1916,5 +2086,203 @@ mod tests {
         assert!(q.finish(id, 2));
         assert_eq!(q.request(id).unwrap().status, Status::Stopped(Stop::Failed));
         assert!(q.active().is_none());
+    }
+
+    fn protected(q: &mut Queue, session: &str, display: DisplayId, now: u64) -> RequestId {
+        q.enqueue_for(
+            owner(session, display),
+            "click-bank".into(),
+            "Click in the bank".into(),
+            true,
+            now,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_mode_opened_grant_admits_no_ask_only_request() {
+        let mut q = queue();
+        let bank = protected(&mut q, "a", 1, 0);
+        // Only an ask_only request waits: the mode opens nothing.
+        assert!(!q.open_by_mode(Mode::Auto, 0));
+        let drag = add(&mut q, "b", 2, "drag", 0);
+        assert!(q.open_by_mode(Mode::Auto, 1));
+        assert_eq!(q.mode_grant(), Some(Mode::Auto));
+        assert_eq!(q.request(drag).unwrap().times.allowed, Some(1));
+        assert_eq!(q.request(bank).unwrap().times.allowed, None);
+        assert_eq!(
+            q.outside_grant().map(|r| r.id).collect::<Vec<_>>(),
+            vec![bank]
+        );
+        assert_eq!(q.start(1), Some(drag));
+        assert!(q.finish(drag, 2));
+        // The bank click never ran in it, and kept no grant open.
+        assert!(q.grant().is_none());
+        assert_eq!(q.request(bank).unwrap().status, Status::Queued);
+        // Ask never opens one.
+        restored(&mut q);
+        add(&mut q, "c", 3, "drag", 3);
+        assert!(!q.open_by_mode(Mode::Ask, 3));
+    }
+
+    #[test]
+    fn an_ask_only_request_arriving_in_a_mode_grant_is_not_admitted() {
+        let mut q = queue();
+        let drag = add(&mut q, "a", 1, "drag", 0);
+        assert!(q.open_by_mode(Mode::Yolo, 0));
+        let bank = protected(&mut q, "b", 2, 1);
+        assert_eq!(q.request(bank).unwrap().times.allowed, None);
+        assert_eq!(q.start(1), Some(drag));
+        assert!(q.finish(drag, 2));
+        assert_eq!(q.start(2), None);
+        assert_eq!(q.request(bank).unwrap().status, Status::Queued);
+    }
+
+    #[test]
+    fn allow_upgrades_a_mode_opened_grant() {
+        let mut q = queue();
+        let drag = add(&mut q, "a", 1, "drag", 0);
+        let bank = protected(&mut q, "b", 2, 0);
+        assert!(q.open_by_mode(Mode::Auto, 0));
+        let card = q.approval();
+        assert!(q.allow(card, 5));
+        assert_eq!(q.mode_grant(), None);
+        assert_eq!(q.grant().unwrap().opened, Opened::User);
+        assert!(q.grant().unwrap().admits(&owner("b", 2)));
+        assert_eq!(q.request(bank).unwrap().times.allowed, Some(5));
+        assert_eq!(q.start(5), Some(drag));
+        assert!(q.finish(drag, 6));
+        assert_eq!(q.start(6), Some(bank));
+        // A stale card can't approve twice.
+        assert!(!q.allow(card, 7));
+    }
+
+    #[test]
+    fn an_allowed_mode_grant_still_ends_its_armed_hold() {
+        let mut q = queue();
+        let drag = add(&mut q, "a", 1, "drag", 0);
+        assert!(q.open_by_mode(Mode::Yolo, 0));
+        assert!(q.allow(q.approval(), 1));
+        assert!(q.grant().unwrap().armed);
+        assert_eq!(q.start(1), Some(drag));
+        assert!(q.finish(drag, 2));
+        q.stop();
+        let end = q.pending_end().expect("the grant ends");
+        assert_eq!(end.opened, Opened::User);
+        assert!(end.armed);
+    }
+
+    #[test]
+    fn not_now_beside_a_mode_grant_declines_only_what_it_asked_for() {
+        let mut q = queue();
+        let drag = add(&mut q, "a", 1, "drag", 0);
+        let bank = protected(&mut q, "b", 2, 0);
+        assert!(q.open_by_mode(Mode::Auto, 0));
+        q.decline(q.approval(), 1);
+        assert_eq!(q.request(bank).unwrap().status, Status::Declined);
+        assert_eq!(q.request(drag).unwrap().status, Status::Queued);
+        assert_eq!(q.mode_grant(), Some(Mode::Auto));
+    }
+
+    #[test]
+    fn a_mode_opened_grant_ends_with_the_queue_empty() {
+        let mut q = queue();
+        let a = add(&mut q, "a", 1, "drag", 0);
+        assert!(q.open_by_mode(Mode::Auto, 0));
+        assert_eq!(q.start(0), Some(a));
+        assert!(q.grant().is_some());
+        assert!(q.finish(a, 100));
+        // No 30 s grace: it ends now, and restores.
+        assert!(q.grant().is_none());
+        let end = q.pending_end().unwrap();
+        assert!(end.restore);
+        assert_eq!(end.opened, Opened::Mode(Mode::Auto));
+        // A detached request does not keep it open either.
+        restored(&mut q);
+        let b = add(&mut q, "b", 2, "drag", 200);
+        assert!(q.open_by_mode(Mode::Yolo, 200));
+        q.detach(b, 201);
+        q.tick(201);
+        assert!(q.grant().is_none());
+    }
+
+    #[test]
+    fn an_auto_touch_restores_and_an_ask_touch_does_not() {
+        let mut q = queue();
+        let a = add(&mut q, "a", 1, "drag", 0);
+        assert!(q.open_by_mode(Mode::Auto, 0));
+        assert_eq!(q.start(0), Some(a));
+        q.user_input();
+        assert_eq!(q.request(a).unwrap().status, Status::Stopping(Stop::User));
+        assert!(q.pending_end().unwrap().restore);
+        assert!(q.finish(a, 1));
+        restored(&mut q);
+
+        let b = add(&mut q, "b", 2, "drag", 2);
+        assert!(q.allow(q.approval(), 2));
+        assert_eq!(q.start(2), Some(b));
+        q.user_input();
+        assert!(!q.pending_end().unwrap().restore);
+    }
+
+    #[test]
+    fn stop_ends_each_kind_and_restores() {
+        for mode in [None, Some(Mode::Auto), Some(Mode::Yolo)] {
+            let mut q = queue();
+            let a = add(&mut q, "a", 1, "drag", 0);
+            match mode {
+                Some(mode) => assert!(q.open_by_mode(mode, 0)),
+                None => assert!(q.allow(q.approval(), 0)),
+            }
+            assert_eq!(q.start(0), Some(a));
+            q.stop();
+            assert!(q.grant().is_none());
+            assert!(q.pending_end().unwrap().restore, "{mode:?}");
+            assert_eq!(q.request(a).unwrap().status, Status::Stopping(Stop::User));
+            assert!(q.finish(a, 1));
+            restored(&mut q);
+            // The next one is not opened by the stop.
+            add(&mut q, "b", 2, "drag", 2);
+            assert!(q.grant().is_none());
+        }
+    }
+
+    #[test]
+    fn a_takeover_still_stops_the_loan_in_a_mode_opened_grant() {
+        let mut q = queue();
+        let a = add(&mut q, "a", 1, "drag", 0);
+        assert!(q.open_by_mode(Mode::Yolo, 0));
+        assert_eq!(q.start(0), Some(a));
+        q.takeover(1, true, 1);
+        assert_eq!(
+            q.request(a).unwrap().status,
+            Status::Stopping(Stop::Takeover)
+        );
+        assert!(!q.may_send(a, &owner("a", 1)));
+        // A request on a display in a Takeover never opens one.
+        assert!(q.finish(a, 2));
+        restored(&mut q);
+        add(&mut q, "a", 1, "drag2", 3);
+        assert!(!q.open_by_mode(Mode::Yolo, 3));
+    }
+
+    #[test]
+    fn the_limits_hold_in_a_mode_opened_grant() {
+        let mut q = queue();
+        add(&mut q, "a", 1, "op-0", 0);
+        assert!(q.open_by_mode(Mode::Yolo, 0));
+        // One session's share; replacing keeps one queued, so the records
+        // that count are kept results.
+        let a = owner("a", 1);
+        let refused = (1..MAX_SESSION_REQUESTS * 2)
+            .map(|n| q.enqueue(a.clone(), format!("op-{n}"), "Drag".into(), 0))
+            .find_map(Result::err);
+        assert_eq!(refused, Some(EnqueueError::SessionFull));
+        let held = q
+            .requests()
+            .filter(|r| r.owner.connection == a.connection)
+            .count();
+        assert_eq!(held, MAX_SESSION_REQUESTS);
+        assert!(q.requests().count() <= MAX_REQUESTS);
     }
 }

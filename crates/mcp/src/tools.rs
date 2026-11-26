@@ -292,7 +292,7 @@ pub fn definitions() -> Vec<Value> {
                     "screenshot": { "type": "boolean", "description": "false returns only the action's text, without the screenshot, for steps you don't need to see, such as a run of key presses. Default true." },
                     "real_input": {
                         "type": "boolean",
-                        "description": "For left_click, double_click, triple_click, left_click_drag or left_mouse_down, after a background attempt visibly had no effect: ask the user to allow their real pointer. It runs only once they allow it."
+                        "description": "For left_click, double_click, triple_click, left_click_drag or left_mouse_down, after a background attempt visibly had no effect: ask the user to allow their real pointer. It runs only once they allow it, or as their Autonomy Mode permits."
                     },
                     "via_input_method": {
                         "type": "boolean",
@@ -972,6 +972,9 @@ async fn create_display(
     if let Some(preview_url) = reply.get("preview_url").filter(|v| !v.is_null()) {
         out["preview_url"] = preview_url.clone();
     }
+    if let Some(mode) = reply.get("autonomyMode") {
+        out["autonomyMode"] = mode.clone();
+    }
     if let Some(displays) = reply.get("displays").and_then(Value::as_array) {
         out["displays"] = json!(
             displays
@@ -1375,7 +1378,9 @@ fn place_output(reply: &Object, asked: &[(&str, Option<f64>); 4]) -> Value {
         out["handedOver"] = json!(true);
     }
     // Which of the app's windows came, and whether from the Dock (#221).
-    for key in ["windowId", "title", "fromDock"] {
+    // Who took it and under which Autonomy Mode (ADR 0025): `mode` when
+    // the mode took it without a Window Request.
+    for key in ["windowId", "title", "fromDock", "authority", "autonomyMode"] {
         if let Some(value) = reply.get(key) {
             out[key] = value.clone();
         }
@@ -2960,6 +2965,15 @@ mod tests {
         assert_eq!(handed["title"], "Field");
         assert_eq!(handed["fromDock"], true);
         assert!(handed.get("by").is_none());
+        // A window the Autonomy Mode took says so (ADR 0025).
+        let by_mode = place_output(
+            json!({ "handedOver": true, "by": "mode", "authority": "mode", "autonomyMode": "auto" })
+                .as_object()
+                .unwrap(),
+            &[("x", None), ("y", None), ("width", None), ("height", None)],
+        );
+        assert_eq!(by_mode["authority"], "mode");
+        assert_eq!(by_mode["autonomyMode"], "auto");
         // A plain place has no frame to compare.
         assert_eq!(
             place_output(

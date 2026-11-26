@@ -208,9 +208,252 @@ impl<E> KeyHold<E> {
     }
 }
 
+/// What the armed hold makes of one event of the user's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArmedEvent {
+    /// One Agent Screen posted, tagged: it passes.
+    Ours,
+    /// The Stop chord's key down: seen before anything is held.
+    StopChord,
+    /// The pointer moved, with no button.
+    Moved,
+    /// A key, a modifier change or a mouse button.
+    Input(Kind),
+}
+
+/// What happens to it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArmedVerdict {
+    Pass,
+    /// Swallow it and stop: the mode goes to Ask.
+    Stop,
+    /// A touch that passes: in Auto a pointer move revokes the grant.
+    Touched,
+    /// Held, to go out once the user's front is back.
+    Hold,
+    /// Held, and the hold is full: restore now.
+    HoldAndEnd,
+    /// The hold is full and ending: swallowed, not kept.
+    Drop,
+}
+
+/// The armed hold of a grant, front hold or Keyboard Borrow the Autonomy
+/// Mode opened (ADR 0025). It holds nothing and runs no clock until the
+/// user's first key or press; from then `MAX_HOLD_MS` and `MAX_EVENTS`
+/// bound it. In Auto that first event ends the operation; in YOLO the
+/// operation runs `HELD_GRACE_MS` more.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Armed {
+    first: Option<u64>,
+    count: usize,
+}
+
+const _: () = assert!(
+    crate::user_activity::HELD_GRACE_MS
+        + crate::front_hold::GIVE_BACK_MS
+        + crate::front_hold::KEYS_BACK_MS
+        <= MAX_HOLD_MS
+);
+
+impl Armed {
+    pub fn new() -> Self {
+        Armed::default()
+    }
+
+    /// When the first event was held; None while nothing is.
+    pub fn first(&self) -> Option<u64> {
+        self.first
+    }
+
+    pub fn held(&self) -> usize {
+        self.count
+    }
+
+    /// The first held event came at `now`: the clocks start.
+    pub fn first_held(&mut self, now: u64) {
+        self.first.get_or_insert(now);
+    }
+
+    /// When the operation must stop: at the first held event in Auto, and
+    /// `HELD_GRACE_MS` after it in YOLO. None before anything is held.
+    pub fn deadline(&self, mode: crate::autonomy::Mode) -> Option<u64> {
+        let first = self.first?;
+        if self.count >= MAX_EVENTS {
+            // Full: the operation stops now, whatever the mode.
+            return Some(first);
+        }
+        Some(match mode {
+            crate::autonomy::Mode::Yolo => first + crate::user_activity::HELD_GRACE_MS,
+            _ => first,
+        })
+    }
+
+    /// When the hold must have let go of everything, whatever happens.
+    pub fn limit(&self) -> Option<u64> {
+        Some(self.first? + MAX_HOLD_MS)
+    }
+
+    /// One event of the user's at `now`, in `mode`. The chord comes first.
+    pub fn see(
+        &mut self,
+        event: ArmedEvent,
+        mode: crate::autonomy::Mode,
+        now: u64,
+    ) -> ArmedVerdict {
+        match event {
+            ArmedEvent::Ours => ArmedVerdict::Pass,
+            ArmedEvent::StopChord => ArmedVerdict::Stop,
+            // In YOLO the mouse is detached from the cursor: a move bends
+            // nothing.
+            ArmedEvent::Moved if mode == crate::autonomy::Mode::Yolo => ArmedVerdict::Pass,
+            ArmedEvent::Moved => ArmedVerdict::Touched,
+            ArmedEvent::Input(Kind::Other) => ArmedVerdict::Pass,
+            ArmedEvent::Input(kind) => {
+                self.first_held(now);
+                if self.count + 1 < MAX_EVENTS {
+                    self.count += 1;
+                    ArmedVerdict::Hold
+                } else if self.count + 1 == MAX_EVENTS {
+                    self.count += 1;
+                    ArmedVerdict::HoldAndEnd
+                } else if matches!(kind, Kind::Modifiers | Kind::KeyUp | Kind::MouseUp) {
+                    // Full and ending: a release, or a modifier change,
+                    // is always kept, so no press goes out without the
+                    // release that ends it. `MAX_HOLD_MS` bounds them.
+                    self.count += 1;
+                    ArmedVerdict::Hold
+                } else {
+                    // A new press or a drag isn't kept, nor counted.
+                    ArmedVerdict::Drop
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::autonomy::Mode;
+
+    #[test]
+    fn no_clock_runs_before_the_first_held_event() {
+        let mut armed = Armed::new();
+        assert_eq!(armed.deadline(Mode::Auto), None);
+        assert_eq!(armed.limit(), None);
+        assert_eq!(
+            armed.see(ArmedEvent::Ours, Mode::Auto, 100),
+            ArmedVerdict::Pass
+        );
+        assert_eq!(
+            armed.see(ArmedEvent::Input(Kind::Other), Mode::Auto, 100),
+            ArmedVerdict::Pass
+        );
+        assert_eq!(armed.first(), None);
+        assert_eq!(
+            armed.see(ArmedEvent::Input(Kind::KeyDown), Mode::Auto, 500),
+            ArmedVerdict::Hold
+        );
+        assert_eq!(armed.first(), Some(500));
+        assert_eq!(armed.limit(), Some(500 + MAX_HOLD_MS));
+        // A later event doesn't move the clock.
+        armed.see(ArmedEvent::Input(Kind::KeyUp), Mode::Auto, 900);
+        assert_eq!(armed.first(), Some(500));
+        assert_eq!(armed.held(), 2);
+    }
+
+    #[test]
+    fn autos_deadline_is_the_first_event_and_yolos_is_1_5_s_later() {
+        let mut armed = Armed::new();
+        armed.see(ArmedEvent::Input(Kind::MouseDown), Mode::Yolo, 1_000);
+        assert_eq!(armed.deadline(Mode::Auto), Some(1_000));
+        assert_eq!(
+            armed.deadline(Mode::Yolo),
+            Some(1_000 + crate::user_activity::HELD_GRACE_MS)
+        );
+    }
+
+    #[test]
+    fn tagged_events_pass_and_moves_touch_only_in_auto() {
+        let mut armed = Armed::new();
+        assert_eq!(
+            armed.see(ArmedEvent::Ours, Mode::Yolo, 0),
+            ArmedVerdict::Pass
+        );
+        assert_eq!(
+            armed.see(ArmedEvent::Moved, Mode::Yolo, 0),
+            ArmedVerdict::Pass
+        );
+        assert_eq!(
+            armed.see(ArmedEvent::Moved, Mode::Auto, 0),
+            ArmedVerdict::Touched
+        );
+        assert_eq!(armed.first(), None);
+    }
+
+    #[test]
+    fn the_stop_chord_is_seen_before_anything_is_held() {
+        let mut armed = Armed::new();
+        assert_eq!(
+            armed.see(ArmedEvent::StopChord, Mode::Yolo, 0),
+            ArmedVerdict::Stop
+        );
+        assert_eq!(armed.held(), 0);
+        assert_eq!(armed.first(), None);
+    }
+
+    #[test]
+    fn an_armed_hold_ends_when_full() {
+        let mut armed = Armed::new();
+        for n in 1..MAX_EVENTS {
+            assert_eq!(
+                armed.see(ArmedEvent::Input(Kind::KeyDown), Mode::Yolo, n as u64),
+                ArmedVerdict::Hold
+            );
+        }
+        assert_eq!(
+            armed.see(ArmedEvent::Input(Kind::KeyUp), Mode::Yolo, 999),
+            ArmedVerdict::HoldAndEnd
+        );
+        // Full: YOLO's grace is over at once.
+        assert_eq!(armed.deadline(Mode::Yolo), Some(1));
+        // Past the cap a drag or a new key isn't kept; a release is, so
+        // the presses already held end.
+        assert_eq!(
+            armed.see(ArmedEvent::Input(Kind::MouseDragged), Mode::Yolo, 1000),
+            ArmedVerdict::Drop
+        );
+        assert_eq!(
+            armed.see(ArmedEvent::Input(Kind::KeyDown), Mode::Yolo, 1001),
+            ArmedVerdict::Drop
+        );
+        assert_eq!(
+            armed.see(ArmedEvent::Input(Kind::KeyUp), Mode::Yolo, 1002),
+            ArmedVerdict::Hold
+        );
+        // A long drag past the cap counts nothing, and the Shift release
+        // after it is still kept.
+        let kept = armed.held();
+        for n in 0..4 * MAX_EVENTS {
+            assert_eq!(
+                armed.see(
+                    ArmedEvent::Input(Kind::MouseDragged),
+                    Mode::Yolo,
+                    1003 + n as u64
+                ),
+                ArmedVerdict::Drop
+            );
+        }
+        assert_eq!(armed.held(), kept);
+        assert_eq!(
+            armed.see(ArmedEvent::Input(Kind::Modifiers), Mode::Yolo, 9999),
+            ArmedVerdict::Hold
+        );
+        assert_eq!(
+            armed.see(ArmedEvent::Input(Kind::MouseUp), Mode::Yolo, 9999),
+            ArmedVerdict::Hold
+        );
+    }
 
     fn seen(kind: Kind, code: i64) -> Seen {
         Seen {

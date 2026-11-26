@@ -364,6 +364,16 @@ impl Render for HelpCard {
                     t("Keep", "保留").to_string(),
                 ),
             };
+            // Why the Autonomy Mode left it to the user (ADR 0025).
+            let body = match core.window_notes.get(&id) {
+                Some(crate::autonomy::CardNote::Kept) => {
+                    format!("{body} {}", t("You kept this window.", "你留下了这个窗口"))
+                }
+                Some(crate::autonomy::CardNote::Protected(app)) => {
+                    format!("{body} {}", tf!("{app} is protected.", "{app} 受保护"))
+                }
+                None => body,
+            };
             return card(title, body, Badge::Approval, &theme)
                 .child(
                     div()

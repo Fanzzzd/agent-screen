@@ -17,6 +17,7 @@ use crate::model::{
 };
 use crate::numbers;
 use agent_screen_model::access::{self, Authority, ChatAction, Instruction, Refusal};
+use agent_screen_model::autonomy;
 use agent_screen_model::bring_out::Refusal as BringOutRefusal;
 use agent_screen_model::held::{self, Held};
 use agent_screen_model::input_queue::Action;
@@ -405,6 +406,7 @@ async fn handle_one(
     let result: Result<Value, ControlError> = match method {
         "createDisplay" => {
             let mut reply = create_display(&core, connection, &p, cx).await?;
+            reply["autonomyMode"] = json!(crate::autonomy::mode().as_str());
             // "Displays have separate Spaces" off: the agent hears it with
             // each display, and the user once, on a card (spaces).
             if off(cx, crate::mac::spaces::shared).await {
@@ -748,7 +750,11 @@ async fn handle_one(
                 })
                 .chain(away_json)
                 .collect();
-            let mut reply = json!({ "windows": list, "scale": scale });
+            let mut reply = json!({
+                "windows": list,
+                "scale": scale,
+                "autonomyMode": crate::autonomy::mode().as_str(),
+            });
             // list_windows shows the reply as it is: the note says it.
             let mut notes = Vec::new();
             if let Some(given) = add_given(&core, id, &mut reply, cx) {
@@ -1983,17 +1989,32 @@ async fn place_window_action(core: &Entity<Core>, p: &Args<'_>, cx: &mut AsyncAp
         }
         // The user's word names its window: the front one. A grant
         // takes the first window it covers, past one the user just
-        // took back; with none, the user is asked for the front one.
-        let pick = if words.is_some() {
-            0
+        // took back; with none, the Autonomy Mode decides, and else the
+        // user is asked for the front one.
+        let granted = if words.is_some() {
+            None
         } else {
             let keys: Vec<(WindowTarget, Option<String>)> = candidates
                 .iter()
                 .map(|(w, b)| (w.target, b.clone()))
                 .collect();
             core.read_with(cx, |c, _| c.displays.grantable(id, &keys))
-                .unwrap_or(0)
         };
+        let mut pick = granted.unwrap_or(0);
+        let mut note = None;
+        let mode = crate::autonomy::mode();
+        if words.is_none() && granted.is_none() && mode.acts() {
+            match by_mode(core, id, &candidates, timeout, cx).await? {
+                ByMode::Took(mut reply, target) => {
+                    reply.extend(frame_window(core, id, target, asked, cx).await?);
+                    return Ok(reply);
+                }
+                ByMode::Ask { index, why } => {
+                    pick = index;
+                    note = why;
+                }
+            }
+        }
         let (theirs, bundle_id) = candidates.into_iter().nth(pick).expect("a candidate");
         let target = theirs.target;
         let authority = match &words {
@@ -2005,7 +2026,13 @@ async fn place_window_action(core: &Entity<Core>, p: &Args<'_>, cx: &mut AsyncAp
             Ok(()) => hand_over(core, id, theirs, authority, words, cx).await?,
             // Not covered by the grant: the user answers on a card.
             Err(Refusal::NotGranted | Refusal::Excluded) if words.is_none() => {
-                request_window(core, id, theirs, None, timeout, cx).await?
+                core.update(cx, |c, _| match note {
+                    Some(note) => c.window_notes.insert(id, note),
+                    None => c.window_notes.remove(&id),
+                });
+                let asked = request_window(core, id, theirs, None, timeout, cx).await;
+                core.update(cx, |c, _| c.window_notes.remove(&id));
+                asked?
             }
             // A stray another session's display records, on the
             // user's screen: the user decides (ADR 0017).
@@ -3580,6 +3607,233 @@ fn no_app_window(
 /// for the answer. Granted, the window goes over as a Handover. `held`:
 /// another Agent Session or a Review Display holds it, the card names the
 /// holder, and Hand Over moves it from there as a Placement (ADR 0017).
+/// What the Autonomy Mode made of a place_window for the user's windows.
+enum ByMode {
+    /// It took this one, as a Handover.
+    Took(Map<String, Value>, WindowTarget),
+    /// The user answers on a card, for candidate `index`, and why the
+    /// mode left it to them.
+    Ask {
+        index: usize,
+        why: Option<crate::autonomy::CardNote>,
+    },
+}
+
+/// Each candidate as the mode's matrix sees it: a Kept Window, a Protected
+/// App's, In Use, a button held on it.
+async fn subjects(
+    core: &Entity<Core>,
+    candidates: &[(windows::Window, Option<String>)],
+    cx: &mut AsyncApp,
+) -> Vec<autonomy::Subject> {
+    let marks: Vec<(bool, bool)> = core.read_with(cx, |c, _| {
+        candidates
+            .iter()
+            .map(|(w, bundle)| {
+                (
+                    c.autonomy.kept.contains(w.target.window_id),
+                    c.autonomy.protected(bundle.as_deref()),
+                )
+            })
+            .collect()
+    });
+    let ids: Vec<u32> = candidates.iter().map(|(w, _)| w.target.window_id).collect();
+    let used: Vec<(bool, bool)> = off(cx, move || {
+        ids.into_iter()
+            .map(|w| {
+                (
+                    crate::mac::activity::in_use(w),
+                    crate::mac::activity::pressed_on(w),
+                )
+            })
+            .collect()
+    })
+    .await;
+    marks
+        .into_iter()
+        .zip(used)
+        .map(|((kept, protected), (in_use, pressed))| autonomy::Subject {
+            protected,
+            kept,
+            in_use,
+            pressed,
+        })
+        .collect()
+}
+
+/// The mode decides a Window Request for the user's windows: take the
+/// first, front to back, it may take; in Auto, wait for the first In Use
+/// to be free; or leave it to the user.
+async fn by_mode(
+    core: &Entity<Core>,
+    id: DisplayId,
+    candidates: &[(windows::Window, Option<String>)],
+    timeout: Option<f64>,
+    cx: &mut AsyncApp,
+) -> Result<ByMode, ControlError> {
+    let mode = crate::autonomy::mode();
+    let subjects = subjects(core, candidates, cx).await;
+    let hands = off(cx, crate::mac::activity::hands).await;
+    let decisions: Vec<autonomy::Decision> = subjects
+        .iter()
+        .map(|s| autonomy::decide(mode, autonomy::Crossing::UserWindow, *s, &hands))
+        .collect();
+    if let Some(i) = decisions.iter().position(|d| *d == autonomy::Decision::Go) {
+        let window = candidates[i].0.clone();
+        let target = window.target;
+        return take_by_mode(core, id, window, mode, cx)
+            .await
+            .map(|reply| ByMode::Took(reply, target));
+    }
+    if let Some(i) = decisions
+        .iter()
+        .position(|d| *d == autonomy::Decision::WaitWindow)
+    {
+        return wait_for_window(core, id, candidates, i, timeout, cx).await;
+    }
+    Ok(ByMode::Ask {
+        index: 0,
+        why: card_note(&subjects[0], &candidates[0].0.app),
+    })
+}
+
+fn card_note(subject: &autonomy::Subject, app: &str) -> Option<crate::autonomy::CardNote> {
+    if subject.kept {
+        Some(crate::autonomy::CardNote::Kept)
+    } else if subject.protected {
+        Some(crate::autonomy::CardNote::Protected(app.to_string()))
+    } else {
+        None
+    }
+}
+
+/// The mode takes the window, as a Handover that returns to the user.
+async fn take_by_mode(
+    core: &Entity<Core>,
+    id: DisplayId,
+    window: windows::Window,
+    mode: autonomy::Mode,
+    cx: &mut AsyncApp,
+) -> Result<Map<String, Value>, ControlError> {
+    let target = window.target;
+    let app = window.app.clone();
+    let unused = crate::mac::activity::unused_ms(target.window_id)
+        .map(|ms| format!("unused {} s", ms / 1000))
+        .unwrap_or_else(|| "unused".into());
+    let reply = hand_over(core, id, window, Authority::Mode(mode), None, cx).await?;
+    let line = format!(
+        "autonomy: took {app} window {} for display {id} ({}, {unused})",
+        target.window_id,
+        mode.as_str()
+    );
+    log::info!("{line}");
+    crate::lifecycle::line(&line);
+    crate::mac::recording::note(
+        id,
+        json!({ "action": "placeWindow", "by": "mode", "autonomyMode": mode.as_str(), "windowId": target.window_id }),
+    );
+    Ok(reply)
+}
+
+/// In Auto, the window the agent asked for is In Use: the request waits
+/// as a line on the display's tile, with no card, and the window moves the
+/// moment it is no longer In Use. Hand Over and Keep on the line answer
+/// it; a change to Ask shows the card; the call's timeout ends it with
+/// `window_in_use`.
+async fn wait_for_window(
+    core: &Entity<Core>,
+    id: DisplayId,
+    candidates: &[(windows::Window, Option<String>)],
+    index: usize,
+    timeout: Option<f64>,
+    cx: &mut AsyncApp,
+) -> Result<ByMode, ControlError> {
+    let (window, _) = candidates[index].clone();
+    let target = window.target;
+    let app = window.app.clone();
+    let named = NamedWindow {
+        target,
+        app: window.app.clone(),
+        title: window.title.clone(),
+    };
+    let (serial, mut answer) = core.update(cx, |c, cx| c.wait_for_window(id, named, cx));
+    log::info!(
+        "display {id}: window {} ({app}) is in use; waiting in auto",
+        target.window_id
+    );
+    let seconds = timeout.unwrap_or(120.0).clamp(1.0, 600.0);
+    let until = Instant::now() + Duration::from_secs_f64(seconds);
+    let _waiting = crate::mac::activity::Waiting::start();
+    let outcome = loop {
+        match answer.try_recv() {
+            Ok(Some(crate::autonomy::WaitAnswer::HandOver)) => {
+                break hand_over(core, id, window.clone(), Authority::User, None, cx)
+                    .await
+                    .map(|reply| ByMode::Took(reply, target));
+            }
+            Ok(Some(crate::autonomy::WaitAnswer::Keep)) => {
+                core.update(cx, |c, _| c.autonomy.keep(target.window_id));
+                break Err(ControlError::failed(format!(
+                    "the user declined to hand over the {app} window; it stays theirs. Work without it, or launch the app yourself with launch_app"
+                )));
+            }
+            Ok(None) => {}
+            // Replaced by a newer wait on the display.
+            Err(_) => {
+                break Err(ControlError::failed(format!(
+                    "your request for the {app} window was withdrawn: you asked for another window"
+                )));
+            }
+        }
+        let live = core.read_with(cx, |c, _| c.displays.get(id).is_some_and(|d| d.is_live()));
+        if !live {
+            break Err(ControlError::failed(format!(
+                "your request for the {app} window was withdrawn: the display ended"
+            )));
+        }
+        let mode = crate::autonomy::mode();
+        let subject = subjects(core, std::slice::from_ref(&candidates[index]), cx)
+            .await
+            .remove(0);
+        let hands = off(cx, crate::mac::activity::hands).await;
+        match autonomy::decide(mode, autonomy::Crossing::UserWindow, subject, &hands) {
+            autonomy::Decision::Go => {
+                break take_by_mode(core, id, window.clone(), mode, cx)
+                    .await
+                    .map(|reply| ByMode::Took(reply, target));
+            }
+            // Back in Ask, or the window became kept or protected: the
+            // card shows.
+            autonomy::Decision::AskPath => {
+                break Ok(ByMode::Ask {
+                    index,
+                    why: card_note(&subject, &app),
+                });
+            }
+            _ => {}
+        }
+        if Instant::now() >= until {
+            let ago = crate::mac::activity::unused_ms(target.window_id)
+                .map(|ms| format!(" (last used {} s ago)", ms / 1000))
+                .unwrap_or_default();
+            break Err(ControlError {
+                code: "window_in_use",
+                message: format!(
+                    "the user is using this {app} window{ago}. In Auto it moves once they have not used it for 120 s. Work on something else and call place_window again, or ask the user in chat and pass their words as user_instruction"
+                ),
+                blocked: None,
+            });
+        }
+        cx.background_executor()
+            .timer(Duration::from_millis(
+                agent_screen_model::user_activity::WAITING_SAMPLE_MS,
+            ))
+            .await;
+    };
+    core.update(cx, |c, cx| c.end_window_wait(id, serial, cx));
+    outcome
+}
+
 async fn request_window(
     core: &Entity<Core>,
     id: DisplayId,
@@ -3777,9 +4031,16 @@ async fn ask_window(
         }
         (Resolution::HandedOver(_), None) => {}
         (Resolution::Declined, Some(held)) => {
+            // A Review Display's window is the user's to keep: no mode
+            // takes it on a repeat (ADR 0025).
+            if held.place == held::Place::Review {
+                core.update(cx, |c, _| c.autonomy.keep(target.window_id));
+            }
             return Err(ControlError::failed(held::declined_message(&app, held)));
         }
         (Resolution::Declined, None) => {
+            // Keep: no Autonomy Mode takes it again (ADR 0025).
+            core.update(cx, |c, _| c.autonomy.keep(target.window_id));
             return Err(ControlError::failed(format!(
                 "the user declined to hand over the {app} window; it stays theirs. Work without it, or launch the app yourself with launch_app"
             )));
@@ -3901,7 +4162,44 @@ async fn take_held(
         }
         None => false,
     };
+    // YOLO moves a Review Display's window at once, as the Placement or
+    // the Handover it was; no mode moves a live holder's (ADR 0025).
+    let crossing = match held.place {
+        held::Place::Review => autonomy::Crossing::ReviewWindow,
+        _ => autonomy::Crossing::HeldWindow,
+    };
+    let subject = core.read_with(cx, |c, _| autonomy::Subject {
+        kept: c.autonomy.kept.contains(target.window_id),
+        ..autonomy::Subject::default()
+    });
+    let protected = off(cx, move || app::bundle_id(target.pid)).await;
+    let subject = autonomy::Subject {
+        protected: core.read_with(cx, |c, _| c.autonomy.protected(protected.as_deref())),
+        ..subject
+    };
+    let mode = crate::autonomy::mode();
+    let yolo = words.is_none()
+        && autonomy::decide(mode, crossing, subject, &Default::default()) == autonomy::Decision::Go;
     let mut reply = match words {
+        _ if yolo => {
+            let line = format!(
+                "autonomy: took {app} window {} from {} for display {id} ({}, review)",
+                target.window_id,
+                held.label,
+                mode.as_str()
+            );
+            log::info!("{line}");
+            crate::lifecycle::line(&line);
+            crate::mac::recording::note(
+                id,
+                json!({ "action": "placeWindow", "by": "mode", "autonomyMode": mode.as_str(), "windowId": target.window_id }),
+            );
+            let mut reply = transfer_window(core, &held, id, target, &app, cx).await?;
+            reply.insert("by".into(), json!("mode"));
+            reply.insert("authority".into(), json!("mode"));
+            reply.insert("autonomyMode".into(), json!(mode.as_str()));
+            reply
+        }
         Some(text) if named => {
             core.update(cx, |c, _| {
                 if let Some(access) = c.displays.access_mut(id) {
@@ -4002,16 +4300,47 @@ async fn hand_over(
     // A window off screen, minimized, comes home where it would have
     // shown, and back into the Dock (#221).
     let bounds = window.bounds;
-    let by = match (&authority, &words) {
-        (Authority::User, _) => "user",
-        (_, Some(_)) => "chat",
-        _ => "grant",
-    };
+    let by = authority.name(words.is_some());
     let home = off(cx, move || {
         crate::dismissal::home_of(target, None)
             .or_else(|| crate::dismissal::home_of(target, Some(bounds)))
     })
     .await;
+    // The mode decided before that read: decide again, with no await
+    // between this and the move, in case the user pressed Stop or started
+    // using the window meanwhile.
+    if let Authority::Mode(_) = authority {
+        let w = target.window_id;
+        let kept = core.read_with(cx, |c, _| c.autonomy.kept.contains(w));
+        let (in_use, pressed, hands) = off(cx, move || {
+            (
+                crate::mac::activity::in_use(w),
+                crate::mac::activity::pressed_on(w),
+                crate::mac::activity::hands(),
+            )
+        })
+        .await;
+        let subject = autonomy::Subject {
+            kept,
+            in_use,
+            pressed,
+            ..autonomy::Subject::default()
+        };
+        let again = autonomy::decide(
+            crate::autonomy::mode(),
+            autonomy::Crossing::UserWindow,
+            subject,
+            &hands,
+        );
+        if again != autonomy::Decision::Go {
+            log::info!(
+                "display {id}: window {w} ({app_name}) not taken: the mode decided {again:?} at the move"
+            );
+            return Err(ControlError::failed(format!(
+                "the {app_name} window wasn't moved: the user changed the Autonomy Mode or started using it. Call place_window again to ask for it"
+            )));
+        }
+    }
     let from_dock = home.as_ref().is_some_and(|h| h.minimized);
     let ticket = core
         .update(cx, |c, cx| {
@@ -4069,6 +4398,10 @@ async fn hand_over(
     }
     let landed = core.update(cx, |c, cx| {
         let landed = c.displays.commit_hand_over(id, &ticket, None);
+        if landed && matches!(authority, Authority::User | Authority::Once) {
+            // The user's own word for it: no longer a Kept Window.
+            c.autonomy.release(target.window_id);
+        }
         if landed {
             // The app's late windows are the agent's to have, not to send
             // back, as after the user's own Hand Over.
@@ -4088,6 +4421,12 @@ async fn hand_over(
     Ok(Map::from_iter([
         ("handedOver".into(), Value::Bool(true)),
         ("by".into(), json!(by)),
+        // The route, as `by`; and the mode it was decided in.
+        ("authority".into(), json!(by)),
+        (
+            "autonomyMode".into(),
+            json!(crate::autonomy::mode().as_str()),
+        ),
         // Which of the app's windows came, and from where.
         ("windowId".into(), json!(target.window_id)),
         ("title".into(), json!(title)),
@@ -7839,8 +8178,6 @@ async fn through_input_method(
     source: Option<String>,
     cx: &mut AsyncApp,
 ) -> Result<Params, ControlError> {
-    // Refused before the glow shows: no flash for a call that sends nothing.
-    crate::mac::ime::may_borrow(keys.len()).map_err(ControlError::failed)?;
     let forwarder = core.update(cx, |c, _| c.forwarder(id));
     let bounds = cg::display_bounds(id);
     keys_allowed(&forwarder, bounds, cx).await?;
@@ -7848,6 +8185,46 @@ async fn through_input_method(
         forwarder.keys_done().await;
         return Err(no_keyboard_target());
     };
+    // The target first: a Protected App keeps Ask's rules, ADR 0008's 2 s
+    // of quiet included, in every mode (ADR 0025).
+    let bundle = off(cx, move || app::bundle_id(target.pid)).await;
+    let protected = core.read_with(cx, |c, _| c.autonomy.protected(bundle.as_deref()));
+    let mode = autonomy::for_target(crate::autonomy::mode(), protected);
+    // In Auto the borrow waits up to `BORROW_WAIT_MS` for 2 s of quiet and
+    // no composition, then runs (ADR 0025); in Ask it fails at once, as
+    // ADR 0008 says.
+    if borrow_wait(mode, cx).await {
+        // The wait took seconds: the display, its access and the target
+        // again, so the keys don't go to a window taken back meanwhile.
+        let gone = core.read_with(cx, |c, _| {
+            c.displays
+                .get(id)
+                .is_none_or(|d| d.takeover || !d.is_live())
+        });
+        if gone {
+            forwarder.keys_done().await;
+            return Err(ControlError::takeover(format!(
+                "the user took over display {id} or it ended while the keys waited for their hands to rest. Call wait_for_control to wait until they hand it back."
+            )));
+        }
+        if let Err(refused) = keys_allowed(&forwarder, bounds, cx).await {
+            forwarder.keys_done().await;
+            return Err(refused);
+        }
+        if forwarder.keys_target(bounds).await != Some(target) {
+            forwarder.keys_done().await;
+            return Err(ControlError::failed(
+                "the window that would take the keys changed while they waited for the user's hands to rest, so nothing was typed. Take a screenshot and try again",
+            ));
+        }
+    }
+    // The user may have changed the mode meanwhile.
+    let mode = autonomy::for_target(crate::autonomy::mode(), protected);
+    // Refused before the glow shows: no flash for a call that sends nothing.
+    if let Err(why) = crate::mac::ime::may_borrow(keys.len(), mode) {
+        forwarder.keys_done().await;
+        return Err(ControlError::failed(why));
+    }
     // Calls can overlap, and one that loses the session's input lock
     // returns while another types: each returns only its own borrow, so
     // the glow stays while any runs. The worker holds `borrow` until it
@@ -7890,7 +8267,7 @@ async fn through_input_method(
     let typed = cx
         .background_executor()
         .spawn(async move {
-            let typed = crate::mac::ime::type_keys(target, &keys, source.as_deref(), wake);
+            let typed = crate::mac::ime::type_keys(target, &keys, source.as_deref(), wake, mode);
             drop(borrow);
             typed
         })
@@ -7907,6 +8284,38 @@ async fn through_input_method(
             "the user touched the keyboard or pointer after {sent} of {total} keys, so the input method stopped and their app is in front again. Take a screenshot, then send the rest once they've stopped."
         ))),
         Err(reason) => Err(ControlError::failed(reason)),
+    }
+}
+
+/// In Auto, wait for the hands to be quiet enough for a Keyboard Borrow,
+/// at most `BORROW_WAIT_MS`. Ask and YOLO don't wait. Whether it waited.
+async fn borrow_wait(mode: autonomy::Mode, cx: &mut AsyncApp) -> bool {
+    use agent_screen_model::user_activity::{BORROW_WAIT_MS, WAITING_SAMPLE_MS};
+    if mode != autonomy::Mode::Auto {
+        return false;
+    }
+    let _waiting = crate::mac::activity::Waiting::start();
+    let until = Instant::now() + Duration::from_millis(BORROW_WAIT_MS);
+    loop {
+        let hands = off(cx, crate::mac::activity::hands).await;
+        let decision = autonomy::decide(
+            mode,
+            autonomy::Crossing::KeyboardBorrow,
+            autonomy::Subject::default(),
+            &hands,
+        );
+        if !matches!(decision, autonomy::Decision::WaitHands(_)) {
+            return true;
+        }
+        if Instant::now() >= until {
+            log::info!(
+                "autonomy: a Keyboard Borrow waited {BORROW_WAIT_MS} ms for quiet: {decision:?}"
+            );
+            return true;
+        }
+        cx.background_executor()
+            .timer(Duration::from_millis(WAITING_SAMPLE_MS))
+            .await;
     }
 }
 
@@ -8391,19 +8800,21 @@ async fn queued_drag(
         }
         Some("stopped") if r["stopReason"] != "Replaced" && r["stopReason"] != "Withdrawn" => {
             Err(ControlError::failed(format!(
-                "The drag with the user's pointer stopped partway ({}{}); the button was let go. Take a screenshot before retrying. Input queue status: {state}",
+                "The drag with the user's pointer stopped partway ({}{}); the button was let go. Take a screenshot before retrying.{} Input queue status: {state}",
                 r["stopReason"].as_str().unwrap_or("stopped"),
                 r["failure"]
                     .as_str()
                     .map(|f| format!(": {f}"))
                     .unwrap_or_default(),
+                interrupted_note(&state),
             )))
         }
         _ => Err(ControlError {
             blocked: None,
             code: "input_pending",
             message: format!(
-                "{why} No drag or press was sent. Input queue status: {state}. {}",
+                "{why} No drag or press was sent. Input queue status: {state}. {}{}",
+                mode_note(&state),
                 if plan.is_some() {
                     "The drag runs with the user's pointer once they allow it and while your call waits: retry the same drag with real_input to wait again, or use input_queue to inspect or withdraw it."
                 } else {
@@ -8411,6 +8822,30 @@ async fn queued_drag(
                 }
             ),
         }),
+    }
+}
+
+/// In Auto or YOLO, what an `input_pending` adds: the request asks no
+/// card and runs once the user's hands rest, while a call waits on it.
+fn mode_note(state: &Value) -> String {
+    let mode = crate::autonomy::mode();
+    let waiting = state["requests"][0]["waitingOn"].as_str();
+    match waiting {
+        Some(on) if mode.acts() => format!(
+            "The user's Autonomy Mode is {}: no card asks them; the request runs once their hands rest (waitingOn: {on}), while the same call or input_queue wait waits. ",
+            mode.as_str()
+        ),
+        _ => String::new(),
+    }
+}
+
+/// A loan the user stopped in Auto: the next grant waits longer.
+fn interrupted_note(state: &Value) -> &'static str {
+    let stopped_by_user = state["requests"][0]["stopReason"].as_str() == Some("User");
+    if stopped_by_user && crate::autonomy::mode() == autonomy::Mode::Auto {
+        " The next attempt needs the user's hands at rest for 30 s."
+    } else {
+        ""
     }
 }
 
@@ -8555,8 +8990,9 @@ async fn queued_click(
                 blocked: None,
                 code: "input_pending",
                 message: format!(
-                    "The {} at ({x}, {y}) waits for the user to allow their pointer. No click was sent, not on the background route either. Input queue status: {state}. {next}",
-                    verb.to_lowercase()
+                    "The {} at ({x}, {y}) waits for the user to allow their pointer. No click was sent, not on the background route either. Input queue status: {state}. {}{next}",
+                    verb.to_lowercase(),
+                    mode_note(&state),
                 ),
             });
         }
@@ -8680,7 +9116,8 @@ async fn queued_menu_press(
                 blocked: None,
                 code: "input_pending",
                 message: format!(
-                    "{label} needs a real click, as Electron takes an item pressed through accessibility for its shortcut. No click was sent, and the item was not pressed through accessibility either. Input queue status: {state}. {next}"
+                    "{label} needs a real click, as Electron takes an item pressed through accessibility for its shortcut. No click was sent, and the item was not pressed through accessibility either. Input queue status: {state}. {}{next}",
+                    mode_note(&state),
                 ),
             });
         }

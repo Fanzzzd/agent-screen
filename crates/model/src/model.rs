@@ -2255,6 +2255,55 @@ mod tests {
     }
 
     #[test]
+    fn a_modes_take_is_refused_in_a_takeover_and_elsewhere_and_is_a_handover() {
+        use crate::autonomy::Mode;
+        for mode in [Mode::Auto, Mode::Yolo] {
+            let authority = Authority::Mode(mode);
+            let mut d = displays();
+            // No Window Access needed.
+            assert_eq!(d.may_hand_over(7, users(1), &authority), Ok(()));
+            assert!(!d.begin_takeover(7).is_empty());
+            assert_eq!(
+                over(&mut d, 7, users(1), &authority),
+                Err(Refusal::Takeover)
+            );
+            assert!(!d.end_takeover(7).is_empty());
+            d.add(
+                8,
+                "Agent Screen 2".into(),
+                DEFAULT_SIZE,
+                Some(Owner {
+                    session_key: "other".into(),
+                    client: "Claude Code".into(),
+                    title: "别的".into(),
+                    connection: 2,
+                }),
+                (),
+            );
+            d.get_mut(8)
+                .unwrap()
+                .claim(users(2), Origin::HandedOver, None);
+            assert_eq!(
+                over(&mut d, 7, users(2), &authority),
+                Err(Refusal::Elsewhere)
+            );
+            let home = Home {
+                frame: Rect::new(10.0, 20.0, 300.0, 200.0),
+                workspace: None,
+                minimized: false,
+            };
+            let ticket = d
+                .hand_over(7, users(1), &authority, Some(home.clone()))
+                .unwrap();
+            assert_eq!(d.confirm_hand_over(7, users(1), &ticket), Ok(()));
+            assert!(d.commit_hand_over(7, &ticket, None));
+            assert_eq!(d.get(7).unwrap().handovers(), vec![users(1)]);
+            assert_eq!(d.return_handover(7, 1).unwrap().home(), Some(home));
+            assert_eq!(authority.name(false), "mode");
+        }
+    }
+
+    #[test]
     fn only_a_handover_goes_back_on_the_users_word() {
         let mut d = displays();
         let home = Home {
