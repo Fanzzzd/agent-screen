@@ -7850,15 +7850,15 @@ async fn through_input_method(
     };
     // Calls can overlap, and one that loses the session's input lock
     // returns while another types: each returns only its own borrow, so
-    // the glow stays while any runs. A Stop pressed for a running borrow
-    // stays pressed.
-    let first = core.update(cx, |c, cx| {
-        let first = !c.displays.list.iter().any(|d| d.keyboard_borrowed());
+    // the glow stays while any runs. The worker holds `borrow` until it
+    // returns the keyboard, even if the display ends first. A Stop
+    // pressed for a running borrow stays pressed.
+    let (borrow, first) = crate::mac::ime::Borrow::start();
+    core.update(cx, |c, cx| {
         if let Some(display) = c.displays.get_mut(id) {
             display.borrow_keyboard();
         }
         cx.notify();
-        first
     });
     let give_back = |core: &Entity<Core>, cx: &mut AsyncApp| {
         core.update(cx, |c, cx| {
@@ -7872,6 +7872,7 @@ async fn through_input_method(
         crate::mac::ime::clear_stop();
     }
     if !sync_glow(cx) {
+        drop(borrow);
         give_back(core, cx);
         sync_glow(cx);
         forwarder.keys_done().await;
@@ -7888,7 +7889,11 @@ async fn through_input_method(
     };
     let typed = cx
         .background_executor()
-        .spawn(async move { crate::mac::ime::type_keys(target, &keys, source.as_deref(), wake) })
+        .spawn(async move {
+            let typed = crate::mac::ime::type_keys(target, &keys, source.as_deref(), wake);
+            drop(borrow);
+            typed
+        })
         .await;
     give_back(core, cx);
     sync_glow(cx);

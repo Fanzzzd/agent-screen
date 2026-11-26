@@ -921,12 +921,15 @@ pub fn show_glow(state: Glow) -> bool {
         let changed = g.shown != Some(state);
         for screen in &g.screens {
             let appearing = !screen.window.isVisible();
-            if appearing {
-                // The window first: input waits for it, never for the fade.
-                screen.window.orderFrontRegardless();
-            }
             if appearing || changed {
                 set_look(screen, state, look, appearing, calm);
+            }
+            if appearing {
+                // The look is committed and flushed first, so the window's
+                // first frame already shows the rims. Input waits for the
+                // window, never for the fade.
+                objc2_quartz_core::CATransaction::flush();
+                screen.window.orderFrontRegardless();
             }
         }
         g.shown = Some(state);

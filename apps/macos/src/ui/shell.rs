@@ -1618,11 +1618,8 @@ impl Shell {
                     .active()
                     .is_some_and(|r| matches!(r.status, Status::Running | Status::Stopping(_))),
             restoring: self.restoring,
-            keyboard_borrow: core
-                .displays
-                .list
-                .iter()
-                .any(|d| d.keyboard_borrowed() && !d.is_ended()),
+            // From the workers: one can still type after its display ended.
+            keyboard_borrow: crate::mac::ime::borrowing(),
             front_hold: input.hold().is_some(),
             preview: self.glow_preview.map(|(glow, _)| glow),
         };
@@ -1695,15 +1692,7 @@ impl Shell {
             return;
         };
         // A Keyboard Borrow keeps it, whatever the grant does.
-        let on = on
-            || input_bar::previewing()
-            || self
-                .core
-                .read(cx)
-                .displays
-                .list
-                .iter()
-                .any(|d| d.keyboard_borrowed() && !d.is_ended());
+        let on = on || input_bar::previewing() || crate::mac::ime::borrowing();
         if !on {
             if self.bar_shown {
                 self.bar_shown = false;

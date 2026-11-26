@@ -8,7 +8,7 @@
 //! borrow before its next key.
 
 use super::help_card::{self, Tone};
-use super::shell::{Shell, shown_client, tell};
+use super::shell::{Shell, UNNAMED_CLIENT, shown_client, tell};
 use super::theme;
 use crate::core::Core;
 use crate::i18n::t;
@@ -105,8 +105,9 @@ impl Render for InputBar {
                 _ => (Some(t("Move the mouse to stop", "动鼠标即可停止")), None),
             };
             (title, how, clock, Stops::Grant)
-        } else if let Some(display) = borrowing {
-            let agent = shown_client(display.agent_name());
+        } else if borrowing.is_some() || crate::mac::ime::borrowing() {
+            // The display can end while its worker still types.
+            let agent = shown_client(borrowing.map_or(UNNAMED_CLIENT, |d| d.agent_name()));
             (
                 tf!("{agent} is using your keyboard", "{agent} 正在用你的键盘"),
                 Some(t("Press a key to stop", "按任意键停止")),

@@ -104,6 +104,32 @@ pub fn clear_stop() {
     STOP.store(false, std::sync::atomic::Ordering::SeqCst);
 }
 
+/// Keyboard Borrows whose worker hasn't returned the keyboard yet, on any
+/// display. Counted app-wide: a display can end while its worker types.
+static BORROWS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// One Keyboard Borrow, counted until dropped.
+pub struct Borrow(());
+
+impl Borrow {
+    /// A borrow starts. Whether no other one was running.
+    pub fn start() -> (Self, bool) {
+        let before = BORROWS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        (Self(()), before == 0)
+    }
+}
+
+impl Drop for Borrow {
+    fn drop(&mut self) {
+        BORROWS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// A Keyboard Borrow's worker still has the user's keyboard.
+pub fn borrowing() -> bool {
+    BORROWS.load(std::sync::atomic::Ordering::SeqCst) > 0
+}
+
 /// An input source, retained.
 struct Source(*mut std::ffi::c_void);
 unsafe impl Send for Source {}

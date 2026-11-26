@@ -280,10 +280,20 @@ fn test(control: &Control, id: &Value, pid: u32) -> Result<()> {
     let armed = read()?;
     judge("Armed", &armed, Glow::Armed, screens);
     picture(pid, "glow-armed");
+    // A window built again just now still fades in, for 120 ms.
+    let still = || -> Result<Value> {
+        let first = armed["animations"].clone();
+        if first.as_array().is_some_and(Vec::is_empty) {
+            return Ok(first);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        Ok(control.call("debugGlow", json!({ "alpha": false }))?["animations"].clone())
+    };
+    let still = still()?;
     check(
         "Armed holds still: no animation on its bands",
-        armed["animations"].as_array().is_some_and(Vec::is_empty),
-        armed["animations"].to_string(),
+        still.as_array().is_some_and(Vec::is_empty),
+        still.to_string(),
     );
 
     show(control, id, "glow-off")?;
