@@ -7,11 +7,11 @@
 # for the SDK (26.5 in November), so clang links a macOS 26-only API in the
 # shims without the availability warning that says macOS 15 lacks it.
 #
-# Usage: check-deployment-target.sh [binary...]
+# Usage: check-deployment-target.sh binary...
 #
 # Fails when MACOSX_DEPLOYMENT_TARGET, if set, the runner of CI's
 # starts-on-macos job, or the minos of any binary given differs from
-# LSMinimumSystemVersion. Read-only.
+# LSMinimumSystemVersion. At least one binary is required. Read-only.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -42,6 +42,11 @@ if [[ "$runner" != "${want%%.*}" ]]; then
   mismatch "ci.yml's starts-on-macos runner" "macos-${runner:-missing}"
 fi
 
+if [[ $# -eq 0 ]]; then
+  echo "usage: check-deployment-target.sh binary..." >&2
+  exit 2
+fi
+
 for binary in "$@"; do
   # One minos per architecture of a universal binary.
   minos="$(vtool -show-build "$binary" | awk '$1 == "minos" { print $2 }' | sort -u)"
@@ -49,9 +54,9 @@ for binary in "$@"; do
     mismatch "$binary's minos" missing
     continue
   fi
-  while read -r version; do
+  for version in $minos; do
     [[ "$(normal "$version")" == "$(normal "$want")" ]] || mismatch "$binary's minos" "$version"
-  done <<<"$minos"
+  done
 done
 
 [[ "$failed" == 0 ]] && echo "deployment target $want: Info.plist, environment, CI runner and $# binaries agree"
