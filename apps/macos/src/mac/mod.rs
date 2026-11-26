@@ -26,6 +26,8 @@ pub mod playback;
 pub mod real_input;
 pub mod recording;
 pub mod relocate;
+#[cfg(test)]
+mod scan_bench;
 pub mod screenshot;
 pub mod shared_app;
 pub mod spaces;

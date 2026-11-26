@@ -384,6 +384,7 @@ AGENTSCREEN_INSTANCE=e2e cargo e2e load        # with no displays, then LOAD_DIS
 AGENTSCREEN_INSTANCE=e2e cargo e2e perf        # what agents and you wait for, over ROUNDS rounds: a new and a reused display, launching Calculator, clicks, screenshots, window states, display changes, the test app's main-thread stalls and how late a plain AppKit app runs meanwhile; JSON in target/e2e/perf. Two agents measuring at once wrap each run in `/usr/bin/lockf /tmp/agent-screen-perf.lock env AGENTSCREEN_INSTANCE=NAME cargo e2e perf`, so runs never overlap
 AGENTSCREEN_INSTANCE=e2e cargo e2e changecost     # how long every window on the Mac stops drawing when a display is added and removed, by Core Animation and by a main thread; the test build's AGENTSCREEN_NO_PARK, AGENTSCREEN_MAX_PIXELS=fit, AGENTSCREEN_DISPLAY_SCALE and AGENTSCREEN_DISPLAY_HZ compare choices; 1 display
 AGENTSCREEN_INSTANCE=e2e E2E_NOW=1 cargo e2e flash  # TextEdit launched again RUNS times (15): how long each new window shows on your screen before it moves, with the distribution; TextEdit must not be in use
+cargo test -p agent-screen --bin AgentScreen scan_bench -- --ignored --nocapture  # read-only: what each window-list scan, put_away and its Accessibility reads cost against the window count on this Mac, p50 and p95 over BENCH_ROUNDS (40); no display, nothing moves
 
 # tools, which cover no area
 AGENTSCREEN_INSTANCE=e2e cargo e2e stop        # quit a test instance a stopped script left running

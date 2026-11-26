@@ -350,11 +350,9 @@ pub fn on_screen_hit_candidates(menu: i64, status: i64) -> Vec<(WindowTarget, i6
 /// Spaces included.
 pub fn all_windows() -> Vec<WindowInfo> {
     // Each app also owns a 30-point menu bar strip on every display.
-    window_list_where(
-        CGWindowListOption::OptionAll | CGWindowListOption::ExcludeDesktopElements,
-        0,
-        |_, layer, b| layer == 0 && b.width > 40.0 && b.height > 40.0,
-    )
+    window_list_where(ALL_BUT_DESKTOP, 0, |_, layer, b| {
+        layer == 0 && b.width > 40.0 && b.height > 40.0
+    })
 }
 
 /// Every window of `pid`, at any level and any size, on screen or not.
@@ -362,14 +360,28 @@ pub fn windows_of(pid: i32) -> Vec<WindowInfo> {
     window_list_where(CGWindowListOption::OptionAll, 0, |p, _, _| p == pid)
 }
 
+/// Every window, on screen or not, desktop elements left out. WindowServer
+/// keeps a "Display N Backstop" window at desktop level for every display
+/// connected since login, Agent Displays included, so on a Mac that made
+/// many displays they are half the full list. An app's windows sit at level
+/// 0 and up, and none of them is a desktop element.
+pub(super) const ALL_BUT_DESKTOP: CGWindowListOption = CGWindowListOption(
+    CGWindowListOption::OptionAll.0 | CGWindowListOption::ExcludeDesktopElements.0,
+);
+
 /// Windows that draw another app's panel out of process, as the file Open
 /// and Save panels do. The app owns an empty window in front; WindowServer
 /// sends input to this one, which it lists as off screen, at the same
 /// place.
 pub fn remote_panels() -> Vec<WindowInfo> {
+    remote_panels_in(ALL_BUT_DESKTOP)
+}
+
+/// `remote_panels` from the list `options` asks for.
+pub(super) fn remote_panels_in(options: CGWindowListOption) -> Vec<WindowInfo> {
     // The full list runs to a couple of thousand windows: the pid, layer and
     // size sort out all but a few before anything else is read.
-    window_list_where(CGWindowListOption::OptionAll, 0, |pid, layer, b| {
+    window_list_where(options, 0, |pid, layer, b| {
         // Normal windows, and modal panels at their own level, as Firefox's.
         (0..1000).contains(&layer)
             && b.width > 100.0
@@ -426,6 +438,17 @@ pub fn routing_window_bounds(target: WindowTarget) -> Option<Rect> {
     })
 }
 
+/// `pid`'s windows in the list `options` asks for, as
+/// `routing_window_bounds` reads them, for the scan benchmark.
+#[cfg(test)]
+pub(super) fn windows_listed(
+    options: CGWindowListOption,
+    relative: u32,
+    pid: i32,
+) -> Vec<WindowInfo> {
+    window_list_where(options, relative, |p, _, _| p == pid)
+}
+
 pub(super) fn window_bounds_using(
     window_id: u32,
     owner: Option<i32>,
@@ -440,7 +463,7 @@ pub(super) fn window_bounds_using(
         .map(|w| w.bounds)
         .or_else(|| {
             owner?;
-            query(CGWindowListOption::OptionAll, 0)
+            query(ALL_BUT_DESKTOP, 0)
                 .into_iter()
                 .find(matches)
                 .map(|w| w.bounds)
