@@ -7,6 +7,7 @@
 //! GPUI update.
 
 use crate::i18n::t;
+use agent_screen_model::glow::{self, Glow};
 use block2::RcBlock;
 use futures::channel::mpsc::UnboundedSender;
 use objc2::rc::Retained;
@@ -155,8 +156,8 @@ pub fn set_sender(sender: UnboundedSender<Native>) {
     EVENTS.with(|e| *e.borrow_mut() = Some(sender));
 }
 
-/// The level of the border Agent Screen draws around the user's screens,
-/// which lets every click through.
+/// The level of the Red Glow Agent Screen draws along the user's screens'
+/// edges, which lets every click through. The Input Bar sits just above.
 pub const BORDER_LEVEL: isize = 1000;
 
 pub fn send(event: Native) {
@@ -796,119 +797,483 @@ pub fn watch_mouse() {
     }
 }
 
-// MARK: Input Grant indicator
+// MARK: Red Glow
 
-thread_local! {
-    static BORDERS: RefCell<Vec<Retained<NSWindow>>> = const { RefCell::new(Vec::new()) };
+/// One user screen's glow window and the layers its state animates.
+struct GlowScreen {
+    display: u32,
+    frame: NSRect,
+    shape: agent_screen_model::screen_edge::Screen,
+    window: Retained<NSWindow>,
+    /// Holds the layers, hidden until the glow first shows.
+    root: Retained<objc2_quartz_core::CALayer>,
+    /// Carries the state and the breathing of the bands.
+    pulse: Retained<objc2_quartz_core::CALayer>,
+    /// The bands, rasterized once.
+    bloom: Retained<objc2_quartz_core::CALayer>,
+    /// The rim and the hairline.
+    rims: Retained<objc2_quartz_core::CALayer>,
+    outline: objc2_core_foundation::CFRetained<objc2_core_graphics::CGMutablePath>,
 }
 
-/// The width of the Input Grant's edge, in points.
-const EDGE: f64 = 2.0;
+#[derive(Default)]
+struct GlowWindows {
+    screens: Vec<GlowScreen>,
+    shown: Option<Glow>,
+    /// The screens changed since the windows were built.
+    stale: bool,
+}
 
-/// A thin red edge around each of the user's screens while an Input Grant
-/// lets agents use the pointer, or none. It follows the screen's glass
-/// (`screen_edge`): a MacBook Pro's rounded top corners and its camera
-/// notch. Clicks pass through. Returns whether the indicator shows, as real input
-/// may run only while it does. The Input Bar says what the edge means.
-pub fn show_borders(on: bool) -> bool {
-    use objc2_app_kit::{NSBackingStoreType, NSView, NSWindowStyleMask};
-    use objc2_quartz_core::CAShapeLayer;
+thread_local! {
+    static GLOW: RefCell<GlowWindows> = RefCell::new(GlowWindows::default());
+}
+
+/// Breathing, on `pulse`; and the fades, on `pulse` and `rims`.
+const BREATH: &str = "breath";
+const APPEAR: &str = "appear";
+const CHANGE: &str = "change";
+
+/// The screens changed while the glow shows: the next `show_glow` builds
+/// its windows anew. Off, the next one compares the screens anyway.
+fn forget_glow_screens() {
+    GLOW.with(|g| {
+        let mut g = g.borrow_mut();
+        if g.shown.is_some() {
+            g.stale = true;
+        }
+    });
+}
+
+/// The user's screens, by display id and frame: not the closet, not an
+/// Agent Display or a Spare.
+fn glow_screens() -> Vec<(u32, NSRect)> {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return Vec::new();
+    };
+    objc2_app_kit::NSScreen::screens(mtm)
+        .iter()
+        .filter_map(|screen| Some((screen_number(&screen)?, screen.frame())))
+        .filter(|&(id, _)| !super::cg::is_closet(id) && !super::cg::is_agent_screen(id))
+        .collect()
+}
+
+fn screen_number(screen: &objc2_app_kit::NSScreen) -> Option<u32> {
+    let number = screen
+        .deviceDescription()
+        .objectForKey(&NSString::from_str("NSScreenNumber"))?;
+    Some(
+        number
+            .downcast::<objc2_foundation::NSNumber>()
+            .ok()?
+            .unsignedIntValue(),
+    )
+}
+
+fn same_frame(a: NSRect, b: NSRect) -> bool {
+    a.origin.x == b.origin.x
+        && a.origin.y == b.origin.y
+        && a.size.width == b.size.width
+        && a.size.height == b.size.height
+}
+
+/// Show the Red Glow in `state` on every user screen at once, or none for
+/// Off, at once. Clicks pass through; it never shows on an Agent Display,
+/// a Spare or the closet. The windows are kept and reused, and built anew
+/// when the screens change. Returns whether every user screen has a
+/// visible glow window, as real input may run only while it does.
+pub fn show_glow(state: Glow) -> bool {
     let Some(mtm) = MainThreadMarker::new() else {
         return false;
     };
-    BORDERS.with(|b| {
-        let mut borders = b.borrow_mut();
-        if !on {
-            for window in borders.drain(..) {
-                window.orderOut(None);
+    GLOW.with(|g| {
+        let mut g = g.borrow_mut();
+        let Some(look) = glow::look(state) else {
+            for screen in &g.screens {
+                screen.window.orderOut(None);
+                screen.root.removeAllAnimations();
+                screen.pulse.removeAllAnimations();
+                screen.rims.removeAllAnimations();
             }
+            g.shown = None;
             return false;
-        }
-        if !borders.is_empty() {
-            return true;
-        }
-        for (id, frame, shape) in screen_shapes() {
-            if super::cg::is_agent_screen(id) {
-                continue;
+        };
+        let now = glow_screens();
+        let built = g.screens.len() == now.len()
+            && g.screens
+                .iter()
+                .zip(&now)
+                .all(|(s, &(id, frame))| s.display == id && same_frame(s.frame, frame));
+        if g.stale || !built {
+            for screen in g.screens.drain(..) {
+                screen.window.orderOut(None);
             }
-            let window = unsafe {
-                NSWindow::initWithContentRect_styleMask_backing_defer(
-                    NSWindow::alloc(mtm),
-                    frame,
-                    NSWindowStyleMask::Borderless,
-                    NSBackingStoreType::Buffered,
-                    false,
-                )
-            };
-            unsafe { window.setReleasedWhenClosed(false) };
-            window.setOpaque(false);
-            window.setBackgroundColor(Some(&NSColor::clearColor()));
-            window.setIgnoresMouseEvents(true);
-            window.setHasShadow(false);
-            window.setLevel(BORDER_LEVEL);
-            window.setCollectionBehavior(
-                NSWindowCollectionBehavior::CanJoinAllSpaces
-                    | NSWindowCollectionBehavior::Stationary
-                    | NSWindowCollectionBehavior::FullScreenAuxiliary
-                    | NSWindowCollectionBehavior::IgnoresCycle,
-            );
-            let view = NSView::initWithFrame(
-                NSView::alloc(mtm),
-                NSRect::new(NSPoint::new(0.0, 0.0), frame.size),
-            );
-            view.setWantsLayer(true);
-            let Some(layer) = view.layer() else {
-                continue;
-            };
-            // The outline stroked twice as wide and clipped to itself: the
-            // inner half shows, EDGE wide along every curve, its outer side
-            // on the glass's edge.
-            let outline = edge_path(shape);
-            let edge = CAShapeLayer::new();
-            edge.setPath(Some(&outline));
-            edge.setFillColor(None);
-            edge.setStrokeColor(Some(&NSColor::systemRedColor().CGColor()));
-            edge.setLineWidth(2.0 * EDGE);
-            let glass = CAShapeLayer::new();
-            glass.setPath(Some(&outline));
-            // A fresh layer with no superlayer, as a mask must be.
-            unsafe { edge.setMask(Some(&glass)) };
-            layer.addSublayer(&glow(&outline));
-            layer.addSublayer(&edge);
-            window.setContentView(Some(&view));
-            window.orderFrontRegardless();
-            borders.push(window);
+            g.screens = screen_shapes()
+                .into_iter()
+                .filter(|(id, _, _)| !super::cg::is_agent_screen(*id))
+                .filter_map(|(id, frame, shape)| build_glow(mtm, id, frame, shape))
+                .collect();
+            g.stale = false;
+            g.shown = None;
+            log::info!("red glow: built for {} screen(s)", g.screens.len());
         }
-        !borders.is_empty()
+        let calm =
+            objc2_app_kit::NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion();
+        let changed = g.shown != Some(state);
+        for screen in &g.screens {
+            let appearing = !screen.window.isVisible();
+            if appearing || changed {
+                set_look(screen, state, look, appearing, calm);
+            }
+            if appearing {
+                // The look is committed and flushed first, so the window's
+                // first frame already shows the rims. Input waits for the
+                // window, never for the fade.
+                objc2_quartz_core::CATransaction::flush();
+                screen.window.orderFrontRegardless();
+            }
+        }
+        g.shown = Some(state);
+        !g.screens.is_empty() && g.screens.iter().all(|s| s.window.isVisible())
     })
 }
 
-/// A soft red glow just inside the outline: the outline's stroke casts a
-/// blurred shadow, and a container masked by the glass keeps only its
-/// inner half. Drawn once: the window never changes while it shows.
-fn glow(outline: &objc2_core_graphics::CGMutablePath) -> Retained<objc2_quartz_core::CALayer> {
-    use objc2_quartz_core::{CALayer, CAShapeLayer};
-    let red = NSColor::systemRedColor().CGColor();
-    let stroke = CAShapeLayer::new();
-    stroke.setPath(Some(outline));
-    stroke.setFillColor(None);
-    stroke.setStrokeColor(Some(&red));
-    stroke.setLineWidth(2.0 * EDGE);
-    stroke.setShadowColor(Some(&red));
-    stroke.setShadowOpacity(GLOW_OPACITY);
-    stroke.setShadowRadius(GLOW_RADIUS);
-    stroke.setShadowOffset(objc2_core_foundation::CGSize::new(0.0, 0.0));
-    let glass = CAShapeLayer::new();
-    glass.setPath(Some(outline));
-    let inside = CALayer::new();
-    unsafe { inside.setMask(Some(&glass)) };
-    inside.addSublayer(&stroke);
-    inside
+fn number(value: f64) -> Retained<AnyObject> {
+    Retained::into_super(Retained::into_super(Retained::into_super(
+        objc2_foundation::NSNumber::new_f64(value),
+    )))
 }
 
-/// The glow's blur, in points, and how strong it is.
-const GLOW_RADIUS: f64 = 7.0;
-const GLOW_OPACITY: f32 = 0.45;
+/// A fade of `layer`'s opacity from what shows now to `to`, `seconds`
+/// long. The model value is set already.
+fn fade(layer: &objc2_quartz_core::CALayer, from: f64, to: f64, seconds: f64, key: &str) {
+    use objc2_quartz_core::{CABasicAnimation, CAMediaTiming};
+    let animation = CABasicAnimation::animationWithKeyPath(Some(&NSString::from_str("opacity")));
+    unsafe {
+        animation.setFromValue(Some(&number(from)));
+        animation.setToValue(Some(&number(to)));
+    }
+    animation.setDuration(seconds);
+    layer.addAnimation_forKey(&animation, Some(&NSString::from_str(key)));
+}
+
+/// What `layer` shows now, mid-animation too.
+fn shown_opacity(layer: &objc2_quartz_core::CALayer) -> f64 {
+    let now = unsafe { layer.presentationLayer() };
+    f64::from(now.as_deref().unwrap_or(layer).opacity())
+}
+
+fn set_look(screen: &GlowScreen, state: Glow, look: glow::Look, appearing: bool, calm: bool) {
+    use objc2_quartz_core::CATransaction;
+    let (pulse_was, rims_was) = (shown_opacity(&screen.pulse), shown_opacity(&screen.rims));
+    CATransaction::begin();
+    CATransaction::setDisableActions(true);
+    for layer in [&screen.root, &screen.pulse, &screen.rims] {
+        layer.removeAllAnimations();
+    }
+    screen.root.setOpacity(1.0);
+    screen.pulse.setOpacity(look.pulse as f32);
+    screen.rims.setOpacity(look.rims as f32);
+    let delay = if appearing {
+        // The rims are at full strength with the window, before any input
+        // goes out; only the bloom fades in.
+        fade(&screen.pulse, 0.0, look.pulse, glow::APPEAR_S, APPEAR);
+        glow::APPEAR_S
+    } else {
+        fade(&screen.pulse, pulse_was, look.pulse, glow::CHANGE_S, CHANGE);
+        fade(&screen.rims, rims_was, look.rims, glow::CHANGE_S, CHANGE);
+        glow::CHANGE_S
+    };
+    if state == Glow::Live && !calm {
+        breathe(&screen.pulse, delay);
+    }
+    CATransaction::commit();
+}
+
+/// Live's breathing on `pulse`, from the top of its breath, starting
+/// `delay` seconds from now.
+fn breathe(pulse: &objc2_quartz_core::CALayer, delay: f64) {
+    use objc2_quartz_core::{
+        CABasicAnimation, CAMediaTiming, CAMediaTimingFunction, kCAMediaTimingFunctionEaseInEaseOut,
+    };
+    let breath = CABasicAnimation::animationWithKeyPath(Some(&NSString::from_str("opacity")));
+    unsafe {
+        breath.setFromValue(Some(&number(glow::LIVE.pulse)));
+        breath.setToValue(Some(&number(glow::BREATH_LOW)));
+    }
+    breath.setDuration(glow::BREATH_S / 2.0);
+    breath.setAutoreverses(true);
+    breath.setRepeatCount(f32::INFINITY);
+    breath.setTimingFunction(Some(&CAMediaTimingFunction::functionWithName(unsafe {
+        kCAMediaTimingFunctionEaseInEaseOut
+    })));
+    if delay > 0.0 {
+        breath.setBeginTime(objc2_quartz_core::CACurrentMediaTime() + delay);
+    }
+    pulse.addAnimation_forKey(&breath, Some(&NSString::from_str(BREATH)));
+}
+
+/// The Red Glow's window for screen `id`, ordered out, its layers at
+/// opacity 0 until `set_look`.
+fn build_glow(
+    mtm: MainThreadMarker,
+    id: u32,
+    frame: NSRect,
+    shape: agent_screen_model::screen_edge::Screen,
+) -> Option<GlowScreen> {
+    use objc2_app_kit::{NSBackingStoreType, NSView, NSWindowStyleMask};
+    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+    use objc2_core_graphics::{CGLineCap, CGLineJoin, CGPath};
+    use objc2_quartz_core::{CALayer, CAShapeLayer, CATransaction};
+    let window = unsafe {
+        NSWindow::initWithContentRect_styleMask_backing_defer(
+            NSWindow::alloc(mtm),
+            frame,
+            NSWindowStyleMask::Borderless,
+            NSBackingStoreType::Buffered,
+            false,
+        )
+    };
+    unsafe { window.setReleasedWhenClosed(false) };
+    window.setOpaque(false);
+    window.setBackgroundColor(Some(&NSColor::clearColor()));
+    window.setIgnoresMouseEvents(true);
+    window.setHasShadow(false);
+    window.setLevel(BORDER_LEVEL);
+    window.setCollectionBehavior(
+        NSWindowCollectionBehavior::CanJoinAllSpaces
+            | NSWindowCollectionBehavior::Stationary
+            | NSWindowCollectionBehavior::FullScreenAuxiliary
+            | NSWindowCollectionBehavior::IgnoresCycle,
+    );
+    let view = NSView::initWithFrame(
+        NSView::alloc(mtm),
+        NSRect::new(NSPoint::new(0.0, 0.0), frame.size),
+    );
+    view.setWantsLayer(true);
+    let host = view.layer()?;
+    let bounds = CGRect::new(
+        CGPoint::new(0.0, 0.0),
+        CGSize::new(frame.size.width, frame.size.height),
+    );
+    let (r, g, b) = glow::RED_P3;
+    let red = NSColor::colorWithDisplayP3Red_green_blue_alpha(r, g, b, 1.0).CGColor();
+    let outline = edge_path(shape);
+    // The glass: a fresh layer for each mask, with no superlayer, as a
+    // mask must be.
+    let glass = || {
+        let glass = CAShapeLayer::new();
+        glass.setFrame(bounds);
+        glass.setPath(Some(&outline));
+        glass
+    };
+    let layer = || {
+        let layer = CALayer::new();
+        layer.setFrame(bounds);
+        layer
+    };
+    CATransaction::begin();
+    CATransaction::setDisableActions(true);
+    let (root, pulse, bloom, rims) = (layer(), layer(), layer(), layer());
+    // The bands: each casts the shadow of the outline stroked at its
+    // width, centred on the glass's edge; the glass keeps the inner half,
+    // which has no hard inner edge, as a blurred visible stroke would.
+    let u = glow::scale(frame.size.width, frame.size.height);
+    for band in glow::BANDS.iter().rev() {
+        let (width, radius) = band.at(u);
+        let path = unsafe {
+            CGPath::new_copy_by_stroking_path(
+                Some(&outline),
+                std::ptr::null(),
+                width,
+                CGLineCap::Round,
+                CGLineJoin::Round,
+                10.0,
+            )
+        }?;
+        let cast = layer();
+        cast.setShadowPath(Some(&path));
+        cast.setShadowColor(Some(&red));
+        cast.setShadowRadius(radius);
+        cast.setShadowOpacity(band.opacity as f32);
+        cast.setShadowOffset(CGSize::new(0.0, 0.0));
+        bloom.addSublayer(&cast);
+    }
+    unsafe { bloom.setMask(Some(&glass())) };
+    // The bands hold only low frequencies: drawn once, at a pixel a point,
+    // so the breathing animates one opacity and never draws them again.
+    bloom.setShouldRasterize(true);
+    bloom.setRasterizationScale(1.0);
+    pulse.addSublayer(&bloom);
+    // The rim and the hairline: the outline stroked twice as wide as what
+    // shows and clipped to the glass, so the width holds along every curve
+    // and around the notch. The rim lies over the hairline's outer part.
+    let stroke = |color: &objc2_core_graphics::CGColor, width: f64| {
+        let line = CAShapeLayer::new();
+        line.setFrame(bounds);
+        line.setPath(Some(&outline));
+        line.setFillColor(None);
+        line.setStrokeColor(Some(color));
+        line.setLineWidth(width);
+        line
+    };
+    let white = NSColor::colorWithWhite_alpha(1.0, glow::HAIRLINE_ALPHA).CGColor();
+    rims.addSublayer(&stroke(&white, glow::hairline_stroke()));
+    rims.addSublayer(&stroke(&red, glow::rim_stroke()));
+    unsafe { rims.setMask(Some(&glass())) };
+    root.addSublayer(&pulse);
+    root.addSublayer(&rims);
+    root.setOpacity(0.0);
+    host.addSublayer(&root);
+    CATransaction::commit();
+    window.setContentView(Some(&view));
+    Some(GlowScreen {
+        display: id,
+        frame,
+        shape,
+        window,
+        root,
+        pulse,
+        bloom,
+        rims,
+        outline,
+    })
+}
+
+/// What `debugGlow` reads of one glow window.
+pub struct GlowProbe {
+    pub display: u32,
+    pub window: u32,
+    pub frame: crate::model::Rect,
+    pub visible: bool,
+    pub ignores_mouse: bool,
+    pub level: isize,
+    pub scale: f64,
+    pub backing: f64,
+    pub rasterized: bool,
+    pub animations: Vec<String>,
+    /// Where to read each sample, in the window's points from its top-left
+    /// corner: (place, d, point). `d` is the contract row's, at scale 1.
+    pub samples: Vec<(&'static str, f64, (f64, f64))>,
+}
+
+/// A line `debugGlow` reads along: its place, where it starts outside the
+/// glass, and its direction.
+type Ray = (&'static str, (f64, f64), (f64, f64));
+
+/// The glow windows as they are, with where `debugGlow` reads the
+/// contract (`glow::CONTRACT`): on the perpendicular at the middle of each
+/// edge, under the notch, on the 45° line into each top corner, and the
+/// centre. Each ray starts outside the glass and the reading starts where
+/// it enters it.
+pub fn glow_probe() -> Vec<GlowProbe> {
+    GLOW.with(|g| {
+        let g = g.borrow();
+        g.screens
+            .iter()
+            .map(|s| {
+                let (w, h) = (s.frame.size.width, s.frame.size.height);
+                let diagonal = std::f64::consts::FRAC_1_SQRT_2;
+                let top_x = s.shape.notch.map_or(w / 2.0, |n| n.left / 2.0);
+                let mut rays: Vec<Ray> = vec![
+                    ("left", (0.0, h / 2.0), (1.0, 0.0)),
+                    ("right", (w, h / 2.0), (-1.0, 0.0)),
+                    ("top", (top_x, 0.0), (0.0, 1.0)),
+                    ("bottom", (w / 2.0, h), (0.0, -1.0)),
+                    ("corner", (0.0, 0.0), (diagonal, diagonal)),
+                    ("cornerRight", (w, 0.0), (-diagonal, diagonal)),
+                ];
+                if s.shape.notch.is_some() {
+                    rays.push(("notch", (w / 2.0, 0.0), (0.0, 1.0)));
+                }
+                let inside = |(x, y): (f64, f64)| unsafe {
+                    objc2_core_graphics::CGPath::contains_point(
+                        Some(&s.outline),
+                        std::ptr::null(),
+                        objc2_core_foundation::CGPoint::new(x, h - y),
+                        false,
+                    )
+                };
+                let mut samples = Vec::new();
+                for (place, from, (dx, dy)) in rays {
+                    let at = |t: f64| (from.0 + dx * t, from.1 + dy * t);
+                    let Some(edge) = (0..2000)
+                        .map(|i| f64::from(i) * 0.25)
+                        .find(|&t| inside(at(t)))
+                    else {
+                        continue;
+                    };
+                    for (d, _, _) in glow::CONTRACT {
+                        samples.push((place, d, at(edge + glow::distance(d, w, h))));
+                    }
+                }
+                samples.push(("centre", 0.0, (w / 2.0, h / 2.0)));
+                // Running ones: Core Animation takes a finished fade off
+                // only at a later commit.
+                let animations = s
+                    .pulse
+                    .animationKeys()
+                    .map(|keys| {
+                        keys.iter()
+                            .filter(|key| running(&s.pulse, key))
+                            .map(|k| k.to_string())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                GlowProbe {
+                    display: s.display,
+                    window: s.window.windowNumber() as u32,
+                    frame: crate::model::Rect::new(s.frame.origin.x, s.frame.origin.y, w, h),
+                    visible: s.window.isVisible(),
+                    ignores_mouse: s.window.ignoresMouseEvents(),
+                    level: s.window.level(),
+                    scale: glow::scale(w, h),
+                    backing: s.window.backingScaleFactor(),
+                    rasterized: s.bloom.shouldRasterize(),
+                    animations,
+                    samples,
+                }
+            })
+            .collect()
+    })
+}
+
+/// Whether `layer`'s animation `key` still runs.
+fn running(layer: &objc2_quartz_core::CALayer, key: &NSString) -> bool {
+    use objc2_quartz_core::CAMediaTiming;
+    let Some(animation) = (unsafe { layer.animationForKey(key) }) else {
+        return false;
+    };
+    if animation.repeatCount().is_infinite() {
+        return true;
+    }
+    let turns = if animation.autoreverses() { 2.0 } else { 1.0 };
+    let now = layer.convertTime_fromLayer(objc2_quartz_core::CACurrentMediaTime(), None);
+    animation.beginTime() + animation.duration() * turns > now
+}
+
+/// Hold Live's breath at its top while `debugGlow` reads the windows, or
+/// let it breathe again.
+pub fn glow_hold_breath(hold: bool) {
+    use objc2_quartz_core::CATransaction;
+    GLOW.with(|g| {
+        let g = g.borrow();
+        if g.shown != Some(Glow::Live) {
+            return;
+        }
+        let calm =
+            objc2_app_kit::NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion();
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        for s in &g.screens {
+            if hold {
+                s.pulse.removeAnimationForKey(&NSString::from_str(BREATH));
+            } else if !calm {
+                breathe(&s.pulse, 0.0);
+            }
+        }
+        CATransaction::commit();
+    })
+}
 
 /// Each screen with its frame and shape: its camera notch where NSScreen
 /// reports one, and a built-in panel's measured rounding.
@@ -920,13 +1285,7 @@ fn screen_shapes() -> Vec<(u32, NSRect, agent_screen_model::screen_edge::Screen)
     objc2_app_kit::NSScreen::screens(mtm)
         .iter()
         .filter_map(|screen| {
-            let number = screen
-                .deviceDescription()
-                .objectForKey(&NSString::from_str("NSScreenNumber"))?;
-            let id = number
-                .downcast::<objc2_foundation::NSNumber>()
-                .ok()?
-                .unsignedIntValue();
+            let id = screen_number(&screen)?;
             if crate::mac::cg::is_closet(id) {
                 return None;
             }
@@ -947,9 +1306,7 @@ fn screen_shapes() -> Vec<(u32, NSRect, agent_screen_model::screen_edge::Screen)
                         depth,
                     )
                 });
-            let panel = builtin
-                .then(|| super::display::native_pixels(id))
-                .flatten();
+            let panel = builtin.then(|| super::display::native_pixels(id)).flatten();
             let bezel = panel.map_or(Bezel::SQUARE, |p| Bezel::of_builtin(p, notch.is_some()));
             let shape = Screen {
                 width: frame.size.width,
@@ -962,7 +1319,7 @@ fn screen_shapes() -> Vec<(u32, NSRect, agent_screen_model::screen_edge::Screen)
             };
             if builtin {
                 log::info!(
-                    "input grant edge: display {id}, panel {panel:?}, {}x{} pt, {bezel:?}, {notch:?}",
+                    "red glow: display {id}, panel {panel:?}, {}x{} pt, {bezel:?}, {notch:?}",
                     frame.size.width,
                     frame.size.height
                 );
@@ -1599,6 +1956,7 @@ pub fn watch_screens() {
     let block = RcBlock::new(|_: NonNull<objc2_foundation::NSNotification>| {
         forget_menu_bars();
         forget_screens();
+        forget_glow_screens();
         crate::mac::app::forget_screen_names();
         send(Native::ScreensChanged)
     });

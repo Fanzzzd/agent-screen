@@ -5,6 +5,10 @@
 // clicks (real), the highest click count of a real click (clicks) and real
 // right clicks (right). SIGUSR1 paints it white, as a list that reordered
 // under the point. HIDCLICK_DISPLAY names the Agent Display to open on.
+// HIDCLICK_EDGE=left opens it instead as a narrow borderless strip flush
+// with the left edge of the main screen, the user's, for `glow`, which
+// clicks through the Red Glow there; HIDCLICK_OUT names a file the counts
+// go to as well.
 import AppKit
 
 final class Target: NSView {
@@ -36,7 +40,11 @@ final class Target: NSView {
 
   func show() {
     needsDisplay = true
-    window?.title = "HID down=\(down) real=\(real) clicks=\(clicks) right=\(right)"
+    let counts = "HID down=\(down) real=\(real) clicks=\(clicks) right=\(right)"
+    window?.title = counts
+    if let out = ProcessInfo.processInfo.environment["HIDCLICK_OUT"] {
+      try? counts.write(toFile: out, atomically: true, encoding: .utf8)
+    }
   }
 
   override func draw(_ dirtyRect: NSRect) {
@@ -62,6 +70,19 @@ final class Delegate: NSObject, NSApplicationDelegate {
       target.show()
     }
     moved?.resume()
+    if ProcessInfo.processInfo.environment["HIDCLICK_EDGE"] == "left", let main = NSScreen.screens.first {
+      // A panel that never activates: the click leaves the user's front app.
+      let strip = NSPanel(contentRect: NSRect(x: main.frame.minX, y: main.frame.midY - 120, width: 60, height: 240),
+                          styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+      strip.level = .statusBar
+      strip.contentView = target
+      target.frame = NSRect(x: 0, y: 0, width: 60, height: 240)
+      window = strip
+      target.show()
+      window.orderFrontRegardless()
+      DispatchQueue.main.asyncAfter(deadline: .now() + 60) { exit(0) }
+      return
+    }
     // Never fall back to the user's screen.
     guard let value = ProcessInfo.processInfo.environment["HIDCLICK_DISPLAY"],
           let id = UInt32(value), CGDisplayVendorNumber(id) == 0x5353,

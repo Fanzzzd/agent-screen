@@ -7830,7 +7830,8 @@ fn forwarder_stopped(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) -> b
 }
 
 /// Keys through the user's input method (ADR 0008). The display says the
-/// agent has the user's keyboard while the keys go in.
+/// agent has the user's keyboard while the keys go in, and the Red Glow and
+/// the Input Bar show on the user's screens: without the glow, no key goes.
 async fn through_input_method(
     core: &Entity<Core>,
     id: DisplayId,
@@ -7838,6 +7839,8 @@ async fn through_input_method(
     source: Option<String>,
     cx: &mut AsyncApp,
 ) -> Result<Params, ControlError> {
+    // Refused before the glow shows: no flash for a call that sends nothing.
+    crate::mac::ime::may_borrow(keys.len()).map_err(ControlError::failed)?;
     let forwarder = core.update(cx, |c, _| c.forwarder(id));
     let bounds = cg::display_bounds(id);
     keys_allowed(&forwarder, bounds, cx).await?;
@@ -7845,15 +7848,38 @@ async fn through_input_method(
         forwarder.keys_done().await;
         return Err(no_keyboard_target());
     };
-    let borrow = |core: &Entity<Core>, on: bool, cx: &mut AsyncApp| {
+    // Calls can overlap, and one that loses the session's input lock
+    // returns while another types: each returns only its own borrow, so
+    // the glow stays while any runs. The worker holds `borrow` until it
+    // returns the keyboard, even if the display ends first. A Stop
+    // pressed for a running borrow stays pressed.
+    let (borrow, first) = crate::mac::ime::Borrow::start();
+    core.update(cx, |c, cx| {
+        if let Some(display) = c.displays.get_mut(id) {
+            display.borrow_keyboard();
+        }
+        cx.notify();
+    });
+    let give_back = |core: &Entity<Core>, cx: &mut AsyncApp| {
         core.update(cx, |c, cx| {
             if let Some(display) = c.displays.get_mut(id) {
-                display.keyboard_borrowed = on;
+                display.return_keyboard();
             }
             cx.notify();
         })
     };
-    borrow(core, true, cx);
+    if first {
+        crate::mac::ime::clear_stop();
+    }
+    if !sync_glow(cx) {
+        drop(borrow);
+        give_back(core, cx);
+        sync_glow(cx);
+        forwarder.keys_done().await;
+        return Err(ControlError::failed(
+            "Agent Screen couldn't show the red glow on the user's screens, which must show while their keyboard is borrowed, so nothing was typed",
+        ));
+    }
     let total = keys.len();
     let waker = forwarder.clone();
     let wake = move || {
@@ -7863,17 +7889,33 @@ async fn through_input_method(
     };
     let typed = cx
         .background_executor()
-        .spawn(async move { crate::mac::ime::type_keys(target, &keys, source.as_deref(), wake) })
+        .spawn(async move {
+            let typed = crate::mac::ime::type_keys(target, &keys, source.as_deref(), wake);
+            drop(borrow);
+            typed
+        })
         .await;
-    borrow(core, false, cx);
+    give_back(core, cx);
+    sync_glow(cx);
     forwarder.keys_done().await;
     match typed {
         Ok(crate::mac::ime::Typed::All) => Ok(Params::new()),
+        Ok(crate::mac::ime::Typed::Halted(sent)) => Err(ControlError::failed(format!(
+            "the user pressed Stop after {sent} of {total} keys, so the input method stopped and their app is in front again. Take a screenshot, and don't send the rest unless they ask."
+        ))),
         Ok(crate::mac::ime::Typed::Stopped(sent)) => Err(ControlError::failed(format!(
             "the user touched the keyboard or pointer after {sent} of {total} keys, so the input method stopped and their app is in front again. Take a screenshot, then send the rest once they've stopped."
         ))),
         Err(reason) => Err(ControlError::failed(reason)),
     }
+}
+
+/// Show the Red Glow as the facts now call for, at once. Whether every
+/// user screen shows it; false without a UI.
+pub(crate) fn sync_glow(cx: &mut AsyncApp) -> bool {
+    crate::ui::shell::current()
+        .and_then(|shell| shell.update(cx, |shell, cx| shell.sync_glow(cx)).ok())
+        .unwrap_or(false)
 }
 
 /// Why keys found nowhere to go: their app's focused window was off the

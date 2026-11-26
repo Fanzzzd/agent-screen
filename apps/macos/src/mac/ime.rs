@@ -85,6 +85,49 @@ pub enum Typed {
     All,
     /// The user touched the keyboard or pointer after this many keys.
     Stopped(usize),
+    /// The user pressed Stop on the Input Bar after this many keys.
+    Halted(usize),
+}
+
+/// The Input Bar's Stop during a Keyboard Borrow: `type_keys` reads it
+/// before each key.
+static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// No key goes after the one going now.
+pub fn stop_typing() {
+    STOP.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// A borrow begins, before the bar shows its Stop: a Stop from an earlier
+/// one doesn't stop it.
+pub fn clear_stop() {
+    STOP.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Keyboard Borrows whose worker hasn't returned the keyboard yet, on any
+/// display. Counted app-wide: a display can end while its worker types.
+static BORROWS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// One Keyboard Borrow, counted until dropped.
+pub struct Borrow(());
+
+impl Borrow {
+    /// A borrow starts. Whether no other one was running.
+    pub fn start() -> (Self, bool) {
+        let before = BORROWS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        (Self(()), before == 0)
+    }
+}
+
+impl Drop for Borrow {
+    fn drop(&mut self) {
+        BORROWS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// A Keyboard Borrow's worker still has the user's keyboard.
+pub fn borrowing() -> bool {
+    BORROWS.load(std::sync::atomic::Ordering::SeqCst) > 0
 }
 
 /// An input source, retained.
@@ -174,20 +217,10 @@ fn find_source(id: &str) -> Option<Source> {
     found
 }
 
-/// Type `keys` into `target` through the input method, `source` if named,
-/// else the user's current one. Blocking. An error says why nothing was
-/// typed.
-pub fn type_keys(
-    target: WindowTarget,
-    keys: &[KeyChord],
-    source: Option<&str>,
-    wake: impl FnOnce(),
-) -> Result<Typed, String> {
-    let _session = super::real_input::SESSION_INPUT.try_lock().map_err(|_| {
-        "an operation is using the session's keyboard or pointer; try again after it ends"
-            .to_string()
-    })?;
-    if PER_KEY * keys.len() as u32 > LONGEST {
+/// Whether `count` keys may borrow the user's keyboard now: why not, else
+/// Ok. Checked before the Red Glow shows, and again by `type_keys`.
+pub fn may_borrow(count: usize) -> Result<(), String> {
+    if PER_KEY * count as u32 > LONGEST {
         return Err(format!(
             "at most {} keys go through the input method in one call; split the text",
             LONGEST.as_millis() / PER_KEY.as_millis()
@@ -208,6 +241,23 @@ pub fn type_keys(
             "the user is using the keyboard or pointer (last input {idle:.1} s ago), and typing through the input method takes their keyboard; try again in a few seconds"
         ));
     }
+    Ok(())
+}
+
+/// Type `keys` into `target` through the input method, `source` if named,
+/// else the user's current one. Blocking. An error says why nothing was
+/// typed.
+pub fn type_keys(
+    target: WindowTarget,
+    keys: &[KeyChord],
+    source: Option<&str>,
+    wake: impl FnOnce(),
+) -> Result<Typed, String> {
+    let _session = super::real_input::SESSION_INPUT.try_lock().map_err(|_| {
+        "an operation is using the session's keyboard or pointer; try again after it ends"
+            .to_string()
+    })?;
+    may_borrow(keys.len())?;
     let wanted = match source {
         Some(id) => Some(
             on_main(|| find_source(id)).ok_or_else(|| format!("no enabled input source {id}"))?,
@@ -262,7 +312,12 @@ pub fn type_keys(
     let source_state = CGEventSource::new(CGEventSourceStateID::Private);
     let mut sent = 0;
     let mut stopped = false;
+    let mut halted = false;
     for chord in keys {
+        if STOP.load(std::sync::atomic::Ordering::SeqCst) {
+            halted = true;
+            break;
+        }
         // The user came back: their keys must not reach the agent's app.
         if user_idle() < started.elapsed().as_secs_f64()
             || started.elapsed() > LONGEST
@@ -294,7 +349,9 @@ pub fn type_keys(
         keys.len(),
         target.pid
     );
-    Ok(if stopped {
+    Ok(if halted {
+        Typed::Halted(sent)
+    } else if stopped {
         Typed::Stopped(sent)
     } else {
         Typed::All

@@ -35,7 +35,7 @@ impl Status {
             (Lang::En, 1) => "1 window".to_string(),
             _ => tf!("{window_count} windows", "{window_count} 个窗口"),
         };
-        if display.keyboard_borrowed && !display.is_ended() {
+        if display.keyboard_borrowed() && !display.is_ended() {
             return Status {
                 kind: Kind::Agent,
                 short: t("Using your keyboard", "正在用你的键盘").into(),

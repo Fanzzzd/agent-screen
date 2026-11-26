@@ -47,7 +47,7 @@ pub const PATHS: &[(&str, &[Area])] = &[
     ("apps/macos/src/mac/input.rs", &[AgentInput, ViewerInput]),
     ("apps/macos/src/mac/menubar.rs", &[Peek]),
     ("apps/macos/src/mac/mux.rs", &[Recording]),
-    ("apps/macos/src/mac/native.rs", &[Peek]),
+    ("apps/macos/src/mac/native.rs", &[Peek, InputQueue]),
     ("apps/macos/src/mac/notify.rs", &[Takeover, WindowAccess]),
     ("apps/macos/src/mac/permissions.rs", &[Settings]),
     ("apps/macos/src/mac/playback.rs", &[Recording]),
@@ -102,6 +102,7 @@ pub const PATHS: &[(&str, &[Area])] = &[
     ),
     ("crates/model/src/claims.rs", &[Windows]),
     ("crates/model/src/devtools.rs", &[Browser]),
+    ("crates/model/src/glow.rs", &[InputQueue, InputMethod]),
     ("crates/model/src/input_queue.rs", &[InputQueue]),
     ("crates/model/src/key_window.rs", &[AgentInput]),
     ("crates/model/src/keychord.rs", &[AgentInput]),
@@ -465,6 +466,7 @@ mod tests {
         assert_eq!(
             names(&picked.scripts),
             [
+                "glow",
                 "ime",
                 "launchhere",
                 "nativeclick",

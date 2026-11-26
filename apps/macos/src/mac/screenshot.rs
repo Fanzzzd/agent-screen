@@ -472,6 +472,66 @@ pub fn window(target: WindowTarget, size: (f64, f64)) -> Result<Shot, String> {
     encode(&image, Format::Jpeg)
 }
 
+/// The alpha of window `window_id` alone, `size` pixels, one byte a pixel,
+/// rows top to bottom: what it adds over whatever lies below. For
+/// `debugGlow`, which reads Agent Screen's own Red Glow. Blocking.
+pub fn window_alpha(window_id: u32, size: (usize, usize)) -> Result<Vec<u8>, String> {
+    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+    let (width, height) = size;
+    let content = SCShareableContent::create()
+        .with_on_screen_windows_only(true)
+        .get()
+        .map_err(|e| format!("could not list windows: {e}"))?;
+    let window = content
+        .windows()
+        .into_iter()
+        .find(|w| w.window_id() == window_id)
+        .ok_or("the window is not capturable")?;
+    let filter = SCContentFilter::create()
+        .with_window(&window)
+        .build()
+        .map_err(|e| e.to_string())?;
+    let mut config = SCStreamConfiguration::new()
+        .with_width(width as u32)
+        .with_height(height as u32)
+        .with_shows_cursor(false);
+    let _ = config.set_ignores_shadows_single_window(true);
+    let _ = config.set_should_be_opaque(false);
+    config.set_background_color_rgba(0.0, 0.0, 0.0, 0.0);
+    let image = SCScreenshotManager::capture_image(&filter, &config).map_err(|e| e.to_string())?;
+    let space = objc2_core_graphics::CGColorSpace::new_device_rgb().ok_or("no color space")?;
+    let context = unsafe {
+        objc2_core_graphics::CGBitmapContextCreate(
+            std::ptr::null_mut(),
+            width,
+            height,
+            8,
+            width * 4,
+            Some(&space),
+            objc2_core_graphics::CGImageAlphaInfo::PremultipliedLast.0,
+        )
+    }
+    .ok_or("could not draw the window")?;
+    unsafe {
+        CGContextDrawImage(
+            objc2_core_foundation::CFRetained::as_ptr(&context)
+                .as_ptr()
+                .cast(),
+            CGRect::new(
+                CGPoint::new(0.0, 0.0),
+                CGSize::new(width as f64, height as f64),
+            ),
+            image.as_ptr().cast(),
+        );
+        let data = objc2_core_graphics::CGBitmapContextGetData(Some(&context)) as *const u8;
+        if data.is_null() {
+            return Err("could not read the window".into());
+        }
+        let (pixels, _) = std::slice::from_raw_parts(data, width * height * 4).as_chunks::<4>();
+        Ok(pixels.iter().map(|p| p[3]).collect())
+    }
+}
+
 #[link(name = "ImageIO", kind = "framework")]
 unsafe extern "C" {
     fn CGImageDestinationCreateWithData(

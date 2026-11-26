@@ -3,9 +3,11 @@
 //! "nihao" and space into 你好, where plain typing gives the letters, and a
 //! key through it starts a composition. The
 //! user's front app, input source and AeroSpace workspace are the same
-//! after. It waits for the user to leave the keyboard and pointer alone for
-//! 3 s, since the call borrows their keyboard, and skips after 60 s, or
-//! when a password field on the user's screen has the keyboard.
+//! after. The Red Glow is Live while the keys go in and off after. It
+//! waits for the user to leave the keyboard and pointer alone for 3 s,
+//! since the call borrows their keyboard, and skips after 60 s, or when a
+//! password field on the user's screen has the keyboard. The Input Bar's
+//! Stop ends a longer borrow early.
 //!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e ime
 
@@ -98,10 +100,36 @@ fn test(field: &Path) -> Result<()> {
         "/opt/homebrew/bin/aerospace",
         &["list-workspaces", "--focused"],
     );
-    let typed = control.call(
-        "type",
-        json!({ "sessionKey": key, "displayId": id, "text": "nihao ", "viaInputMethod": true, "inputSource": PINYIN }),
-    );
+    // The glow's state through the borrow, read on a second connection.
+    let borrowing = std::sync::atomic::AtomicBool::new(true);
+    let (typed, seen) = std::thread::scope(|scope| {
+        let watcher = scope.spawn(|| {
+            let mut seen = Vec::new();
+            let Ok(glow) = Control::connect() else {
+                return seen;
+            };
+            while borrowing.load(std::sync::atomic::Ordering::Relaxed) {
+                if let Ok(g) = glow.call("debugGlow", json!({ "alpha": false }))
+                    && let Some(state) = g["state"].as_str()
+                    && seen.last().map(String::as_str) != Some(state)
+                {
+                    seen.push(state.to_string());
+                }
+                sleep_ms(30);
+            }
+            seen
+        });
+        let typed = control.call(
+            "type",
+            json!({ "sessionKey": key, "displayId": id, "text": "nihao ", "viaInputMethod": true, "inputSource": PINYIN }),
+        );
+        borrowing.store(false, std::sync::atomic::Ordering::Relaxed);
+        (typed, watcher.join().unwrap_or_default())
+    });
+    let after = control
+        .call("debugGlow", json!({ "alpha": false }))
+        .map(|g| g["state"].as_str().unwrap_or_default().to_string())
+        .unwrap_or_default();
     if let Err(e) = &typed
         && e.to_string().contains("secure input")
     {
@@ -116,6 +144,11 @@ fn test(field: &Path) -> Result<()> {
         "typing through the input method succeeds",
         typed.is_ok(),
         format!("{typed:?}"),
+    );
+    check(
+        "the Red Glow is Live during the Keyboard Borrow and off after",
+        seen.iter().any(|s| s == "live") && after == "off",
+        format!("seen {seen:?}, after {after}"),
     );
     sleep_ms(300);
     check(
@@ -165,6 +198,47 @@ fn test(field: &Path) -> Result<()> {
         "a character with no key is refused",
         refused.is_err(),
         format!("{refused:?}"),
+    );
+    // The Input Bar's Stop during a borrow: no key goes after the one
+    // going then, and the agent hears the user stopped it.
+    let id_for_stop = id.clone();
+    let (halted, pressed) = std::thread::scope(|scope| {
+        let stopper = scope.spawn(move || {
+            let Ok(other) = Control::connect() else {
+                return false;
+            };
+            for _ in 0..200 {
+                if other
+                    .call("debugGlow", json!({ "alpha": false }))
+                    .is_ok_and(|g| g["state"] == "live")
+                {
+                    return other
+                        .call(
+                            "debugShow",
+                            json!({ "sessionKey": key, "surface": "input-bar-stop", "displayId": id_for_stop }),
+                        )
+                        .is_ok();
+                }
+                sleep_ms(20);
+            }
+            false
+        });
+        let halted = control.call(
+            "type",
+            json!({ "sessionKey": key, "displayId": id, "text": "abcdefghij".repeat(6), "viaInputMethod": true, "inputSource": PINYIN }),
+        );
+        (halted, stopper.join().unwrap_or(false))
+    });
+    let said = format!("{halted:?}");
+    check(
+        "Stop on the Input Bar ends a borrow early, and the agent hears the user pressed it",
+        pressed && said.contains("pressed Stop after") && !said.contains("after 60 of 60"),
+        &said,
+    );
+    check(
+        "the user's input source is back after Stop",
+        probe(&["source"])? == source,
+        &source,
     );
     control.call("endDisplay", json!({ "sessionKey": key, "displayId": id }))?;
     Ok(())

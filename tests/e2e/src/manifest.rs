@@ -294,6 +294,7 @@ pub const SCRIPTS: &[Script] = &[
     script("filedrag", &[InputQueue, AgentInput, Browser], Full, Real, 1).hands_off(),
     script("firstclick", &[Browser, AgentInput], Full, Agent, 1),
     script("flash", &[Performance, Windows], Full, Agent, 1).hands_off().manual(MEASURES),
+    script("glow", &[InputQueue, InputMethod], Full, Hook, 1).hands_off(),
     script("handoverclicks", &[Browser, AgentInput, WindowAccess], Full, Agent, 1).hands_off(),
     script("handoverfront", &[WindowAccess, AgentInput], Full, Hook, 2),
     script("helpanswers", &[Takeover, WindowAccess], Full, Hook, 2).hands_off(),

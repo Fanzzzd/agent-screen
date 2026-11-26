@@ -3,7 +3,7 @@
 //! has a splitter that follows pointermove only while the session's left
 //! button reads held, which no background route can make it do. A drag
 //! there waits for approval; Allow, as the card's button, lets it run
-//! with the pointer: the splitter follows it, a red edge shows on your
+//! with the pointer: the splitter follows it, the Red Glow shows on your
 //! screens meanwhile, and the drag reports route real_input. A move of the
 //! pointer the executor didn't make takes the approval back at once; the
 //! cursor guard then keeps the pointer off the Agent Display. A second approved drag runs, and when
@@ -229,7 +229,7 @@ fn test(
         format!("{} {dragged:?}", now["title"].as_str().unwrap_or_default()),
     );
     check(
-        "a red edge shows on the user's screens during the approval",
+        "the Red Glow shows on the user's screens during the approval",
         shown > 0,
         format!("{shown} border window(s)"),
     );
