@@ -26,6 +26,10 @@ cd "$(dirname "$0")/.."
 target="$(cd ../.. && pwd)/target"
 version="$(awk -F'"' '/^version/ { print $2; exit }' Cargo.toml)"
 profile="${NOTARY_PROFILE:-agent-screen}"
+# The macOS the app needs: bundle.sh builds for it, and the appcast tells
+# older Macs to skip the update.
+minimum="$(/usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion" resources/Info.plist)"
+export MACOSX_DEPLOYMENT_TARGET="$minimum"
 
 identity="${AGENTSCREEN_SIGN_IDENTITY:-$(security find-identity -v -p codesigning |
   awk -F'"' 'index($2, "Developer ID Application") == 1 { print $2; exit }')}"
@@ -87,7 +91,6 @@ if [[ -n "$key_file" ]]; then
   ../../.github/scripts/check-sparkle-key.sh "$key_file" "$plist"
   sparkle="$(scripts/sparkle.sh)"
   signature="$("$sparkle/bin/sign_update" --ed-key-file "$key_file" "$dmg")"
-  minimum="$(/usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion" "$plist")"
   cat >"$appcast" <<APPCAST
 <?xml version="1.0" encoding="utf-8"?>
 <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
