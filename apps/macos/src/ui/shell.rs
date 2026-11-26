@@ -257,6 +257,15 @@ pub struct Shell {
     mode_waiting: Option<crate::mac::activity::Waiting>,
     /// A look at the hands for a front hold the mode may start.
     front_opening: bool,
+    /// Settings shows YOLO's confirmation; the glow preview Settings asked
+    /// for, with its caption; the icon's red as last drawn.
+    yolo_confirm: bool,
+    glow_caption: bool,
+    icon_yolo: bool,
+    autonomy_seen: Option<(
+        agent_screen_model::autonomy::Mode,
+        Option<agent_screen_model::autonomy::YoloEnd>,
+    )>,
     /// The Red Glow's state as last shown, and a preview `debugShow` asked
     /// for with its number, which its timer ends unless a newer one came.
     glow: Glow,
@@ -969,6 +978,10 @@ impl Shell {
             mode_opened: None,
             mode_waiting: None,
             front_opening: false,
+            yolo_confirm: false,
+            glow_caption: false,
+            icon_yolo: false,
+            autonomy_seen: None,
             restoring: false,
             glow: Glow::Off,
             glow_preview: None,
@@ -1104,9 +1117,7 @@ impl Shell {
             }
             Native::Menu(action) => self.menu(action, cx),
             Native::UserTookInput => self.user_took_input(cx),
-            Native::YoloEnds(why) => {
-                self.core.update(cx, |core, cx| core.end_yolo(why, cx));
-            }
+            Native::YoloEnds(why) => self.yolo_ends(why, cx),
             Native::StopChord => self.stop_autonomy(crate::autonomy::Source::Chord, cx),
             Native::GraceOver => {
                 if self.core.read(cx).input_queue.queue.mode_grant().is_some() {
@@ -1205,6 +1216,15 @@ impl Shell {
             self.working = working;
             self.icon.set_working(working);
         }
+        // Red while YOLO is on (ADR 0025); Settings follows the mode.
+        let yolo = core.autonomy.mode() == agent_screen_model::autonomy::Mode::Yolo;
+        if yolo != self.icon_yolo {
+            self.icon_yolo = yolo;
+            self.icon.set_yolo(yolo);
+        }
+        let seen = (core.autonomy.mode(), core.autonomy.setting.yolo_ended);
+        let push_setup = self.setup.is_some() && self.autonomy_seen != Some(seen);
+        self.autonomy_seen = Some(seen);
         for display in &core.displays.list {
             let task = display.owner.as_ref().map_or("", |o| o.title.as_str());
             let input = core.input_queue.queue.waiting().find(|r| {
@@ -1353,6 +1373,9 @@ impl Shell {
             // The once-a-second recount covers windows moving; agent
             // clicks and moves notify far more often.
             self.refresh_counts(cx);
+        }
+        if push_setup {
+            self.push_setup(cx);
         }
         self.sync_card(cx);
     }
@@ -1677,6 +1700,11 @@ impl Shell {
     /// Preview the Red Glow in `glow`, or end the preview with Off. It ends
     /// by itself after `glow::PREVIEW_MS`.
     fn preview_glow(&mut self, glow: Glow, cx: &mut Context<Self>) {
+        self.preview_glow_for(glow, glow::PREVIEW_MS, cx);
+    }
+
+    /// As `preview_glow`, for `ms`.
+    fn preview_glow_for(&mut self, glow: Glow, ms: u64, cx: &mut Context<Self>) {
         self.glow_previews += 1;
         let number = self.glow_previews;
         self.glow_preview = (glow != Glow::Off).then_some((glow, number));
@@ -1686,16 +1714,112 @@ impl Shell {
         }
         cx.spawn(async move |this, cx| {
             cx.background_executor()
-                .timer(Duration::from_millis(glow::PREVIEW_MS))
+                .timer(Duration::from_millis(ms))
                 .await;
             let _ = this.update(cx, |shell, cx| {
                 if shell.glow_preview.is_some_and(|(_, n)| n == number) {
                     shell.glow_preview = None;
+                    shell.glow_caption = false;
                     shell.sync_glow(cx);
+                    shell.push_setup(cx);
                 }
             });
         })
         .detach();
+    }
+
+    // MARK: Autonomy Mode
+
+    /// The user picked `mode` in Settings, the menu or a preview: Ask and
+    /// Auto apply at once; YOLO opens Settings at the Autonomy row with its
+    /// confirmation, the one place it is turned on (ADR 0025).
+    pub fn choose_autonomy(
+        &mut self,
+        mode: agent_screen_model::autonomy::Mode,
+        source: crate::autonomy::Source,
+        cx: &mut Context<Self>,
+    ) {
+        use agent_screen_model::autonomy::Mode;
+        if mode == Mode::Yolo && crate::autonomy::mode() != Mode::Yolo {
+            self.yolo_confirm = true;
+            self.open_setup(cx);
+            self.push_setup(cx);
+            return;
+        }
+        self.yolo_confirm = false;
+        self.core
+            .update(cx, |core, cx| core.choose_autonomy(mode, source, cx));
+        self.push_setup(cx);
+        self.drive_queue(cx);
+    }
+
+    /// Turn On YOLO, in the confirmation: the glow previews once for 2 s.
+    pub fn confirm_yolo(&mut self, source: crate::autonomy::Source, cx: &mut Context<Self>) {
+        self.yolo_confirm = false;
+        let changed = self.core.update(cx, |core, cx| {
+            core.choose_autonomy(agent_screen_model::autonomy::Mode::Yolo, source, cx)
+        });
+        if changed {
+            self.preview_glow_for(Glow::Live, 2_000, cx);
+        }
+        self.push_setup(cx);
+        self.drive_queue(cx);
+    }
+
+    /// The Mac locked or slept, or the session was switched out: YOLO
+    /// ends, and its grant, front hold or borrow with it.
+    pub fn yolo_ends(
+        &mut self,
+        why: agent_screen_model::autonomy::YoloEnd,
+        cx: &mut Context<Self>,
+    ) {
+        let ended = self.core.update(cx, |core, cx| core.end_yolo(why, cx));
+        if ended {
+            crate::mac::ime::stop_typing();
+            if self.core.read(cx).input_queue.queue.mode_grant().is_some() {
+                self.revoke_input(cx);
+            }
+        }
+        self.push_setup(cx);
+    }
+
+    pub fn cancel_yolo(&mut self, cx: &mut Context<Self>) {
+        self.yolo_confirm = false;
+        self.push_setup(cx);
+    }
+
+    /// Settings' "Show the Red Glow": Live for 3 s, with its caption.
+    pub fn show_red_glow(&mut self, cx: &mut Context<Self>) {
+        self.glow_caption = true;
+        self.preview_glow_for(Glow::Live, 3_000, cx);
+        self.push_setup(cx);
+    }
+
+    /// Hand Over or Keep on display `id`'s waiting Window Request line.
+    pub fn answer_window_wait(
+        &mut self,
+        id: DisplayId,
+        answer: crate::autonomy::WaitAnswer,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.core
+            .update(cx, |core, cx| core.answer_window_wait(id, answer, cx))
+    }
+
+    /// "Let the agent continue" on the "Waiting for your mouse" line: the
+    /// user's own Allow, which opens an ordinary grant.
+    pub fn allow_hands(&mut self, id: DisplayId, cx: &mut Context<Self>) {
+        let previewed = self.core.update(cx, |core, cx| {
+            let had = core.input_queue.hands_preview.remove(&id);
+            cx.notify();
+            had
+        });
+        if previewed {
+            log::info!("display {id}: the hands line's preview was answered");
+            return;
+        }
+        let approval = self.core.read(cx).input_queue.queue.approval();
+        self.answer_input(approval, true, cx);
     }
 
     /// What `debugGlow` reports of the shell: the state, the preview, how
@@ -2160,7 +2284,21 @@ impl Shell {
         if self.core.read(cx).input_queue.queue.grant().is_some() {
             self.revoke_input(cx);
         }
+        // The Input Bar says "Switched to Ask" for 3 s.
+        input_bar::note_switched();
+        self.sync_bar(true, cx);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(input_bar::SWITCHED_MS + 50))
+                .await;
+            let _ = this.update(cx, |shell, cx| {
+                let granted = shell.core.read(cx).input_queue.queue.grant().is_some();
+                shell.sync_bar(granted, cx);
+            });
+        })
+        .detach();
         self.drive_queue(cx);
+        self.push_setup(cx);
     }
 
     /// In Auto or YOLO, start the front hold for the oldest front request
@@ -2696,6 +2834,15 @@ impl Shell {
     /// Which picture the menu bar icon shows.
     pub fn icon_state(&self) -> &'static str {
         self.icon.state()
+    }
+
+    pub fn icon_tint(&self) -> Option<&'static str> {
+        self.icon.tint()
+    }
+
+    /// Whether Settings shows YOLO's confirmation, for `debugAutonomy`.
+    pub fn yolo_confirming(&self) -> bool {
+        self.yolo_confirm
     }
 
     pub fn asking_count(&self) -> usize {
@@ -3845,6 +3992,7 @@ impl Shell {
                 MenuAction::AllowNewDisplays,
             );
         }
+        self.autonomy_menu(&menu, cx);
         let create = menu.action(t("New Display", "新建显示器"), MenuAction::CreateDisplay);
         native::set_key_equivalent(&create, "n", true, false, false, false);
         menu.action(t("Recordings…", "录制列表…"), MenuAction::OpenRecordings);
@@ -4057,6 +4205,10 @@ impl Shell {
             MenuAction::ToggleReports => {
                 let on = !self.reports.automatic;
                 self.set_reports_automatic(on, cx);
+            }
+            MenuAction::StopAutonomy => self.stop_autonomy(crate::autonomy::Source::Menu, cx),
+            MenuAction::ChooseAutonomy { mode } => {
+                self.choose_autonomy(mode, crate::autonomy::Source::Menu, cx)
             }
             MenuAction::CheckForUpdates => update::check(),
             MenuAction::InstallUpdate => self.install_update(cx),
@@ -4727,6 +4879,42 @@ impl Shell {
     /// Whether AeroSpace runs, for a bug report.
     pub fn aerospace_running(&self) -> bool {
         self.aerospace.is_some()
+    }
+
+    /// Above New Display: Stop and Switch to Ask while the mode is Auto or
+    /// YOLO, then the Autonomy submenu (ADR 0025).
+    fn autonomy_menu(&self, menu: &native::Menu, cx: &App) {
+        use agent_screen_model::autonomy::Mode;
+        let autonomy = &self.core.read(cx).autonomy;
+        let current = autonomy.mode();
+        if current.acts() {
+            let stop = menu.action(
+                t("Stop and Switch to Ask", "停止并切换到询问"),
+                MenuAction::StopAutonomy,
+            );
+            native::set_key_equivalent(&stop, ".", true, false, true, true);
+        }
+        let sub = native::Menu::new("Autonomy");
+        for (mode, title) in [
+            (Mode::Ask, t("Ask", "询问")),
+            (Mode::Auto, t("Auto", "自动")),
+            (Mode::Yolo, t("YOLO…", "YOLO…")),
+        ] {
+            let item = sub.action(title, MenuAction::ChooseAutonomy { mode });
+            if mode == current {
+                native::set_checked(&item);
+            }
+        }
+        if let Some(why) = autonomy
+            .setting
+            .yolo_ended
+            .filter(|_| current != Mode::Yolo)
+        {
+            sub.disabled(super::setup::yolo_ended_line(why));
+        }
+        let mode = super::setup::mode_name(current);
+        menu.submenu(&tf!("Autonomy: {mode}", "自主模式：{mode}"), sub);
+        menu.separator();
     }
 
     /// The menu's Agent Bug Reports: what waits, what was opened, and the
@@ -5598,8 +5786,17 @@ impl Shell {
         };
         let moving = self.moving.clone();
         let reset = self.reset.clone();
+        let autonomy = {
+            let a = &self.core.read(cx).autonomy;
+            (a.mode(), a.setting.yolo_ended)
+        };
+        let yolo_confirm = self.yolo_confirm;
+        let glow_caption = self.glow_caption && self.glow_preview.is_some();
         if handle
             .update(cx, |setup, _, cx| {
+                (setup.autonomy, setup.yolo_ended) = autonomy;
+                setup.yolo_confirm = yolo_confirm;
+                setup.glow_caption = glow_caption;
                 setup.aerospace = aerospace;
                 setup.pinned = pinned;
                 setup.wallpaper = wallpaper;

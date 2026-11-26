@@ -828,12 +828,16 @@ fn debug_autonomy(core: &Entity<Core>, cx: &mut AsyncApp) -> Value {
 
 fn debug_icon(cx: &mut AsyncApp) -> Result<Value, ControlError> {
     let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
-    let (state, asking_count) = shell
-        .update(cx, |shell, _| (shell.icon_state(), shell.asking_count()))
+    let (state, asking_count, tint) = shell
+        .update(cx, |shell, _| {
+            (shell.icon_state(), shell.asking_count(), shell.icon_tint())
+        })
         .map_err(|e| ControlError::failed(e.to_string()))?;
     Ok(json!({
         "state": state,
         "askingCount": asking_count,
+        "mode": crate::autonomy::mode().as_str(),
+        "tint": tint,
     }))
 }
 
@@ -1054,13 +1058,39 @@ async fn debug_show(
         }
         use crate::autonomy::Source;
         use agent_screen_model::autonomy::YoloEnd;
-        let changed = core.update(cx, |c, cx| match change {
-            AutonomyChange::Choose(mode) => c.choose_autonomy(mode, Source::Debug, cx),
-            AutonomyChange::Stop => c.stop_autonomy(Source::Debug, cx),
-            AutonomyChange::Lock => c.end_yolo(YoloEnd::Locked, cx),
-            AutonomyChange::Sleep => c.end_yolo(YoloEnd::Slept, cx),
-        });
-        return Ok(json!({ "changed": changed, "mode": crate::autonomy::mode().as_str() }));
+        let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
+        let before = crate::autonomy::mode();
+        let done = shell
+            .update(cx, |shell, cx| -> Result<(), ControlError> {
+                match change {
+                    AutonomyChange::Setup => shell.open_setup(cx),
+                    AutonomyChange::Choose(mode) => {
+                        shell.choose_autonomy(mode, Source::Settings, cx)
+                    }
+                    AutonomyChange::Confirm if !shell.yolo_confirming() => {
+                        return Err(ControlError::invalid(
+                            "YOLO's confirmation is not showing: debugShow autonomy-yolo first",
+                        ));
+                    }
+                    AutonomyChange::Confirm => shell.confirm_yolo(Source::Settings, cx),
+                    AutonomyChange::Cancel => shell.cancel_yolo(cx),
+                    AutonomyChange::Stop => shell.stop_autonomy(Source::Chord, cx),
+                    AutonomyChange::Lock => shell.yolo_ends(YoloEnd::Locked, cx),
+                    AutonomyChange::Sleep => shell.yolo_ends(YoloEnd::Slept, cx),
+                }
+                Ok(())
+            })
+            .map_err(|e| ControlError::failed(e.to_string()))?;
+        done?;
+        let confirming = shell
+            .update(cx, |shell, _| shell.yolo_confirming())
+            .unwrap_or(false);
+        let mode = crate::autonomy::mode();
+        return Ok(json!({
+            "changed": mode != before,
+            "mode": mode.as_str(),
+            "confirming": confirming,
+        }));
     }
     // The display's waiting Window Request in Auto, and its buttons.
     if let Some(answer) = match surface.as_str() {
@@ -1070,20 +1100,58 @@ async fn debug_show(
         _ => None,
     } {
         usable(core, connection, p, id, "debugShow", cx)?;
+        let app = p.string("app").unwrap_or_else(|| "Finder".into());
         return core.update(cx, |c, cx| {
+            // With none waiting, a preview: window 0, which nothing moves.
+            if !c.window_waits.contains_key(&id) {
+                if answer.is_some() {
+                    return Err(ControlError::invalid(
+                        "no Window Request is waiting on this display",
+                    ));
+                }
+                let named = agent_screen_model::request::NamedWindow {
+                    target: crate::model::WindowTarget {
+                        pid: 0,
+                        window_id: 0,
+                    },
+                    app,
+                    title: String::new(),
+                };
+                let _ = c.wait_for_window(id, named, cx);
+            }
             let Some(wait) = c.window_waits.get(&id) else {
-                return Err(ControlError::invalid(
-                    "no Window Request is waiting on this display",
-                ));
+                return Err(ControlError::invalid("no Window Request is waiting"));
             };
+            let preview = wait.window.target.window_id == 0;
             let line = json!({
                 "windowId": wait.window.target.window_id,
                 "app": wait.window.app,
                 "sinceS": wait.since.elapsed().as_secs(),
+                "preview": preview,
             });
+            let serial = wait.serial;
             let answered = answer.is_some_and(|a| c.answer_window_wait(id, a, cx));
+            if answer.is_some() && preview {
+                c.end_window_wait(id, serial, cx);
+            }
             Ok(json!({ "wait": line, "answered": answered }))
         });
+    }
+    // In Auto, real input waiting for the user's hands: its line, and "Let
+    // the agent continue", which is the user's Allow.
+    if matches!(surface.as_str(), "hands-wait" | "hands-wait-continue") {
+        usable(core, connection, p, id, "debugShow", cx)?;
+        if surface == "hands-wait" {
+            core.update(cx, |c, cx| {
+                c.input_queue.hands_preview.insert(id);
+                cx.notify();
+            });
+        } else {
+            let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
+            let _ = shell.update(cx, |shell, cx| shell.allow_hands(id, cx));
+        }
+        let line = core.read_with(cx, |c, _| c.input_queue.hands_line(id));
+        return Ok(json!({ "line": line }));
     }
     // Allow itself, through the shell, comes after this.
     if matches!(surface.as_str(), "input-queue" | "input-queue-approved") {
@@ -1165,7 +1233,10 @@ async fn debug_show(
 /// A debugShow surface that changes the Autonomy Mode as the user would.
 #[derive(Clone, Copy)]
 enum AutonomyChange {
+    Setup,
     Choose(agent_screen_model::autonomy::Mode),
+    Confirm,
+    Cancel,
     Stop,
     Lock,
     Sleep,
@@ -1174,9 +1245,12 @@ enum AutonomyChange {
 fn autonomy_surface(surface: &str) -> Option<AutonomyChange> {
     use agent_screen_model::autonomy::Mode;
     Some(match surface {
+        "setup-autonomy" => AutonomyChange::Setup,
         "autonomy-ask" => AutonomyChange::Choose(Mode::Ask),
         "autonomy-auto" => AutonomyChange::Choose(Mode::Auto),
-        "autonomy-yolo-confirm" => AutonomyChange::Choose(Mode::Yolo),
+        "autonomy-yolo" => AutonomyChange::Choose(Mode::Yolo),
+        "autonomy-yolo-confirm" => AutonomyChange::Confirm,
+        "autonomy-yolo-cancel" => AutonomyChange::Cancel,
         "autonomy-stop" => AutonomyChange::Stop,
         "autonomy-lock" => AutonomyChange::Lock,
         "autonomy-sleep" => AutonomyChange::Sleep,

@@ -211,7 +211,9 @@ pub enum CardNote {
 /// Who changed the mode, for the log.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
-    Debug,
+    Settings,
+    Menu,
+    InputBar,
     /// The Stop chord, ⌃⌥⌘..
     Chord,
 }
@@ -219,7 +221,9 @@ pub enum Source {
 impl Source {
     fn as_str(self) -> &'static str {
         match self {
-            Source::Debug => "debug",
+            Source::Settings => "settings",
+            Source::Menu => "menu",
+            Source::InputBar => "input bar",
             Source::Chord => "stop chord",
         }
     }

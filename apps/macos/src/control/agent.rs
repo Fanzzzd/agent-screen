@@ -8726,19 +8726,21 @@ async fn queued_drag(
         }
         Some("stopped") if r["stopReason"] != "Replaced" && r["stopReason"] != "Withdrawn" => {
             Err(ControlError::failed(format!(
-                "The drag with the user's pointer stopped partway ({}{}); the button was let go. Take a screenshot before retrying. Input queue status: {state}",
+                "The drag with the user's pointer stopped partway ({}{}); the button was let go. Take a screenshot before retrying.{} Input queue status: {state}",
                 r["stopReason"].as_str().unwrap_or("stopped"),
                 r["failure"]
                     .as_str()
                     .map(|f| format!(": {f}"))
                     .unwrap_or_default(),
+                interrupted_note(&state),
             )))
         }
         _ => Err(ControlError {
             blocked: None,
             code: "input_pending",
             message: format!(
-                "{why} No drag or press was sent. Input queue status: {state}. {}",
+                "{why} No drag or press was sent. Input queue status: {state}. {}{}",
+                mode_note(&state),
                 if plan.is_some() {
                     "The drag runs with the user's pointer once they allow it and while your call waits: retry the same drag with real_input to wait again, or use input_queue to inspect or withdraw it."
                 } else {
@@ -8746,6 +8748,30 @@ async fn queued_drag(
                 }
             ),
         }),
+    }
+}
+
+/// In Auto or YOLO, what an `input_pending` adds: the request asks no
+/// card and runs once the user's hands rest, while a call waits on it.
+fn mode_note(state: &Value) -> String {
+    let mode = crate::autonomy::mode();
+    let waiting = state["requests"][0]["waitingOn"].as_str();
+    match waiting {
+        Some(on) if mode.acts() => format!(
+            "The user's Autonomy Mode is {}: no card asks them; the request runs once their hands rest (waitingOn: {on}), while the same call or input_queue wait waits. ",
+            mode.as_str()
+        ),
+        _ => String::new(),
+    }
+}
+
+/// A loan the user stopped in Auto: the next grant waits longer.
+fn interrupted_note(state: &Value) -> &'static str {
+    let stopped_by_user = state["requests"][0]["stopReason"].as_str() == Some("User");
+    if stopped_by_user && crate::autonomy::mode() == autonomy::Mode::Auto {
+        " The next attempt needs the user's hands at rest for 30 s."
+    } else {
+        ""
     }
 }
 
@@ -8890,8 +8916,9 @@ async fn queued_click(
                 blocked: None,
                 code: "input_pending",
                 message: format!(
-                    "The {} at ({x}, {y}) waits for the user to allow their pointer. No click was sent, not on the background route either. Input queue status: {state}. {next}",
-                    verb.to_lowercase()
+                    "The {} at ({x}, {y}) waits for the user to allow their pointer. No click was sent, not on the background route either. Input queue status: {state}. {}{next}",
+                    verb.to_lowercase(),
+                    mode_note(&state),
                 ),
             });
         }
@@ -9015,7 +9042,8 @@ async fn queued_menu_press(
                 blocked: None,
                 code: "input_pending",
                 message: format!(
-                    "{label} needs a real click, as Electron takes an item pressed through accessibility for its shortcut. No click was sent, and the item was not pressed through accessibility either. Input queue status: {state}. {next}"
+                    "{label} needs a real click, as Electron takes an item pressed through accessibility for its shortcut. No click was sent, and the item was not pressed through accessibility either. Input queue status: {state}. {}{next}",
+                    mode_note(&state),
                 ),
             });
         }

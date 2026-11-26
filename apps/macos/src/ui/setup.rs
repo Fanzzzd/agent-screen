@@ -12,6 +12,7 @@ use crate::mac::aerospace::Ignoring;
 use crate::mac::native::{self, MenuAction, Native};
 use crate::mac::notify;
 use crate::mac::permissions::{Permission, Status};
+use agent_screen_model::autonomy::{Mode, YoloEnd};
 use agent_screen_model::location::Temporary;
 use gpui::{
     AnyElement, App, Context, FocusHandle, FontWeight, Hsla, InteractiveElement, IntoElement,
@@ -79,6 +80,13 @@ pub struct Setup {
     pub temporary: Option<Temporary>,
     pub moving: MoveStep,
     pub reset: ResetStep,
+    /// The Autonomy Mode, why YOLO last ended by itself, whether YOLO's
+    /// confirmation shows, and whether the glow preview's caption does
+    /// (ADR 0025).
+    pub autonomy: Mode,
+    pub yolo_ended: Option<YoloEnd>,
+    pub yolo_confirm: bool,
+    pub glow_caption: bool,
     icon: Arc<gpui::Image>,
 }
 
@@ -243,6 +251,10 @@ impl Setup {
             temporary: None,
             moving: MoveStep::Idle,
             reset: ResetStep::Idle,
+            autonomy: crate::autonomy::mode(),
+            yolo_ended: None,
+            yolo_confirm: false,
+            glow_caption: false,
             icon,
         }
     }
@@ -370,6 +382,11 @@ impl Render for Setup {
                     .into_any_element()
                 }),
                 permissions,
+                &theme,
+            ))
+            .child(section(
+                t("Autonomy", "自主模式"),
+                vec![self.autonomy_row(&theme).into_any_element()],
                 &theme,
             ))
             .child(section(
@@ -706,6 +723,214 @@ fn link(
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .keyboard(action, theme)
         .child(label)
+}
+
+/// The mode's name, in the menu and Peek.
+pub fn mode_name(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Ask => t("Ask", "询问"),
+        Mode::Auto => t("Auto", "自动"),
+        Mode::Yolo => "YOLO",
+    }
+}
+
+/// The line under the segments, for the chosen mode.
+fn mode_line(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Ask => t(
+            "Agents ask before they take a window, your mouse or your keyboard.",
+            "agent 取用窗口、鼠标或键盘前先询问",
+        ),
+        Mode::Auto => t(
+            "Agents take windows you aren’t using and use your mouse and keyboard while they rest. Touch either to stop.",
+            "agent 取用你没在用的窗口，在鼠标和键盘空闲时使用，一碰即停",
+        ),
+        Mode::Yolo => t(
+            "Agents take windows, your mouse and your keyboard at once, even while you use them. ⌃⌥⌘. stops them.",
+            "agent 立即占用窗口、鼠标和键盘，你正在用也不等；按 ⌃⌥⌘. 停止",
+        ),
+    }
+}
+
+/// Why YOLO turned itself off, until the next change of mode.
+pub fn yolo_ended_line(why: YoloEnd) -> &'static str {
+    match why {
+        YoloEnd::Locked => t(
+            "YOLO turned off when your Mac locked.",
+            "Mac 锁定后 YOLO 已关闭",
+        ),
+        YoloEnd::Slept => t(
+            "YOLO turned off when your Mac slept.",
+            "Mac 睡眠后 YOLO 已关闭",
+        ),
+        YoloEnd::SwitchedOut => t(
+            "YOLO turned off when you switched users.",
+            "切换用户后 YOLO 已关闭",
+        ),
+        YoloEnd::Restarted => t(
+            "YOLO turned off when Agent Screen restarted.",
+            "Agent Screen 重启后 YOLO 已关闭",
+        ),
+        // Stop is the user's own act: no line.
+        YoloEnd::Stopped => "",
+    }
+}
+
+impl Setup {
+    /// Ask, Auto and YOLO in one control, the chosen mode's line, why YOLO
+    /// last ended, "Show the Red Glow", and YOLO's confirmation in place
+    /// (ADR 0025).
+    fn autonomy_row(&self, theme: &Theme) -> impl IntoElement {
+        let segments = [
+            (Mode::Ask, t("Ask", "询问")),
+            (Mode::Auto, t("Auto", "自动")),
+            (Mode::Yolo, "YOLO"),
+        ];
+        let control = div()
+            .flex()
+            .flex_none()
+            .p(px(2.))
+            .gap(px(2.))
+            .rounded_full()
+            .bg(theme.card)
+            .children(segments.map(|(mode, label)| {
+                let chosen = self.autonomy == mode;
+                let color = if mode == Mode::Yolo {
+                    theme.red
+                } else {
+                    theme.accent
+                };
+                let shell = self.shell.clone();
+                div()
+                    .id(gpui::ElementId::Name(
+                        format!("setup-autonomy-{}", mode.as_str()).into(),
+                    ))
+                    .role(Role::Button)
+                    .aria_label(label)
+                    .h(px(24.))
+                    .px(px(14.))
+                    .flex()
+                    .items_center()
+                    .rounded_full()
+                    .text_size(px(11.5))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .when(chosen, |d| {
+                        d.bg(color.opacity(0.9)).text_color(gpui::white())
+                    })
+                    .when(!chosen, |d| {
+                        d.text_color(theme.label)
+                            .hover(|s| s.bg(theme.control_hover))
+                    })
+                    .active(|s| s.opacity(0.7))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .keyboard(
+                        move |cx| {
+                            tell(&shell, cx, move |shell, cx| {
+                                shell.choose_autonomy(mode, crate::autonomy::Source::Settings, cx)
+                            })
+                        },
+                        theme,
+                    )
+                    .child(label)
+            }));
+        let glow = {
+            let shell = self.shell.clone();
+            link(
+                "setup-autonomy-glow",
+                t("Show the Red Glow", "预览红光"),
+                theme,
+                move |cx| tell(&shell, cx, |shell, cx| shell.show_red_glow(cx)),
+            )
+        };
+        let ended = self
+            .yolo_ended
+            .filter(|_| self.autonomy != Mode::Yolo)
+            .map(yolo_ended_line)
+            .filter(|line| !line.is_empty());
+        let confirm = self.yolo_confirm.then(|| {
+            let (go, cancel) = (self.shell.clone(), self.shell.clone());
+            div()
+                .mt(px(4.))
+                .p(px(12.))
+                .rounded(px(10.))
+                .bg(theme.red.opacity(0.08))
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(t("Turn on YOLO?", "开启 YOLO？")),
+                )
+                .child(
+                    div().text_size(px(11.5)).text_color(theme.secondary).child(t(
+                        "Agents won’t wait for you. Password fields, system prompts and protected apps stay out. YOLO turns off when your Mac locks or sleeps.",
+                        "agent 不再等你。密码框、系统提示和受保护的 app 除外。Mac 锁定或睡眠后 YOLO 自动关闭",
+                    )),
+                )
+                .child(
+                    div()
+                        .mt(px(6.))
+                        .flex()
+                        .justify_end()
+                        .gap(px(8.))
+                        .child(key_button(
+                            "setup-autonomy-yolo-cancel",
+                            t("Cancel", "取消").into(),
+                            None,
+                            theme,
+                            move |cx| tell(&cancel, cx, |shell, cx| shell.cancel_yolo(cx)),
+                        ))
+                        .child(key_button(
+                            "setup-autonomy-yolo-confirm",
+                            t("Turn On YOLO", "开启 YOLO").into(),
+                            Some(theme.red),
+                            theme,
+                            move |cx| {
+                                tell(&go, cx, |shell, cx| {
+                                    shell.confirm_yolo(crate::autonomy::Source::Settings, cx)
+                                })
+                            },
+                        )),
+                )
+        });
+        div()
+            .px(px(14.))
+            .py(px(12.))
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(control)
+                    .child(glow),
+            )
+            .child(
+                div()
+                    .text_size(px(11.5))
+                    .text_color(theme.secondary)
+                    .child(mode_line(self.autonomy)),
+            )
+            .when_some(ended, |d, line| {
+                d.child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(theme.secondary)
+                        .child(line),
+                )
+            })
+            .when(self.glow_caption, |d| {
+                d.child(div().text_size(px(11.)).text_color(theme.red).child(t(
+                    "This glow means an agent has your mouse or keyboard.",
+                    "出现红光表示 agent 正在用你的鼠标或键盘",
+                )))
+            })
+            .children(confirm)
+    }
 }
 
 /// docs/clients.md: each client's config.

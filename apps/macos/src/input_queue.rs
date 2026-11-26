@@ -82,6 +82,8 @@ pub struct InputQueue {
     /// `waitingOn` (`autonomy::Busy::waiting_on`), from the last look at
     /// the hands.
     pub waiting_on: Option<&'static str>,
+    /// Displays `debugShow hands-wait` shows the hands line on.
+    pub hands_preview: BTreeSet<DisplayId>,
 }
 
 /// What a front request's background run came to: the reply's result, or
@@ -239,6 +241,7 @@ impl Default for InputQueue {
             hold: None,
             line_ms: WAITING_LINE_MS,
             waiting_on: None,
+            hands_preview: BTreeSet::new(),
         }
     }
 }
@@ -887,6 +890,20 @@ impl InputQueue {
                 .is_some_and(|r| r.status == Status::Queued && !r.front && !r.ask_only)
     }
 
+    /// In Auto, whether real input on display `display` has waited
+    /// `HANDS_LINE_MS` for the user's hands: its tile says so, with "Let
+    /// the agent continue", which is the user's Allow.
+    pub fn hands_line(&self, display: DisplayId) -> bool {
+        self.hands_preview.contains(&display)
+            || (crate::autonomy::mode() == agent_screen_model::autonomy::Mode::Auto
+                && self.queue.waiting().any(|r| {
+                    r.owner.display == display
+                        && self.mode_waits(r.id)
+                        && r.times.elapsed_ms(self.now())
+                            >= agent_screen_model::user_activity::HANDS_LINE_MS
+                }))
+    }
+
     /// Whether any request waits for the mode.
     pub fn mode_wanted(&self) -> bool {
         self.queue
@@ -1027,8 +1044,14 @@ impl InputQueue {
                         || self.fronts.contains_key(&request.id),
                     "elapsedSeconds": seconds(request.times.elapsed_ms(self.now())),
                     "timing": self.timing(request.id, &request.times),
-                    "waitingOn": (state == "queued" && self.mode_waits(request.id))
-                        .then(|| self.waiting_on.unwrap_or("userActive")),
+                    "waitingOn": match state {
+                        "queued" if self.mode_waits(request.id) => {
+                            Some(self.waiting_on.unwrap_or("userActive"))
+                        }
+                        "queued" if self.asks(request.id) => Some("approval"),
+                        "approved" => Some("turn"),
+                        _ => None,
+                    },
                 })
             })
             .collect();
@@ -1036,6 +1059,10 @@ impl InputQueue {
             "executorAvailable": EXECUTOR_AVAILABLE,
             "mode": crate::autonomy::mode().as_str(),
             "grantActive": self.queue.grant().is_some(),
+            "openedBy": self.queue.grant().map(|_| match self.queue.mode_grant() {
+                Some(_) => "mode",
+                None => "user",
+            }),
             "elapsedSeconds": self.elapsed_seconds(),
             "waiting": self.queue.waiting().count(),
             "requests": requests,
@@ -1080,7 +1107,10 @@ mod tests {
         assert!(input.asks(id));
         assert!(!input.mode_waits(id));
         assert!(!input.mode_wanted());
-        assert!(input.status(&owner, Some(id), false)["requests"][0]["waitingOn"].is_null());
+        assert_eq!(
+            input.status(&owner, Some(id), false)["requests"][0]["waitingOn"],
+            "approval"
+        );
         assert!(input.approve(input.queue.approval()));
         assert_eq!(input.queue.mode_grant(), None);
         input.revoke();

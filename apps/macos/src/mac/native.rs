@@ -121,6 +121,12 @@ pub enum MenuAction {
     },
     /// Turn agents' bug reports on or off.
     ToggleReports,
+    /// Stop and Switch to Ask, in Auto and YOLO (ADR 0025).
+    StopAutonomy,
+    /// Ask or Auto at once; YOLO opens Settings with its confirmation.
+    ChooseAutonomy {
+        mode: agent_screen_model::autonomy::Mode,
+    },
     CheckForUpdates,
     /// Install the downloaded update and restart.
     InstallUpdate,
@@ -270,6 +276,8 @@ pub struct StatusIcon {
     asking_count: Cell<usize>,
     needs_setup: Cell<bool>,
     working: Cell<bool>,
+    /// YOLO is on: the icon is red in every state (ADR 0025).
+    yolo: Cell<bool>,
 }
 
 /// The icon's pictures, made by assets/status/make.py.
@@ -356,6 +364,7 @@ impl StatusIcon {
             asking_count: Cell::new(0),
             needs_setup: Cell::new(false),
             working: Cell::new(false),
+            yolo: Cell::new(false),
         };
         icon.redraw();
         icon
@@ -400,6 +409,17 @@ impl StatusIcon {
         } else {
             "idle"
         }
+    }
+
+    /// Red while YOLO is on.
+    pub fn set_yolo(&self, yolo: bool) {
+        self.yolo.set(yolo);
+        self.redraw();
+    }
+
+    /// The icon's tint for `debugIcon`: "red" while YOLO is on.
+    pub fn tint(&self) -> Option<&'static str> {
+        self.yolo.get().then_some("red")
     }
 
     /// The front screen filled while any display is in use.
@@ -484,7 +504,9 @@ impl StatusIcon {
         }
         button.setToolTip(Some(&NSString::from_str(&description)));
         // A development build shows purple, to tell it from the installed app.
-        let tint = if self.needs_setup.get() || asking_count > 0 {
+        let tint = if self.yolo.get() {
+            Some(NSColor::systemRedColor())
+        } else if self.needs_setup.get() || asking_count > 0 {
             Some(NSColor::systemOrangeColor())
         } else {
             agent_screen_mcp::endpoint::is_dev_build().then(NSColor::systemPurpleColor)

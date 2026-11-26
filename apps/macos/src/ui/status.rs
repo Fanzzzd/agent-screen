@@ -150,7 +150,83 @@ pub struct AccessLine {
     pub paused: bool,
 }
 
+/// What a display's tile and the Viewer header offer while its agent
+/// waits: "Let the agent continue" for an action waiting on the user's
+/// front app, Hand Over and Keep for a Window Request waiting in Auto, and
+/// "Let the agent continue" for real input waiting in Auto, which is the
+/// user's Allow (ADR 0025).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Wait {
+    #[default]
+    None,
+    Front,
+    Window,
+    Hands,
+}
+
+/// A wait the Autonomy Mode has, for the status line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ModeWait {
+    /// A Window Request in Auto waits for the user's `app` window.
+    Window(String),
+    /// Real input in Auto has waited 30 s for the user's hands.
+    Hands,
+}
+
+/// The display's status with its agent's waits, and what its tile and the
+/// Viewer offer for them: a front request's line first, then the mode's.
+pub fn with_waits(
+    core: &crate::core::Core,
+    id: crate::model::DisplayId,
+    status: Status,
+) -> (Status, Wait) {
+    let Some(display) = core.displays.get(id) else {
+        return (status, Wait::None);
+    };
+    let agent = display.agent_name().to_string();
+    let working = status.kind == Kind::Agent;
+    if let Some(app) = core.input_queue.waiting_line(id) {
+        let wait = if working { Wait::Front } else { Wait::None };
+        return (status.waiting_for(&agent, Some(app)), wait);
+    }
+    let mode = match core.window_waits.get(&id) {
+        Some(w) => Some(ModeWait::Window(w.window.app.clone())),
+        None if core.input_queue.hands_line(id) => Some(ModeWait::Hands),
+        None => None,
+    };
+    let wait = match &mode {
+        Some(ModeWait::Window(_)) if working => Wait::Window,
+        Some(ModeWait::Hands) if working => Wait::Hands,
+        _ => Wait::None,
+    };
+    (status.waiting_by_mode(&agent, mode), wait)
+}
+
 impl Status {
+    /// The Autonomy Mode's wait, below Takeover and Help and above
+    /// "Controlled by": only while the agent works there.
+    pub fn waiting_by_mode(self, agent: &str, wait: Option<ModeWait>) -> Status {
+        match wait {
+            Some(ModeWait::Window(app)) if self.kind == Kind::Agent => Status {
+                short: tf!("Waiting for {app} · in use", "等待 {app} · 你在用"),
+                long: tf!(
+                    "{agent} waits for your {app} window. It moves once you stop using it.",
+                    "{agent} 在等你的 {app} 窗口，你不用时自动交给它"
+                ),
+                ..self
+            },
+            Some(ModeWait::Hands) if self.kind == Kind::Agent => Status {
+                short: t("Waiting for your mouse", "等待鼠标空闲").into(),
+                long: tf!(
+                    "{agent} waits to use your mouse. It starts once you leave it alone for 5 seconds.",
+                    "{agent} 在等待使用你的鼠标，空闲 5 秒后开始"
+                ),
+                ..self
+            },
+            _ => self,
+        }
+    }
+
     /// An action of `agent`'s on this display has waited a while in the
     /// Input Queue for the user to leave `app`, whose window of theirs has
     /// focus: the card says so, quietly. Only while the agent works there.

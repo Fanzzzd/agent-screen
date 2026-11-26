@@ -292,7 +292,7 @@ pub fn definitions() -> Vec<Value> {
                     "screenshot": { "type": "boolean", "description": "false returns only the action's text, without the screenshot, for steps you don't need to see, such as a run of key presses. Default true." },
                     "real_input": {
                         "type": "boolean",
-                        "description": "For left_click, double_click, triple_click, left_click_drag or left_mouse_down, after a background attempt visibly had no effect: ask the user to allow their real pointer. It runs only once they allow it."
+                        "description": "For left_click, double_click, triple_click, left_click_drag or left_mouse_down, after a background attempt visibly had no effect: ask the user to allow their real pointer. It runs only once they allow it, or as their Autonomy Mode permits."
                     },
                     "via_input_method": {
                         "type": "boolean",
