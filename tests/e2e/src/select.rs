@@ -15,6 +15,10 @@ use Area::*;
 pub const PATHS: &[(&str, &[Area])] = &[
     // The app.
     ("apps/macos/src/main.rs", &[]),
+    (
+        "apps/macos/src/autonomy.rs",
+        &[Autonomy, WindowAccess, InputQueue],
+    ),
     ("apps/macos/src/core.rs", &[Displays]),
     ("apps/macos/src/lifecycle.rs", &[Displays]),
     ("apps/macos/src/dismissal.rs", &[Displays, Windows]),
@@ -29,9 +33,11 @@ pub const PATHS: &[(&str, &[Area])] = &[
     ("apps/macos/src/control/shared_app.rs", &[AgentInput]),
     ("apps/macos/src/control/values.rs", &[Elements]),
     ("apps/macos/src/mac/mod.rs", &[]),
+    ("apps/macos/src/mac/activity.rs", &[Autonomy]),
     ("apps/macos/src/mac/aerospace.rs", &[Windows]),
     ("apps/macos/src/mac/alerts.rs", &[Windows]),
     ("apps/macos/src/mac/app.rs", &[Windows]),
+    ("apps/macos/src/mac/armed_hold.rs", &[Autonomy, InputQueue]),
     ("apps/macos/src/mac/assist.rs", &[Settings]),
     ("apps/macos/src/mac/ax.rs", &[Elements]),
     ("apps/macos/src/mac/capture.rs", &[Screenshots, Viewer]),
@@ -43,6 +49,7 @@ pub const PATHS: &[(&str, &[Area])] = &[
     ("apps/macos/src/mac/devtools.rs", &[Browser]),
     ("apps/macos/src/mac/display.rs", &[Displays]),
     ("apps/macos/src/mac/hang.rs", &[Performance]),
+    ("apps/macos/src/mac/hotkey.rs", &[Autonomy]),
     ("apps/macos/src/mac/ime.rs", &[InputMethod]),
     ("apps/macos/src/mac/input.rs", &[AgentInput, ViewerInput]),
     ("apps/macos/src/mac/menubar.rs", &[Peek]),
@@ -95,6 +102,10 @@ pub const PATHS: &[(&str, &[Area])] = &[
     ("crates/model/src/access.rs", &[WindowAccess]),
     ("crates/model/src/alerts.rs", &[Windows]),
     ("crates/model/src/arrangement.rs", &[Displays]),
+    (
+        "crates/model/src/autonomy.rs",
+        &[Autonomy, WindowAccess, InputQueue],
+    ),
     ("crates/model/src/budget.rs", &[Displays]),
     (
         "crates/model/src/card.rs",
@@ -127,6 +138,7 @@ pub const PATHS: &[(&str, &[Area])] = &[
     ("crates/model/src/substitute.rs", &[Elements, Browser]),
     ("crates/model/src/tree.rs", &[Elements]),
     ("crates/model/src/typing.rs", &[AgentInput]),
+    ("crates/model/src/user_activity.rs", &[Autonomy]),
     (
         "crates/model/src/viewer_keys.rs",
         &[ViewerInput, InputMethod],

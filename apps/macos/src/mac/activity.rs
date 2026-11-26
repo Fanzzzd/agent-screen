@@ -31,6 +31,9 @@ struct State {
     generation: u64,
     /// The e2e override: fields set here replace the OS's.
     over: Option<serde_json::Map<String, Value>>,
+    /// Bumped on each change of the override, so a sample read before it
+    /// is not observed after.
+    over_serial: u64,
     /// The last media read, and its windows.
     media: (Option<Instant>, Vec<u32>),
 }
@@ -41,6 +44,7 @@ static STATE: LazyLock<Mutex<State>> = LazyLock::new(|| {
         running: false,
         generation: 0,
         over: None,
+        over_serial: 0,
         media: (None, Vec::new()),
     })
 });
@@ -73,7 +77,7 @@ pub fn start() {
     let _ = std::thread::Builder::new()
         .name("agent-screen-activity".into())
         .spawn(move || {
-            let first = sample();
+            let (first, _) = sample();
             let presses = super::catch::recent_windows()
                 .into_iter()
                 .map(|(window, ago)| (window, first.now_ms.saturating_sub(ago)));
@@ -93,12 +97,14 @@ pub fn start() {
                 if state().generation != generation {
                     break;
                 }
-                let next = sample();
+                let (next, serial) = sample();
                 let mut s = state();
                 if s.generation != generation {
                     break;
                 }
-                s.tracker.observe(&next);
+                if s.over_serial == serial {
+                    s.tracker.observe(&next);
+                }
             }
             log::info!("autonomy: the activity monitor stopped");
         });
@@ -166,9 +172,11 @@ pub fn hold_ended() {
 pub fn hands() -> Hands {
     let fresh = !running() || DIRTY.swap(false, Ordering::AcqRel);
     if fresh {
-        let next = sample();
+        let (next, serial) = sample();
         let mut s = state();
-        if s.running {
+        if s.over_serial != serial {
+            // The override changed during the read: what it read is stale.
+        } else if s.running {
             s.tracker.observe(&next);
         } else {
             // A one-off read: the facts are this sample's, and it marks
@@ -207,6 +215,8 @@ pub fn unused_ms(window: u32) -> Option<u64> {
 /// `clear`. Decisions read it instead of the OS. It sends no input.
 pub fn set_override(params: &serde_json::Map<String, Value>) {
     let mut s = state();
+    let before = named(s.over.as_ref());
+    s.over_serial += 1;
     if params.get("clear").and_then(Value::as_bool) == Some(true) {
         s.over = None;
     } else {
@@ -228,9 +238,35 @@ pub fn set_override(params: &serde_json::Map<String, Value>) {
             }
         }
     }
+    // A window the override named and no longer names was never the
+    // user's: it is unused again at once.
+    let after = named(s.over.as_ref());
+    for window in before.difference(&after) {
+        s.tracker.forget(*window);
+    }
     drop(s);
     DIRTY.store(true, Ordering::Release);
     WAKE.1.notify_all();
+}
+
+/// The windows an override names as used.
+fn named(over: Option<&serde_json::Map<String, Value>>) -> BTreeSet<u32> {
+    let Some(over) = over else {
+        return BTreeSet::new();
+    };
+    let one = |key: &str| over.get(key).and_then(Value::as_u64);
+    let media = over
+        .get("mediaWindows")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_u64);
+    [one("activeWindow"), one("pointerWindow")]
+        .into_iter()
+        .flatten()
+        .chain(media)
+        .map(|n| n as u32)
+        .collect()
 }
 
 pub fn overridden() -> bool {
@@ -268,8 +304,11 @@ pub fn debug_json() -> Value {
 }
 
 /// One look at the OS, with the override on top.
-fn sample() -> Sample {
-    let over = state().over.clone();
+fn sample() -> (Sample, u64) {
+    let (over, serial) = {
+        let s = state();
+        (s.over.clone(), s.over_serial)
+    };
     let now = now_ms();
     let get = |key: &str| over.as_ref().and_then(|o| o.get(key)).cloned();
     let flag = |key: &str| get(key).and_then(|v| v.as_bool());
@@ -300,7 +339,7 @@ fn sample() -> Sample {
             .collect(),
         None => media_windows(),
     };
-    Sample {
+    let sample = Sample {
         now_ms: now,
         idle_ms,
         active_window,
@@ -312,7 +351,8 @@ fn sample() -> Sample {
         locked,
         system_prompt: flag("systemPrompt").unwrap_or_else(system_prompt),
         media_windows,
-    }
+    };
+    (sample, serial)
 }
 
 #[link(name = "CoreGraphics", kind = "framework")]

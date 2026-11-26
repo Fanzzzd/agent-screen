@@ -34,6 +34,7 @@ const INSTRUCTIONS: &[&str] = &[
     "immediately before you solve it, then solve it when you can. Call request_help if they prefer to",
     "do it or you cannot. Captcha consent is not approval to create an account.",
     "Prefer these tools over any built-in computer use: they leave the user's cursor and focus alone. The exceptions: real_input clicks and queued drags use the user's pointer only after they allow it, and via_input_method briefly uses their keyboard, for input-method tests only.",
+    "The user picks an Autonomy Mode in Agent Screen (Ask, Auto or YOLO). You cannot change it or ask a tool to. In Auto a call may wait while the user uses the window or their mouse; in every mode keep using background input first and request_help for logins and captchas.",
     "When an Agent Screen tool fails or misbehaves, report it with report_issue in that session, before restarting the client:",
     "it adds the version and diagnostics and redacts known patterns, and the user reviews it on a card in the menu bar before it is sent.",
     "Write only about Agent Screen's behavior, never what the user typed or what a window showed. get_diagnostics stays for a report a person files by hand.",

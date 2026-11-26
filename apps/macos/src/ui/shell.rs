@@ -4884,37 +4884,52 @@ impl Shell {
     /// Above New Display: Stop and Switch to Ask while the mode is Auto or
     /// YOLO, then the Autonomy submenu (ADR 0025).
     fn autonomy_menu(&self, menu: &native::Menu, cx: &App) {
-        use agent_screen_model::autonomy::Mode;
-        let autonomy = &self.core.read(cx).autonomy;
-        let current = autonomy.mode();
-        if current.acts() {
-            let stop = menu.action(
-                t("Stop and Switch to Ask", "停止并切换到询问"),
-                MenuAction::StopAutonomy,
-            );
+        let items = self.autonomy_items(cx);
+        if let Some(stop) = &items.stop {
+            let stop = menu.action(stop, MenuAction::StopAutonomy);
             native::set_key_equivalent(&stop, ".", true, false, true, true);
         }
         let sub = native::Menu::new("Autonomy");
-        for (mode, title) in [
-            (Mode::Ask, t("Ask", "询问")),
-            (Mode::Auto, t("Auto", "自动")),
-            (Mode::Yolo, t("YOLO…", "YOLO…")),
-        ] {
-            let item = sub.action(title, MenuAction::ChooseAutonomy { mode });
-            if mode == current {
+        for (mode, title, checked) in &items.modes {
+            let item = sub.action(title, MenuAction::ChooseAutonomy { mode: *mode });
+            if *checked {
                 native::set_checked(&item);
             }
         }
-        if let Some(why) = autonomy
-            .setting
-            .yolo_ended
-            .filter(|_| current != Mode::Yolo)
-        {
-            sub.disabled(super::setup::yolo_ended_line(why));
+        if let Some(line) = &items.ended {
+            sub.disabled(line);
         }
-        let mode = super::setup::mode_name(current);
-        menu.submenu(&tf!("Autonomy: {mode}", "自主模式：{mode}"), sub);
+        menu.submenu(&items.title, sub);
         menu.separator();
+    }
+
+    /// What the menu's Autonomy items say now, for the menu and
+    /// `debugAutonomy`.
+    pub fn autonomy_items(&self, cx: &App) -> AutonomyItems {
+        use agent_screen_model::autonomy::Mode;
+        let autonomy = &self.core.read(cx).autonomy;
+        let current = autonomy.mode();
+        let mode = super::setup::mode_name(current);
+        AutonomyItems {
+            stop: current
+                .acts()
+                .then(|| t("Stop and Switch to Ask", "停止并切换到询问").to_string()),
+            title: tf!("Autonomy: {mode}", "自主模式：{mode}"),
+            modes: [
+                (Mode::Ask, t("Ask", "询问")),
+                (Mode::Auto, t("Auto", "自动")),
+                (Mode::Yolo, t("YOLO…", "YOLO…")),
+            ]
+            .map(|(mode, title)| (mode, title.to_string(), mode == current))
+            .into(),
+            ended: autonomy
+                .setting
+                .yolo_ended
+                .filter(|_| current != Mode::Yolo)
+                .map(super::setup::yolo_ended_line)
+                .filter(|line| !line.is_empty())
+                .map(String::from),
+        }
     }
 
     /// The menu's Agent Bug Reports: what waits, what was opened, and the
@@ -7394,4 +7409,16 @@ mod onboarding_tests {
         assert_eq!(agents_home_for(true, Some("".into())), None);
         assert_eq!(agents_home_for(true, Some("rel/home".into())), None);
     }
+}
+
+/// The menu's Autonomy items (ADR 0025).
+pub struct AutonomyItems {
+    /// Stop and Switch to Ask, while the mode is Auto or YOLO.
+    pub stop: Option<String>,
+    /// The submenu's title, which names the mode.
+    pub title: String,
+    /// Each mode's item, and whether it is checked.
+    pub modes: Vec<(agent_screen_model::autonomy::Mode, String, bool)>,
+    /// Why YOLO last ended, while it is off.
+    pub ended: Option<String>,
 }

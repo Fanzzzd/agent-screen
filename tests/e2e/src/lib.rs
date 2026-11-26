@@ -67,6 +67,43 @@ pub fn socket_of(instance: Option<&str>) -> PathBuf {
         .join(name)
 }
 
+/// The e2e instance's Autonomy Mode file. Only the e2e instance's: no
+/// script may write the user's (ADR 0025).
+pub fn autonomy_file() -> Result<PathBuf> {
+    if instance().as_deref() != Some("e2e") {
+        bail!("the Autonomy Mode file is written only for AGENTSCREEN_INSTANCE=e2e");
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    Ok(Path::new(&home).join("Library/Application Support/Agent Screen/autonomy-e2e.json"))
+}
+
+/// Give the e2e instance `setting` as its stored Autonomy Mode before it
+/// starts, and return what the file held, for `put_back_autonomy`.
+pub fn set_autonomy_file(setting: &Value) -> Result<Option<String>> {
+    let file = autonomy_file()?;
+    let before = std::fs::read_to_string(&file).ok();
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(&file, setting.to_string())?;
+    Ok(before)
+}
+
+/// Put back what `set_autonomy_file` found, or remove the file it made.
+pub fn put_back_autonomy(before: Option<String>) {
+    let Ok(file) = autonomy_file() else {
+        return;
+    };
+    match before {
+        Some(text) => {
+            let _ = std::fs::write(&file, text);
+        }
+        None => {
+            let _ = std::fs::remove_file(&file);
+        }
+    }
+}
+
 pub fn debug_app() -> PathBuf {
     root().join("target/Agent Screen Dev.app")
 }
@@ -285,6 +322,13 @@ fn prebuild_tools() {
 /// tools/field.swift as an app, so launch_app takes it.
 pub fn field_app() -> Result<PathBuf> {
     swift_app("field", "Field")
+}
+
+/// tools/`tool_name`.swift as an app named `name`, with a bundle id of its
+/// own ending in `id`: another app to Agent Screen, for a rule that goes
+/// by app.
+pub fn tool_app_as(tool_name: &str, name: &str, id: &str) -> Result<PathBuf> {
+    swift_app_as(tool_name, name, id)
 }
 
 /// tools/login.swift as an app: a native login window.
@@ -2034,6 +2078,120 @@ pub fn taken_back(fronts: &[String], harness: &str) -> Vec<String> {
         .filter(|l| is_harness(l))
         .cloned()
         .collect()
+}
+
+// MARK: Autonomy Modes
+
+/// tools/keyholder.swift as the user's front app on their screen, its
+/// field's text reported (ADR 0025's scripts): keys the armed hold held
+/// for the user land there.
+pub struct Holder {
+    child: std::process::Child,
+    printed: std::sync::Arc<std::sync::Mutex<String>>,
+}
+
+impl Holder {
+    /// Start it for `seconds`; it takes the front and its field the
+    /// keyboard.
+    pub fn start(seconds: u32) -> Result<Holder> {
+        use std::io::Read;
+        let mut child = command(tool("keyholder")?)
+            .arg(seconds.to_string())
+            .env("KEYHOLDER_TEXT", "1")
+            .stdout(Stdio::piped())
+            .spawn()?;
+        let mut stdout = child.stdout.take().context("keyholder's stdout")?;
+        let printed = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let sink = printed.clone();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 256];
+            while let Ok(n) = stdout.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                if let Ok(mut s) = sink.lock() {
+                    s.push_str(&String::from_utf8_lossy(&buf[..n]));
+                }
+            }
+        });
+        Ok(Holder { child, printed })
+    }
+
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// The field's text now.
+    pub fn text(&self) -> String {
+        let printed = self.printed.lock().map(|s| s.clone()).unwrap_or_default();
+        printed
+            .lines()
+            .rev()
+            .find_map(|l| l.strip_prefix("text "))
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    /// Bring it to the front again.
+    pub fn activate(&self) {
+        let _ = probe(&["activate", &self.pid().to_string()]);
+    }
+}
+
+impl Drop for Holder {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// The Red Glow's states and the mode that opened the Input Grant
+/// (`debugAutonomy`'s `grant`), as a second connection reads them every
+/// 30 ms until `stop` is set.
+pub fn watch_glow(stop: &std::sync::atomic::AtomicBool) -> (Vec<String>, Vec<String>) {
+    let mut glow = Vec::new();
+    let mut opened = Vec::new();
+    let Ok(control) = Control::connect() else {
+        return (glow, opened);
+    };
+    while !stop.load(Ordering::Relaxed) {
+        if let Ok(g) = control.call("debugGlow", serde_json::json!({ "alpha": false }))
+            && let Some(state) = g["state"].as_str()
+            && glow.last().map(String::as_str) != Some(state)
+        {
+            glow.push(state.to_string());
+        }
+        if let Ok(a) = control.call("debugAutonomy", serde_json::json!({}))
+            && let Some(by) = a["grant"].as_str()
+            && opened.last().map(String::as_str) != Some(by)
+        {
+            opened.push(by.to_string());
+        }
+        sleep_ms(30);
+    }
+    (glow, opened)
+}
+
+/// Wait up to `ms` for the Red Glow to read `state`.
+pub fn wait_glow(control: &Control, state: &str, ms: u64) -> bool {
+    let until = Instant::now() + Duration::from_millis(ms);
+    while Instant::now() < until {
+        if control
+            .call("debugGlow", serde_json::json!({ "alpha": false }))
+            .is_ok_and(|g| g["state"] == state)
+        {
+            return true;
+        }
+        sleep_ms(15);
+    }
+    false
+}
+
+/// Whether the user's hands are At Rest to the e2e instance now.
+pub fn at_rest(control: &Control) -> bool {
+    control
+        .call("debugAutonomy", serde_json::json!({}))
+        .is_ok_and(|s| s["tracker"]["hands"]["atRest"] == true)
 }
 
 #[cfg(test)]

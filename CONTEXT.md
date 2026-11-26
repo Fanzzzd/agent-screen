@@ -41,7 +41,7 @@ A read-only local browser page (`http://127.0.0.1:<port>/d/<token>`) that shows 
 _Avoid_: remote desktop, screen share, web viewer
 
 **Takeover** (接手):
-A state of an Agent Display in which the user operates it and the owning Agent Session's input is refused. It begins with the user's first input in the Viewer, or Take Over (接手操作). It pauses any Window Authorization for that display. It ends only when the user hands control back, through the interface or an explicit instruction in the conversation that the Agent Session relays. Collapsing the Viewer, switching displays or waiting keeps it.
+A state of an Agent Display in which the user operates it and the owning Agent Session's input is refused. It begins with the user's first input in the Viewer, or Take Over (接手操作). It pauses any Window Authorization for that display. It ends only when the user hands control back, through the interface or an explicit instruction in the conversation that the Agent Session relays. Collapsing the Viewer, switching displays or waiting keeps it. No Autonomy Mode ends, shortens or works around it.
 _Avoid_: pause, lock, manual mode
 
 **Help Request** (求助):
@@ -65,11 +65,11 @@ A video of an Agent Display that its Agent Session asked for, with a timeline of
 _Avoid_: capture, screencast
 
 **Keyboard Borrow** (借用键盘):
-One `type` or `key` call that goes through the user's input method. For the call, the agent's app has keyboard focus and the user's keys reach it (ADR 0008). The Red Glow shows while it lasts.
+One `type` or `key` call that goes through the user's input method. For the call, the agent's app has keyboard focus and the user's keys reach it (ADR 0008). The Red Glow shows while it lasts. In Auto it waits for the keyboard to be At Rest; in YOLO it starts at once (ADR 0025).
 _Avoid_: focus steal, IME mode
 
 **Input Request** (申请指针和键盘):
-An Agent Session asking to use the user's own pointer and keyboard on its Agent Display, for an action that background input can't do, such as a drag in a web page of the user's browser, choosing an Electron app's menu item while a text field has focus, or a click an app took only partway in the background. It waits in the Input Queue until the user allows it, and is declined when the user answers Not Now. UI copy calls what it asks for "your mouse" (你的鼠标).
+An Agent Session asking to use the user's own pointer and keyboard on its Agent Display, for an action that background input can't do, such as a drag in a web page of the user's browser, choosing an Electron app's menu item while a text field has focus, or a click an app took only partway in the background. It waits in the Input Queue until the user allows it or the Autonomy Mode lets it run, and is declined when the user answers Not Now. UI copy calls what it asks for "your mouse" (你的鼠标).
 _Avoid_: borrow, lease, takeover
 
 **Input Queue**:
@@ -77,11 +77,11 @@ The Input Requests of every Agent Session waiting their turn, one at a time, in 
 _Avoid_: pool, lock
 
 **Input Grant** (放行期):
-The user's permission for the Input Queue to run, including requests that arrive while it runs. The user ends it early with Stop (停止). It ends when the user touches the mouse or keyboard, when the queue has been idle for 30 seconds, or when no operation is waiting or running and every participating Agent Session has declared itself done. One session cannot end the others' permission.
+The permission for the Input Queue to run, including requests that arrive while it runs. The user opens it with Allow. In Auto and YOLO the Autonomy Mode opens it, with no card, and it ends as soon as nothing waits or runs. The user ends any grant early with Stop (停止), which in Auto and YOLO also returns the mode to Ask. It ends when the user touches the mouse or keyboard, when the queue has been idle for 30 seconds, or when no operation is waiting or running and every participating Agent Session has declared itself done. One session cannot end the others' permission. In YOLO a touch does not end it; the Stop chord does.
 _Avoid_: blanket access, Takeover
 
 **Input Loan** (借出):
-One complete operation's exclusive use of the user's pointer and keyboard on its own Agent Display during an Input Grant. Other sessions wait until it has released its inputs. Completing a loan leaves the grant open for the next operation. Normal grant completion restores the user's pointer and front window; user-initiated revocation leaves the pointer and front window where the user took control. Both release the agent's held keys and buttons.
+One complete operation's exclusive use of the user's pointer and keyboard on its own Agent Display during an Input Grant. Other sessions wait until it has released its inputs. Completing a loan leaves the grant open for the next operation. Normal grant completion restores the user's pointer and front window; user-initiated revocation of a grant the user opened leaves the pointer and front window where the user took control, and of a grant the Autonomy Mode opened restores them, since the user never gave them up. Both release the agent's held keys and buttons.
 _Avoid_: lease, borrow. Keyboard Borrow is a different thing: one input-method call that needs no permission.
 
 **Agent Pointer**:
@@ -93,12 +93,12 @@ Moving an app window onto or off an Agent Display. Either the Agent Session or t
 _Avoid_: pull, move, send back
 
 **Handover** (交给):
-The user giving one of their own windows to an Agent Display so the Agent Session can work in it, through the interface or a conversation instruction. A Window Authorization can allow the Agent Session to do the Placement without asking again. A handed-over window keeps its return location and always returns to the user: when the Agent Session stops using its display, or when the display is dismissed. A Handover the user makes with Give, from the Viewer or the Help Card, to a display with an open Help Request answers it.
+The user giving one of their own windows to an Agent Display so the Agent Session can work in it, through the interface or a conversation instruction, or the Autonomy Mode taking it. A Window Authorization can allow the Agent Session to do the Placement without asking again. A handed-over window keeps its return location and always returns to the user: when the Agent Session stops using its display, or when the display is dismissed. A Handover the user makes with Give, from the Viewer or the Help Card, to a display with an open Help Request answers it.
 The user gets a window back with Take Back (取回); no other action is called Take Back or 取回.
 _Avoid_: share, assign. Its buttons are Give (交给) in the Viewer, Give a Window (交给它一个窗口) on the Help Card and Hand Over (交给它) on a Window Request card; the concept is still Handover.
 
 **Window Request**:
-The Agent Session asking the user for one of their windows, by app or window. The user answers Hand Over, which makes it a Handover, or Keep, and the window stays theirs. A window another Agent Session holds, on its display or a Review Display, takes the same request, and the card names the holder. Hand Over then moves it as a Placement, and the holding session is told on its next call; a Handover the holder had from the user stays one and still returns to the user (ADR 0017).
+The Agent Session asking the user for one of their windows, by app or window. The user answers Hand Over, which makes it a Handover, or Keep, and the window stays theirs. A window another Agent Session holds, on its display or a Review Display, takes the same request, and the card names the holder. Hand Over then moves it as a Placement, and the holding session is told on its next call; a Handover the holder had from the user stays one and still returns to the user (ADR 0017). In Auto a request for a window In Use waits as a line on the display's tile, with no card, and answers itself when the window is no longer In Use.
 _Avoid_: window permission, borrow
 
 **Control Request**:
@@ -106,8 +106,28 @@ During a Takeover, the Agent Session asking the user to hand its display back, w
 _Avoid_: resume request, reclaim
 
 **Window Authorization** (窗口授权):
-The user's explicit instruction allowing an Agent Session to take a user window without another confirmation. It can cover one Placement or persist for that Agent Session, on each of its displays, for all apps or named apps. A Takeover pauses a continuing authorization; handing control back resumes it. Revoking it (Revoke, 撤销授权) prevents future Placements without moving windows already handed over. It never covers a window another Agent Session holds: only the user's answer, or their words naming that window or app, move one (ADR 0017). Ending the session's last display or disconnecting the session clears it. A window the user takes back stays excluded until they explicitly authorize that window again.
+The user's explicit instruction allowing an Agent Session to take a user window without another confirmation. It can cover one Placement or persist for that Agent Session, on each of its displays, for all apps or named apps. A Takeover pauses a continuing authorization; handing control back resumes it. Revoking it (Revoke, 撤销授权) prevents future Placements without moving windows already handed over. It never covers a window another Agent Session holds: only the user's answer, or their words naming that window or app, move one (ADR 0017). Ending the session's last display or disconnecting the session clears it. A window the user takes back stays excluded until they explicitly authorize that window again. It is the user's word for one Agent Session; the Autonomy Mode is their standing answer for all of them. Either one is enough to take a user window.
 _Avoid_: full access, unattended mode, blanket permission
+
+**Autonomy Mode** (自主模式):
+The user's standing answer to how an Agent Session may take what they are using: a window, their pointer and keyboard, or the front of their app. One mode covers every Agent Session. Ask (询问) asks each time, as a Window Request or an Input Request. Auto (自动) takes a window that is not In Use and uses the pointer and keyboard while they are At Rest, and stops at the user's touch. YOLO (YOLO) takes them at once. Only the user changes it, in Settings or the menu bar. YOLO ends when the Mac locks or sleeps or Agent Screen restarts. No mode covers a Protected App, a Kept Window, a window another Agent Session holds, a Takeover or a Help Request (ADR 0025).
+_Avoid_: approval mode, permission mode, trust level, full access, unattended mode
+
+**In Use** (在用):
+A user window the user clicked, typed into, scrolled or pointed at within the last 2 minutes, or whose app is playing video or holding a call. Auto leaves it with the user.
+_Avoid_: active window, busy window, focused
+
+**At Rest** (空闲):
+The user's pointer and keyboard, untouched for 5 seconds, with no button held, no input-method composition, no password field focused and the screen unlocked. Auto uses them only then.
+_Avoid_: idle (a Spare and a grant are also called idle), away
+
+**Protected App** (受保护的 app):
+An app no Autonomy Mode acts on by itself: System Settings, Keychain Access, Passwords, password managers, the app an agent's client runs in, and any app the user adds. Its windows and real input in them need the user's own answer in every mode.
+_Avoid_: blocked app, sensitive app, denylist
+
+**Kept Window** (留下的窗口):
+A user window the user took back with Take Back or answered Keep for. No Autonomy Mode takes it for any Agent Session. It stops being kept when the user hands it over themselves or it closes.
+_Avoid_: excluded window (the exclusion from one session's Window Authorization), pinned, locked
 
 **Red Glow** (红光):
 The red light along the edges of each of the user's screens while an Agent Session has, or may at any moment take, their pointer or keyboard: during an Input Grant, a Keyboard Borrow and a front hold. It is strongest while input goes out. It never shows on an Agent Display, so no agent screenshot contains it. Without it, no real input is sent.
@@ -123,3 +143,4 @@ _Avoid_: cleanup flag, keep/delete mark
 - In Chinese copy, "agent" follows the English casing: lowercase inside a sentence, "Agent" at its start and in the term Agent 显示器. Apps are "app".
 - Not Now (暂不) declines: the Input Request or bug report doesn't come back. Later (稍后) only puts something off: the Help Card, or Settings before setup is done.
 - Chinese quotes are “” only.
+- The Autonomy Mode's names are Ask (询问), Auto (自动) and YOLO, which Chinese copy keeps in English. The Stop chord is written ⌃⌥⌘. in both languages.

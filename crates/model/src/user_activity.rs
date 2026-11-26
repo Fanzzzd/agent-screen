@@ -274,6 +274,12 @@ impl Tracker {
         self.interrupted = true;
     }
 
+    /// Forget that `window` was used: an e2e override that named it was
+    /// cleared, and what it said was never the user's.
+    pub fn forget(&mut self, window: WindowId) {
+        self.used.remove(&window);
+    }
+
     /// One completed untouched: the rest is `REST_MS` again.
     pub fn completed_untouched(&mut self) {
         self.interrupted = false;
@@ -317,6 +323,17 @@ mod tests {
         assert_eq!(t.unused_ms(7, 5_000), Some(4_000));
         assert_eq!(t.unused_ms(8, 5_000), None);
         assert!(!t.in_use(8, 5_000));
+    }
+
+    #[test]
+    fn a_forgotten_window_is_unused_at_once() {
+        let mut t = Tracker::default();
+        t.pressed(7, 1_000);
+        t.pressed(8, 1_000);
+        t.forget(7);
+        assert!(!t.in_use(7, 1_001));
+        assert_eq!(t.unused_ms(7, 1_001), None);
+        assert!(t.in_use(8, 1_001));
     }
 
     #[test]

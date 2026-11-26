@@ -14,6 +14,8 @@ Authorization permits taking windows from the user's displays, never from anothe
 
 Taking a user window under either form of authorization is a Handover. The window keeps its return location and must return to the user when its display is dismissed. Normal placements of agent-owned windows retain their existing rules.
 
+The Autonomy Mode is a second way to take a user window without a Window Request ([ADR 0025](0025-autonomy-modes.md)). Neither lowers the other, and a Kept Window or a Protected App needs the user's own answer under both.
+
 ## Takeover, revocation and return
 
 A Takeover pauses automatic acquisition. Explicitly handing control back through the interface or conversation resumes an authorization that has not been revoked. Granting window access alone does not end a Takeover. Waiting never ends one. See ADR 0004.

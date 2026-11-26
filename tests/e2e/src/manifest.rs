@@ -15,6 +15,7 @@ pub enum Area {
     Windows,
     WindowAccess,
     Takeover,
+    Autonomy,
     Peek,
     Viewer,
     Elements,
@@ -36,6 +37,7 @@ impl Area {
         Area::Windows,
         Area::WindowAccess,
         Area::Takeover,
+        Area::Autonomy,
         Area::Peek,
         Area::Viewer,
         Area::Elements,
@@ -58,6 +60,7 @@ impl Area {
             Area::Windows => "windows",
             Area::WindowAccess => "window-access",
             Area::Takeover => "takeover",
+            Area::Autonomy => "autonomy",
             Area::Peek => "peek",
             Area::Viewer => "viewer",
             Area::Elements => "elements",
@@ -88,6 +91,7 @@ impl Area {
             Area::Windows => "Placement, launch_app, and whose a new window is",
             Area::WindowAccess => "Window Requests, Handovers and Window Authorization",
             Area::Takeover => "Takeover, Help Requests, Control Requests and conversation control",
+            Area::Autonomy => "Autonomy Modes, In Use, At Rest and Stop",
             Area::Peek => "Peek and the menu bar icon",
             Area::Viewer => "the Viewer's picture, header and Agent Pointer",
             Area::Elements => "get_window_state and act_on_element on menus, selects and controls",
@@ -240,6 +244,8 @@ use Tier::{Core, Full};
 
 const MEASURES: &str = "a measurement: it prints numbers and checks nothing";
 const NEEDS_APP: &str = "it needs a debug build already running, and starts none";
+const HOLDS_KEYS: &str =
+    "it holds your keys for up to 3 s and moves your pointer: run it when the user is away or asks";
 
 /// Every script, by name.
 #[rustfmt::skip]
@@ -251,6 +257,10 @@ pub const SCRIPTS: &[Script] = &[
     script("appwhere", &[Peek, WindowAccess], Full, Hook, 1).hands_off(),
     script("arrangement", &[Displays], Full, Agent, 2),
     script("asksave", &[Displays, Windows], Full, Hook, 1),
+    script("autofront", &[Autonomy, InputQueue, AgentInput], Full, Real, 1).hands_off(),
+    script("autoinput", &[Autonomy, InputQueue], Core, Real, 1).hands_off(),
+    script("autonomysettings", &[Autonomy, Settings], Full, Hook, 0).hands_off(),
+    script("autowindow", &[Autonomy, WindowAccess, Windows], Core, Hook, 2).hands_off(),
     script("awaywindow", &[WindowAccess, Windows], Full, Agent, 1).hands_off(),
     script("barleak", &[Screenshots], Full, Agent, 1),
     script("browsers", &[Browser, AgentInput], Full, Agent, 1).hands_off(),
@@ -391,6 +401,7 @@ pub const SCRIPTS: &[Script] = &[
     script("webdrag", &[Browser, AgentInput, InputQueue, Elements], Core, Hook, 1).hands_off(),
     script("webpreview", &[Viewer, Screenshots, Displays], Full, Agent, 1),
     script("windowaccess", &[WindowAccess], Core, Hook, 2),
+    script("yoloinput", &[Autonomy, InputQueue], Full, Real, 1).hands_off().manual(HOLDS_KEYS),
 ];
 
 pub fn find(name: &str) -> Option<&'static Script> {

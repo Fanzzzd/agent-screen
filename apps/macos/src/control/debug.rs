@@ -801,7 +801,7 @@ fn debug_card(cx: &mut AsyncApp) -> Result<Value, ControlError> {
 /// registered, the Kept Windows, the Protected Apps resolved and the
 /// clients' apps, and the monitor's tracker.
 fn debug_autonomy(core: &Entity<Core>, cx: &mut AsyncApp) -> Value {
-    core.read_with(cx, |c, _| {
+    let mut reply = core.read_with(cx, |c, _| {
         let a = &c.autonomy;
         let mut reply = a.json();
         reply["hotkey"] = json!(crate::mac::hotkey::registered());
@@ -823,7 +823,25 @@ fn debug_autonomy(core: &Entity<Core>, cx: &mut AsyncApp) -> Value {
         });
         reply["grant"] = json!(c.input_queue.queue.mode_grant().map(|m| m.as_str()));
         reply
-    })
+    });
+    // The menu bar icon's menu, as it would open now.
+    if let Some(shell) = crate::ui::shell::current() {
+        let menu = shell.update(cx, |shell, cx| {
+            let items = shell.autonomy_items(cx);
+            json!({
+                "stop": items.stop,
+                "title": items.title,
+                "modes": items.modes.iter().map(|(mode, title, checked)| json!({
+                    "mode": mode.as_str(), "title": title, "checked": checked,
+                })).collect::<Vec<_>>(),
+                "ended": items.ended,
+            })
+        });
+        if let Ok(menu) = menu {
+            reply["menu"] = menu;
+        }
+    }
+    reply
 }
 
 fn debug_icon(cx: &mut AsyncApp) -> Result<Value, ControlError> {
@@ -1099,7 +1117,8 @@ async fn debug_show(
         "window-wait" => Some(None),
         _ => None,
     } {
-        usable(core, connection, p, id, "debugShow", cx)?;
+        // Any session's display: a script reads an MCP session's line.
+        display(core, p, true, cx)?;
         let app = p.string("app").unwrap_or_else(|| "Finder".into());
         return core.update(cx, |c, cx| {
             // With none waiting, a preview: window 0, which nothing moves.
@@ -1140,7 +1159,7 @@ async fn debug_show(
     // In Auto, real input waiting for the user's hands: its line, and "Let
     // the agent continue", which is the user's Allow.
     if matches!(surface.as_str(), "hands-wait" | "hands-wait-continue") {
-        usable(core, connection, p, id, "debugShow", cx)?;
+        display(core, p, true, cx)?;
         if surface == "hands-wait" {
             core.update(cx, |c, cx| {
                 c.input_queue.hands_preview.insert(id);
