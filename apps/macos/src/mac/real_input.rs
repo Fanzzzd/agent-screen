@@ -188,6 +188,15 @@ pub fn debug_observer_timeout() {
 /// input while a grant is armed. The Viewer's private press calls it for
 /// the presses it takes before this observer could see them.
 pub fn user_event(kind: CGEventType) {
+    user_buttons(kind);
+    if ARMED.load(Ordering::SeqCst) && !TOUCHED.swap(true, Ordering::SeqCst) {
+        notify_user_took_input();
+    }
+}
+
+/// Note the buttons the user holds, from one event of theirs, and nothing
+/// else: in YOLO a held press doesn't end the grant at once.
+pub fn user_buttons(kind: CGEventType) {
     let (down, bit) = match kind {
         CGEventType::LeftMouseDown => (Some(true), LEFT),
         CGEventType::LeftMouseUp => (Some(false), LEFT),
@@ -206,9 +215,13 @@ pub fn user_event(kind: CGEventType) {
         }
         None => {}
     }
-    if ARMED.load(Ordering::SeqCst) && !TOUCHED.swap(true, Ordering::SeqCst) {
-        notify_user_took_input();
-    }
+}
+
+/// Detach the mouse from the cursor for a YOLO loan, so the user's hand
+/// can't bend a drag's path, or attach it again (ADR 0025). Whether
+/// WindowServer took it.
+pub fn associate_mouse(connected: bool) -> bool {
+    unsafe { CGAssociateMouseAndMouseCursorPosition(connected) == 0 }
 }
 
 /// Observe HID events before AppKit manufactures pointer moves when a

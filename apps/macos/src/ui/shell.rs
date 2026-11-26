@@ -1107,6 +1107,14 @@ impl Shell {
             Native::YoloEnds(why) => {
                 self.core.update(cx, |core, cx| core.end_yolo(why, cx));
             }
+            Native::StopChord => self.stop_autonomy(crate::autonomy::Source::Chord, cx),
+            Native::GraceOver => {
+                if self.core.read(cx).input_queue.queue.mode_grant().is_some() {
+                    crate::mac::activity::interrupted();
+                    log::info!("autonomy: YOLO's grace is over; the grant ends");
+                    self.revoke_input(cx);
+                }
+            }
             Native::NotificationClicked {
                 display,
                 request,
@@ -1941,6 +1949,11 @@ impl Shell {
             }
             real_input::arm(true);
         }
+        // In YOLO, once the user's first input is held, no further loan
+        // starts: the running one has its grace, then the grant ends.
+        if self.mode_opened.is_some() && crate::mac::armed_hold::holding() {
+            return;
+        }
         // In Auto the Red Glow shows Armed for `LEAD_MS` before the first
         // event of a grant the mode opened; a touch meanwhile cancels it.
         if let Some(opened) = self.mode_opened
@@ -1990,10 +2003,22 @@ impl Shell {
             "input queue: running request {id} on display {display}, {} ms into the approval",
             grant_ms.unwrap_or_default()
         );
+        // In YOLO the mouse is detached from the cursor for the loan.
+        let detach = self.core.read(cx).input_queue.queue.mode_grant()
+            == Some(agent_screen_model::autonomy::Mode::Yolo);
         cx.spawn(async move |this, cx| {
             let outcome = cx
                 .background_executor()
-                .spawn(async move { crate::loan::execute(display, plan, &ok) })
+                .spawn(async move {
+                    if detach && !real_input::associate_mouse(false) {
+                        log::warn!("autonomy: the mouse couldn't be detached for the loan");
+                    }
+                    let outcome = crate::loan::execute(display, plan, &ok);
+                    if detach {
+                        real_input::associate_mouse(true);
+                    }
+                    outcome
+                })
                 .await;
             let _ = this.update(cx, |shell, cx| {
                 shell.loan_running = false;
@@ -2033,7 +2058,12 @@ impl Shell {
             }
             return;
         }
-        if self.mode_opening || self.loan_running || self.restoring || !real_input::watching() {
+        if self.mode_opening
+            || self.loan_running
+            || self.restoring
+            || !real_input::watching()
+            || crate::mac::ime::borrowing()
+        {
             return;
         }
         self.mode_waiting
@@ -2114,6 +2144,23 @@ impl Shell {
             });
         })
         .detach();
+    }
+
+    /// Stop, in Auto or YOLO, from the chord, the Input Bar or the menu: the
+    /// grant and its loan end, a front hold ends, a Keyboard Borrow stops,
+    /// the pointer and front come back, and the mode is Ask (ADR 0025).
+    pub fn stop_autonomy(&mut self, source: crate::autonomy::Source, cx: &mut Context<Self>) {
+        crate::mac::ime::stop_typing();
+        self.core.update(cx, |core, cx| {
+            if core.input_queue.hold().is_some() {
+                core.input_queue.end_hold();
+            }
+            core.stop_autonomy(source, cx);
+        });
+        if self.core.read(cx).input_queue.queue.grant().is_some() {
+            self.revoke_input(cx);
+        }
+        self.drive_queue(cx);
     }
 
     /// In Auto or YOLO, start the front hold for the oldest front request

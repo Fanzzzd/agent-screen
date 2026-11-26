@@ -152,6 +152,7 @@ pub fn protected_pid(pid: i32) -> bool {
 
 /// The activity monitor runs while the mode is Auto, and only then.
 pub fn sync_monitor(mode: Mode) {
+    crate::mac::hotkey::sync(mode);
     if mode == Mode::Auto {
         crate::mac::activity::start();
     } else {
@@ -211,12 +212,15 @@ pub enum CardNote {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
     Debug,
+    /// The Stop chord, ⌃⌥⌘..
+    Chord,
 }
 
 impl Source {
     fn as_str(self) -> &'static str {
         match self {
             Source::Debug => "debug",
+            Source::Chord => "stop chord",
         }
     }
 }

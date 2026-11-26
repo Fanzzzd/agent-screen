@@ -61,6 +61,11 @@ pub enum Native {
     /// The Mac locked or slept, or the session was switched out: YOLO
     /// ends (ADR 0025).
     YoloEnds(agent_screen_model::autonomy::YoloEnd),
+    /// The Stop chord, ⌃⌥⌘.: Stop, and the mode goes to Ask.
+    StopChord,
+    /// In YOLO, `HELD_GRACE_MS` passed since the user's first held key or
+    /// press: the operation the mode opened ends.
+    GraceOver,
     /// The user typed in a launcher such as Raycast.
     LauncherTyped,
     /// A left click of the user's at a global point (top-left origin),

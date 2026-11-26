@@ -804,7 +804,7 @@ fn debug_autonomy(core: &Entity<Core>, cx: &mut AsyncApp) -> Value {
     core.read_with(cx, |c, _| {
         let a = &c.autonomy;
         let mut reply = a.json();
-        reply["hotkey"] = json!(false);
+        reply["hotkey"] = json!(crate::mac::hotkey::registered());
         reply["kept"] = json!(a.kept.ids().collect::<Vec<_>>());
         reply["protected"] = json!(a.protected_list());
         reply["clients"] = json!(crate::autonomy::clients());

@@ -12,7 +12,7 @@
 //! this module's, and pass. Grants the user opened with Allow keep the
 //! listen-only observer and no hold.
 
-use agent_screen_model::autonomy::Mode;
+use agent_screen_model::autonomy::{Mode, stop_chord};
 use agent_screen_model::key_hold::{Armed, ArmedEvent, ArmedVerdict, Kind, sent_on_discard};
 use objc2_core_foundation::{CFMachPort, CFRetained, CFRunLoop, CGPoint, kCFRunLoopCommonModes};
 use objc2_core_graphics::{
@@ -98,6 +98,27 @@ pub fn start(mode: Mode) -> bool {
 /// Whether a hold is armed.
 pub fn armed() -> bool {
     matches!(*state(), State::Armed { .. })
+}
+
+/// Whether it holds anything: no new loan starts then.
+pub fn holding() -> bool {
+    matches!(&*state(), State::Armed { armed, .. } if armed.first().is_some())
+}
+
+/// In YOLO, whether `HELD_GRACE_MS` passed since the first held event; in
+/// Auto, whether anything is held.
+pub fn grace_over() -> bool {
+    match &*state() {
+        State::Armed {
+            armed,
+            mode,
+            started,
+            ..
+        } => armed
+            .deadline(*mode)
+            .is_some_and(|deadline| millis(*started) >= deadline),
+        State::Idle => false,
+    }
 }
 
 /// How many events it holds.
@@ -186,6 +207,23 @@ fn limit_later(id: u64) {
             if current {
                 log::warn!("armed hold: held for the limit; letting go");
                 finish(None, false);
+            }
+        });
+}
+
+/// In YOLO, the operation ends `HELD_GRACE_MS` after the first held event.
+fn grace_later(id: u64) {
+    let _ = std::thread::Builder::new()
+        .name("armed-hold-grace".into())
+        .spawn(move || {
+            std::thread::sleep(Duration::from_millis(
+                agent_screen_model::user_activity::HELD_GRACE_MS,
+            ));
+            let current = matches!(&*state(), State::Armed { id: now, .. } if *now == id);
+            if current {
+                log::info!("armed hold: the grace after the user's first held input is over");
+                dispatch2::DispatchQueue::main()
+                    .exec_async(|| super::native::send(super::native::Native::GraceOver));
             }
         });
 }
@@ -290,8 +328,15 @@ unsafe extern "C-unwind" fn seen(
     let cg = unsafe { event.as_ref() };
     let mark = CGEvent::integer_value_field(Some(cg), CGEventField::EventSourceUserData);
     let ours = mark == super::real_input::TAG || mark == KEY_HOLD_TAG || mark == TAG;
+    let chord = kind == CGEventType::KeyDown
+        && stop_chord(
+            CGEvent::integer_value_field(Some(cg), CGEventField::KeyboardEventKeycode) as u16,
+            CGEvent::flags(Some(cg)).0,
+        );
     let Some(seen) = (if ours {
         Some(ArmedEvent::Ours)
+    } else if chord {
+        Some(ArmedEvent::StopChord)
     } else {
         kind_of(kind)
     }) else {
@@ -309,8 +354,21 @@ unsafe extern "C-unwind" fn seen(
         return event.as_ptr();
     };
     let was_holding = armed.first().is_some();
-    match armed.see(seen, *mode, millis(*started)) {
-        ArmedVerdict::Pass | ArmedVerdict::Touched | ArmedVerdict::Stop => event.as_ptr(),
+    let mode = *mode;
+    match armed.see(seen, mode, millis(*started)) {
+        ArmedVerdict::Stop => {
+            drop(guard);
+            dispatch2::DispatchQueue::main()
+                .exec_async(|| super::native::send(super::native::Native::StopChord));
+            std::ptr::null_mut()
+        }
+        // In YOLO the mouse is detached for the loan and a move or a
+        // scroll bends nothing: it is dropped, so it neither reaches the
+        // agent's window under the cursor nor counts as a touch.
+        ArmedVerdict::Pass if mode == Mode::Yolo && seen == ArmedEvent::Moved => {
+            std::ptr::null_mut()
+        }
+        ArmedVerdict::Pass | ArmedVerdict::Touched => event.as_ptr(),
         ArmedVerdict::Hold | ArmedVerdict::HoldAndEnd => {
             let Some(copy) = CGEvent::new_copy(Some(cg)) else {
                 return event.as_ptr();
@@ -324,9 +382,17 @@ unsafe extern "C-unwind" fn seen(
             if !was_holding {
                 limit_later(id);
             }
-            // The observer never sees a held event: note the user's touch
-            // and the buttons they hold here.
-            super::real_input::user_event(kind);
+            // The observer never sees a held event: note the buttons the
+            // user holds here, and in Auto their touch, which ends the
+            // grant. In YOLO the operation runs on for `HELD_GRACE_MS`.
+            if mode == Mode::Yolo {
+                super::real_input::user_buttons(kind);
+                if !was_holding {
+                    grace_later(id);
+                }
+            } else {
+                super::real_input::user_event(kind);
+            }
             std::ptr::null_mut()
         }
     }

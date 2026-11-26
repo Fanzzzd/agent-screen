@@ -16,6 +16,7 @@ pub mod colorsync;
 pub mod devtools;
 pub mod display;
 pub mod hang;
+pub mod hotkey;
 pub mod ime;
 pub mod input;
 pub mod key_hold;
