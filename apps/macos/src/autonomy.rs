@@ -139,6 +139,15 @@ pub fn clients() -> BTreeSet<String> {
         .collect()
 }
 
+/// The activity monitor runs while the mode is Auto, and only then.
+pub fn sync_monitor(mode: Mode) {
+    if mode == Mode::Auto {
+        crate::mac::activity::start();
+    } else {
+        crate::mac::activity::stop();
+    }
+}
+
 /// Who changed the mode, for the log.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {

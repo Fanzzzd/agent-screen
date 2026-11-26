@@ -61,6 +61,11 @@ const OTHER: u8 = 4;
 fn user_holds(bits: u8) -> bool {
     USER_DOWN.load(Ordering::SeqCst) & bits != 0
 }
+/// The user holds a mouse button, as the observer saw it.
+pub fn user_button_down() -> bool {
+    user_holds(LEFT | RIGHT | OTHER)
+}
+
 /// The app a loan is pressing in, 0 for none. The guard that gives the
 /// front back to the user's app and the reminder leave it alone.
 static HOLDING: AtomicI32 = AtomicI32::new(0);

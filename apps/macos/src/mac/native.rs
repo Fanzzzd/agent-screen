@@ -58,6 +58,9 @@ pub enum Native {
     Menu(MenuAction),
     /// The user touched the mouse or keyboard during an Input Grant.
     UserTookInput,
+    /// The Mac locked or slept, or the session was switched out: YOLO
+    /// ends (ADR 0025).
+    YoloEnds(agent_screen_model::autonomy::YoloEnd),
     /// The user typed in a launcher such as Raycast.
     LauncherTyped,
     /// A left click of the user's at a global point (top-left origin),
@@ -172,7 +175,7 @@ pub fn keep_monitor(object: Retained<AnyObject>) {
     keep(object);
 }
 
-fn keep(object: Retained<AnyObject>) {
+pub(crate) fn keep(object: Retained<AnyObject>) {
     KEEP.with(|k| k.borrow_mut().push(object));
 }
 
@@ -759,11 +762,27 @@ pub fn watch_mouse() {
             return;
         }
         let kind = unsafe { event.as_ref() }.r#type();
+        let mtm = MainThreadMarker::new().expect("monitors run on the main thread");
+        // A scroll is use of the window under the pointer, for the
+        // activity monitor only: it tells the catches nothing.
+        if kind == NSEventType::ScrollWheel {
+            if !super::activity::running() {
+                return;
+            }
+            let number = NSWindow::windowNumberAtPoint_belowWindowWithWindowNumber(
+                NSEvent::mouseLocation(),
+                0,
+                mtm,
+            );
+            if let Ok(window) = u32::try_from(number) {
+                super::activity::pressed(window);
+            }
+            return;
+        }
         let towards = if kind == NSEventType::KeyDown {
             super::catch::user_pressed_key();
             return;
         } else {
-            let mtm = MainThreadMarker::new().expect("monitors run on the main thread");
             if kind == NSEventType::LeftMouseDown {
                 let at = NSEvent::mouseLocation();
                 let top = super::cg::display_bounds(super::cg::main_display()).height;
@@ -778,11 +797,17 @@ pub fn watch_mouse() {
                 mtm,
             );
             let front = super::input::front();
+            if let Ok(window) = u32::try_from(number) {
+                super::activity::pressed(window);
+            }
             u32::try_from(number).map_or(Towards::Unknown, |n| Towards::Window(n, front))
         };
         super::catch::user_acted(towards);
     });
-    let presses = NSEventMask::LeftMouseDown | NSEventMask::RightMouseDown | NSEventMask::KeyDown;
+    let presses = NSEventMask::LeftMouseDown
+        | NSEventMask::RightMouseDown
+        | NSEventMask::KeyDown
+        | NSEventMask::ScrollWheel;
     if let Some(monitor) = NSEvent::addGlobalMonitorForEventsMatchingMask_handler(presses, &user) {
         keep(monitor);
     }

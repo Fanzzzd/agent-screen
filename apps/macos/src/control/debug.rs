@@ -358,6 +358,17 @@ pub(super) async fn handle(
         "debugShow" => debug_show(core, connection, p, cx).await,
         "debugGlow" => debug_glow(p, cx).await,
         "debugAutonomy" => Ok(debug_autonomy(core, cx)),
+        // The e2e instance only: a release build with debug methods on the
+        // default instance can't fake the user's idle time.
+        "debugActivity" => {
+            if agent_screen_mcp::endpoint::instance().as_deref() != Some("e2e") {
+                return Some(Err(ControlError::invalid(
+                    "debugActivity requires the isolated e2e instance",
+                )));
+            }
+            crate::mac::activity::set_override(p.0);
+            Ok(json!({ "override": crate::mac::activity::overridden() }))
+        }
         _ => return None,
     };
     Some(result)
@@ -797,7 +808,7 @@ fn debug_autonomy(core: &Entity<Core>, cx: &mut AsyncApp) -> Value {
         reply["kept"] = json!(a.kept.ids().collect::<Vec<_>>());
         reply["protected"] = json!(a.protected_list());
         reply["clients"] = json!(crate::autonomy::clients());
-        reply["tracker"] = Value::Null;
+        reply["tracker"] = crate::mac::activity::debug_json();
         reply
     })
 }

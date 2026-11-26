@@ -570,6 +570,8 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
     }
     native::watch_screens();
     native::watch_activations();
+    crate::mac::activity::watch_session();
+    crate::autonomy::sync_monitor(crate::autonomy::mode());
     crate::mac::cg::watch_display_changes();
     crate::mac::hang::watch();
     native::watch_colors();
@@ -1089,6 +1091,9 @@ impl Shell {
             }
             Native::Menu(action) => self.menu(action, cx),
             Native::UserTookInput => self.user_took_input(cx),
+            Native::YoloEnds(why) => {
+                self.core.update(cx, |core, cx| core.end_yolo(why, cx));
+            }
             Native::NotificationClicked {
                 display,
                 request,

@@ -484,6 +484,14 @@ pub fn name(pid: i32) -> Option<String> {
         .map(|name| name.to_string())
 }
 
+/// The pids of the running apps with `bundle_id`.
+pub fn pids_of_bundle_id(bundle_id: &str) -> Vec<i32> {
+    NSRunningApplication::runningApplicationsWithBundleIdentifier(&NSString::from_str(bundle_id))
+        .iter()
+        .map(|app| app.processIdentifier())
+        .collect()
+}
+
 /// A running app's bundle id, which Window Access goes by.
 pub fn bundle_id(pid: i32) -> Option<String> {
     NSRunningApplication::runningApplicationWithProcessIdentifier(pid)

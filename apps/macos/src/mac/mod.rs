@@ -1,5 +1,6 @@
 //! macOS: CGVirtualDisplay, ScreenCaptureKit, SkyLight input, Accessibility.
 
+pub mod activity;
 pub mod aerospace;
 pub mod alerts;
 pub mod app;

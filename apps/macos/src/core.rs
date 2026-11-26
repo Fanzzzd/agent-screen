@@ -1232,6 +1232,7 @@ impl Core {
 
     /// What a change of mode does to work in progress.
     fn autonomy_changed(&mut self, cx: &mut Context<Self>) {
+        crate::autonomy::sync_monitor(self.autonomy.mode());
         cx.notify();
     }
 

@@ -37,6 +37,7 @@ unsafe extern "C" {
         key: *const std::ffi::c_void,
     ) -> *const std::ffi::c_void;
     static kTISPropertyInputSourceID: *const std::ffi::c_void;
+    static kTISPropertyBundleID: *const std::ffi::c_void;
     static kTISPropertyInputSourceType: *const std::ffi::c_void;
     static kTISTypeKeyboardLayout: *const std::ffi::c_void;
     fn CFArrayGetCount(array: &CFArray) -> isize;
@@ -175,6 +176,23 @@ pub fn current_kind() -> agent_screen_model::viewer_keys::Source {
     } else {
         Kind::InputMethod
     }
+}
+
+/// The bundle id of the current input source when it is an input method,
+/// whose process draws its candidate window. Any thread.
+pub fn input_method_bundle() -> Option<String> {
+    on_main(|| {
+        if current_kind() != agent_screen_model::viewer_keys::Source::InputMethod {
+            return None;
+        }
+        let source = unsafe { TISCopyCurrentKeyboardInputSource() };
+        if source.is_null() {
+            return None;
+        }
+        let source = Source(source);
+        let id = unsafe { TISGetInputSourceProperty(source.0, kTISPropertyBundleID) };
+        (!id.is_null()).then(|| unsafe { &*(id as *const CFString) }.to_string())
+    })
 }
 
 fn current_source() -> Source {
