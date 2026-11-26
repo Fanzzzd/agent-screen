@@ -255,6 +255,8 @@ pub struct Shell {
     mode_opening: bool,
     mode_opened: Option<Instant>,
     mode_waiting: Option<crate::mac::activity::Waiting>,
+    /// A look at the hands for a front hold the mode may start.
+    front_opening: bool,
     /// The Red Glow's state as last shown, and a preview `debugShow` asked
     /// for with its number, which its timer ends unless a newer one came.
     glow: Glow,
@@ -875,6 +877,7 @@ fn spawn_housekeeping_loop(counted: WeakEntity<Shell>, cx: &mut App) {
                         }
                     });
                     shell.drive_queue(cx);
+                    shell.front_by_mode(cx);
                     shell.refresh_counts(cx);
                     if shell.icon_rect().is_some() {
                         shell.icon.keep_place();
@@ -965,6 +968,7 @@ impl Shell {
             mode_opening: false,
             mode_opened: None,
             mode_waiting: None,
+            front_opening: false,
             restoring: false,
             glow: Glow::Off,
             glow_preview: None,
@@ -2107,6 +2111,64 @@ impl Shell {
                 shell.mode_opened = Some(Instant::now());
                 shell.drive_queue(cx);
                 shell.sync_card(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// In Auto or YOLO, start the front hold for the oldest front request
+    /// by itself: in Auto when the hands are At Rest, in YOLO once a hold
+    /// may start. Not for a Protected App, nor a display in Takeover
+    /// (ADR 0025).
+    fn front_by_mode(&mut self, cx: &mut Context<Self>) {
+        use agent_screen_model::autonomy::{self, Crossing, Decision, Subject};
+        let mode = crate::autonomy::mode();
+        if !mode.acts() || self.front_opening {
+            return;
+        }
+        let first = {
+            let core = self.core.read(cx);
+            if core.input_queue.hold().is_some() || crate::mac::ime::borrowing() {
+                return;
+            }
+            core.input_queue.first_front().filter(|(display, app)| {
+                core.displays.get(*display).is_some_and(|d| !d.takeover)
+                    && core.input_queue.may_start(*display, *app)
+            })
+        };
+        let Some((display, app)) = first else {
+            return;
+        };
+        // Only while the app is the user's front: otherwise the request
+        // runs by itself.
+        if crate::mac::input::front() != Some(app) {
+            return;
+        }
+        self.front_opening = true;
+        cx.spawn(async move |this, cx| {
+            let (hands, protected) = cx
+                .background_executor()
+                .spawn(async move {
+                    (
+                        crate::mac::activity::hands(),
+                        crate::autonomy::protected_pid(app),
+                    )
+                })
+                .await;
+            let subject = Subject {
+                protected,
+                ..Subject::default()
+            };
+            let decision = autonomy::decide(mode, Crossing::FrontHold, subject, &hands);
+            let _ = this.update(cx, |shell, cx| {
+                shell.front_opening = false;
+                if decision != Decision::Go || crate::autonomy::mode() != mode {
+                    return;
+                }
+                if shell.core.read(cx).input_queue.hold().is_some() {
+                    return;
+                }
+                crate::control::front_hold::by_mode(shell.core.clone(), display, mode, cx);
             });
         })
         .detach();

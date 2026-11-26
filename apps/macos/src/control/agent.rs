@@ -8138,6 +8138,10 @@ async fn through_input_method(
     source: Option<String>,
     cx: &mut AsyncApp,
 ) -> Result<Params, ControlError> {
+    // In Auto the borrow waits up to `BORROW_WAIT_MS` for 2 s of quiet and
+    // no composition, then runs (ADR 0025); in Ask it fails at once, as
+    // ADR 0008 says.
+    borrow_wait(cx).await;
     // Refused before the glow shows: no flash for a call that sends nothing.
     crate::mac::ime::may_borrow(keys.len()).map_err(ControlError::failed)?;
     let forwarder = core.update(cx, |c, _| c.forwarder(id));
@@ -8206,6 +8210,38 @@ async fn through_input_method(
             "the user touched the keyboard or pointer after {sent} of {total} keys, so the input method stopped and their app is in front again. Take a screenshot, then send the rest once they've stopped."
         ))),
         Err(reason) => Err(ControlError::failed(reason)),
+    }
+}
+
+/// In Auto, wait for the hands to be quiet enough for a Keyboard Borrow,
+/// at most `BORROW_WAIT_MS`. Ask and YOLO don't wait.
+async fn borrow_wait(cx: &mut AsyncApp) {
+    use agent_screen_model::user_activity::{BORROW_WAIT_MS, WAITING_SAMPLE_MS};
+    if crate::autonomy::mode() != autonomy::Mode::Auto {
+        return;
+    }
+    let _waiting = crate::mac::activity::Waiting::start();
+    let until = Instant::now() + Duration::from_millis(BORROW_WAIT_MS);
+    loop {
+        let hands = off(cx, crate::mac::activity::hands).await;
+        let decision = autonomy::decide(
+            crate::autonomy::mode(),
+            autonomy::Crossing::KeyboardBorrow,
+            autonomy::Subject::default(),
+            &hands,
+        );
+        if !matches!(decision, autonomy::Decision::WaitHands(_)) {
+            return;
+        }
+        if Instant::now() >= until {
+            log::info!(
+                "autonomy: a Keyboard Borrow waited {BORROW_WAIT_MS} ms for quiet: {decision:?}"
+            );
+            return;
+        }
+        cx.background_executor()
+            .timer(Duration::from_millis(WAITING_SAMPLE_MS))
+            .await;
     }
 }
 

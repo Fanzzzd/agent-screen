@@ -15,8 +15,9 @@ use super::off;
 use crate::core::Core;
 use crate::mac::key_hold;
 use crate::model::{DisplayId, WindowTarget};
+use agent_screen_model::autonomy::Mode;
 use agent_screen_model::front_hold::{
-    self, End, GIVE_BACK_MS, Keys, Next, Phase, SETTLE_MS, Start,
+    self, End, GIVE_BACK_MS, Initiator, Keys, Next, Phase, SETTLE_MS, Start,
 };
 use gpui::{App, AsyncApp, Entity};
 use std::time::{Duration, Instant};
@@ -28,8 +29,35 @@ const TICK: Duration = Duration::from_millis(20);
 /// window number `window`, which is key.
 pub fn press(core: Entity<Core>, display: DisplayId, window: u32, cx: &mut App) {
     cx.spawn(async move |cx: &mut AsyncApp| {
-        let end = hold(&core, display, window, cx).await;
+        let end = hold(&core, display, window, Initiator::User, cx).await;
         log::info!("front hold for display {display}: {end:?}");
+    })
+    .detach();
+}
+
+/// The Autonomy Mode starts display `display`'s front hold by itself: in
+/// Auto with the hands At Rest, in YOLO once the request is queued
+/// (ADR 0025). Agent Screen takes the front with `native::front_anchor`.
+pub fn by_mode(core: Entity<Core>, display: DisplayId, mode: Mode, cx: &mut App) {
+    let Some(window) = crate::mac::native::front_anchor() else {
+        return;
+    };
+    log::info!(
+        "autonomy: {} starts the front hold for display {display}",
+        mode.as_str()
+    );
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        let end = hold(&core, display, window, Initiator::Mode(mode), cx).await;
+        crate::mac::native::front_anchor_away();
+        if let Some(end) = end {
+            crate::mac::activity::hold_ended();
+            match end {
+                End::UserActed(_) => crate::mac::activity::interrupted(),
+                End::Ran => crate::mac::activity::completed_untouched(),
+                _ => {}
+            }
+        }
+        log::info!("front hold for display {display} by mode: {end:?}");
     })
     .detach();
 }
@@ -40,6 +68,7 @@ pub async fn hold(
     core: &Entity<Core>,
     display: DisplayId,
     window: u32,
+    initiator: Initiator,
     cx: &mut AsyncApp,
 ) -> Option<End> {
     let own = std::process::id() as i32;
@@ -116,7 +145,14 @@ pub async fn hold(
             }
         });
         let elapsed = started.elapsed().as_millis() as u64;
-        match front_hold::next(phase, elapsed, own_front, pending, input, true) {
+        match front_hold::next(
+            phase,
+            elapsed,
+            own_front,
+            pending,
+            input,
+            initiator.yields(),
+        ) {
             Next::Wait => {}
             Next::Run => {
                 phase = Phase::Running;

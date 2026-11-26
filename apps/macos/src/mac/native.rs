@@ -1748,6 +1748,55 @@ pub fn order_out(window: &NSWindow) {
     window.orderOut(None);
 }
 
+thread_local! {
+    static ANCHOR: RefCell<Option<Retained<NSWindow>>> = const { RefCell::new(None) };
+}
+
+/// The window a front hold the Autonomy Mode started takes the front with,
+/// as no press of the user's names one (ADR 0025): 1 by 1 point, clear, at
+/// the main screen's bottom-left corner, ignoring the mouse. Ordered in;
+/// its window number. Main thread.
+pub fn front_anchor() -> Option<u32> {
+    use objc2_app_kit::{NSBackingStoreType, NSWindowStyleMask};
+    let mtm = MainThreadMarker::new()?;
+    ANCHOR.with(|anchor| {
+        let mut anchor = anchor.borrow_mut();
+        let window = anchor.get_or_insert_with(|| {
+            let window = unsafe {
+                NSWindow::initWithContentRect_styleMask_backing_defer(
+                    NSWindow::alloc(mtm),
+                    NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1.0, 1.0)),
+                    NSWindowStyleMask::Borderless,
+                    NSBackingStoreType::Buffered,
+                    false,
+                )
+            };
+            unsafe { window.setReleasedWhenClosed(false) };
+            window.setOpaque(false);
+            window.setBackgroundColor(Some(&NSColor::clearColor()));
+            window.setIgnoresMouseEvents(true);
+            window.setHasShadow(false);
+            window.setCollectionBehavior(
+                NSWindowCollectionBehavior::CanJoinAllSpaces
+                    | NSWindowCollectionBehavior::Transient
+                    | NSWindowCollectionBehavior::IgnoresCycle,
+            );
+            window
+        });
+        window.orderFrontRegardless();
+        Some(window.windowNumber() as u32)
+    })
+}
+
+/// The hold ended: the anchor goes.
+pub fn front_anchor_away() {
+    ANCHOR.with(|anchor| {
+        if let Some(window) = anchor.borrow().as_ref() {
+            window.orderOut(None);
+        }
+    });
+}
+
 pub fn make_key(window: &NSWindow) {
     window.makeKeyWindow();
 }

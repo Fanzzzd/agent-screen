@@ -356,6 +356,18 @@ impl InputQueue {
         )
     }
 
+    /// The oldest waiting front request's display and the app it waits
+    /// on, for a front hold the mode starts: oldest first, one at a time.
+    pub fn first_front(&self) -> Option<(DisplayId, i32)> {
+        self.queue
+            .fronts()
+            .filter(|r| r.status == Status::Queued)
+            .find_map(|r| {
+                let pid = self.fronts.get(&r.id)?.pid;
+                (pid > 0).then_some((r.owner.display, pid))
+            })
+    }
+
     /// Display `display`'s front requests on app `app` still waiting or
     /// running.
     pub fn pending_on(&self, display: DisplayId, app: i32) -> usize {
