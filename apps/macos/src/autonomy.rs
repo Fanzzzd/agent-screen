@@ -25,6 +25,10 @@ static SNAPSHOT: Mutex<Option<Snapshot>> = Mutex::new(None);
 /// connection.
 static CLIENTS: Mutex<BTreeMap<u64, String>> = Mutex::new(BTreeMap::new());
 
+/// The apps the user added to the Protected Apps, for threads that can't
+/// read `Core`.
+static ADDED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
 #[derive(Clone)]
 struct Snapshot {
     mode: Mode,
@@ -139,6 +143,13 @@ pub fn clients() -> BTreeSet<String> {
         .collect()
 }
 
+/// Whether the app of process `pid` is a Protected App now. Any thread.
+pub fn protected_pid(pid: i32) -> bool {
+    let bundle = crate::mac::app::bundle_id(pid);
+    let added = ADDED.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    autonomy::protected(bundle.as_deref(), &clients(), &added)
+}
+
 /// The activity monitor runs while the mode is Auto, and only then.
 pub fn sync_monitor(mode: Mode) {
     if mode == Mode::Auto {
@@ -235,6 +246,10 @@ impl Autonomy {
 
     fn publish(&self) {
         MODE.store(encode(self.mode()), Ordering::Release);
+        ADDED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone_from(&self.setting.protected);
         *SNAPSHOT.lock().unwrap_or_else(|e| e.into_inner()) = Some(Snapshot {
             mode: self.mode(),
             stored: self.setting.base.mode(),

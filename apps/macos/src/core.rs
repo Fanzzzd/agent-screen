@@ -1287,7 +1287,13 @@ impl Core {
 
     /// What a change of mode does to work in progress.
     fn autonomy_changed(&mut self, cx: &mut Context<Self>) {
-        crate::autonomy::sync_monitor(self.autonomy.mode());
+        let mode = self.autonomy.mode();
+        crate::autonomy::sync_monitor(mode);
+        // To Ask: a grant the mode opened ends, with restoration; waiting
+        // requests show the approval card again (ADR 0025).
+        if !mode.acts() && self.input_queue.queue.mode_grant().is_some() {
+            self.input_queue.revoke();
+        }
         cx.notify();
     }
 

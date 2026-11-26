@@ -249,6 +249,12 @@ pub struct Shell {
     /// The first loan of a grant waits for the user's hand to rest; a
     /// check is set for the moment it will have.
     quiet_check: bool,
+    /// A look at the hands for a grant the Autonomy Mode may open is under
+    /// way; when the open grant was opened by the mode; and the monitor's
+    /// faster sampling while a request waits for the mode (ADR 0025).
+    mode_opening: bool,
+    mode_opened: Option<Instant>,
+    mode_waiting: Option<crate::mac::activity::Waiting>,
     /// The Red Glow's state as last shown, and a preview `debugShow` asked
     /// for with its number, which its timer ends unless a newer one came.
     glow: Glow,
@@ -956,6 +962,9 @@ impl Shell {
             real_saved: None,
             loan_running: false,
             quiet_check: false,
+            mode_opening: false,
+            mode_opened: None,
+            mode_waiting: None,
             restoring: false,
             glow: Glow::Off,
             glow_preview: None,
@@ -1800,6 +1809,14 @@ impl Shell {
     /// grant ends, and the pointer and front app stay where they are.
     fn user_took_input(&mut self, cx: &mut Context<Self>) {
         if self.core.read(cx).input_queue.queue.grant().is_some() {
+            if let Some(mode) = self.core.read(cx).input_queue.queue.mode_grant() {
+                // The next grant waits for longer rest (ADR 0025).
+                crate::mac::activity::interrupted();
+                log::info!(
+                    "autonomy: the user touched the pointer or keyboard; the grant {} opened ends",
+                    mode.as_str()
+                );
+            }
             log::info!("input queue: the user took control back");
             self.revoke_input(cx);
         }
@@ -1817,6 +1834,12 @@ impl Shell {
             let input = &self.core.read(cx).input_queue;
             (input.queue.grant().is_some(), input.ending())
         };
+        if let Some(end) = ending
+            && matches!(end.opened, agent_screen_model::input_queue::Opened::Mode(_))
+        {
+            self.end_mode_grant(end, cx);
+            return;
+        }
         if let Some(end) = ending {
             // Keep observing through restoration: a user touch during
             // cleanup must prevent restoring over their new action.
@@ -1869,9 +1892,11 @@ impl Shell {
             let queue = &self.core.read(cx).input_queue.queue;
             if queue.active().is_none() && queue.pending_end().is_none() {
                 real_input::recover_observer();
+                self.open_by_mode(cx);
             }
             return;
         }
+        self.mode_waiting = None;
         // No observer or glow, no real input.
         if !real_input::watching() {
             self.revoke_input(cx);
@@ -1911,6 +1936,29 @@ impl Shell {
                 return;
             }
             real_input::arm(true);
+        }
+        // In Auto the Red Glow shows Armed for `LEAD_MS` before the first
+        // event of a grant the mode opened; a touch meanwhile cancels it.
+        if let Some(opened) = self.mode_opened
+            && self.core.read(cx).input_queue.queue.mode_grant()
+                == Some(agent_screen_model::autonomy::Mode::Auto)
+        {
+            let lead = Duration::from_millis(agent_screen_model::user_activity::LEAD_MS);
+            if opened.elapsed() < lead {
+                if !self.quiet_check {
+                    self.quiet_check = true;
+                    let wait = lead - opened.elapsed() + Duration::from_millis(10);
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(wait).await;
+                        let _ = this.update(cx, |shell, cx| {
+                            shell.quiet_check = false;
+                            shell.drive_queue(cx);
+                        });
+                    })
+                    .detach();
+                }
+                return;
+            }
         }
         let loan = self.core.update(cx, |core, cx| {
             let loan = core.input_queue.start_loan();
@@ -1955,6 +2003,153 @@ impl Shell {
                         core.input_queue.revoke();
                     }
                     core.input_queue.finish_loan(id, failure);
+                    cx.notify();
+                });
+                shell.drive_queue(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// In Auto or YOLO, open a grant for the requests that wait, once the
+    /// mode's rule allows: in Auto when the hands are At Rest, in YOLO once
+    /// no button or key is held and nothing hard stands in the way. No
+    /// card and no Allow; an armed hold keeps the user's keys meanwhile
+    /// (ADR 0025).
+    fn open_by_mode(&mut self, cx: &mut Context<Self>) {
+        use crate::mac::{activity, armed_hold, real_input};
+        use agent_screen_model::autonomy::{self, Crossing, Decision, Subject};
+        let mode = crate::autonomy::mode();
+        let wanted = mode.acts() && self.core.read(cx).input_queue.mode_wanted();
+        if !wanted {
+            self.mode_waiting = None;
+            if self.core.read(cx).input_queue.waiting_on.is_some() {
+                self.core
+                    .update(cx, |core, _| core.input_queue.waiting_on = None);
+            }
+            return;
+        }
+        if self.mode_opening || self.loan_running || self.restoring || !real_input::watching() {
+            return;
+        }
+        self.mode_waiting
+            .get_or_insert_with(activity::Waiting::start);
+        self.mode_opening = true;
+        cx.spawn(async move |this, cx| {
+            let hands = cx
+                .background_executor()
+                .spawn(async { activity::hands() })
+                .await;
+            let decision = autonomy::decide(mode, Crossing::RealInput, Subject::default(), &hands);
+            let saved = match decision {
+                Decision::Go => Some(
+                    cx.background_executor()
+                        .spawn(async { real_input::save() })
+                        .await,
+                ),
+                _ => None,
+            };
+            let _ = this.update(cx, |shell, cx| {
+                shell.mode_opening = false;
+                let Some(saved) = saved else {
+                    let waiting_on = match decision {
+                        Decision::WaitHands(busy) => Some(busy.waiting_on()),
+                        _ => None,
+                    };
+                    shell
+                        .core
+                        .update(cx, |core, _| core.input_queue.waiting_on = waiting_on);
+                    // Look again soon: the monitor samples faster meanwhile.
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(
+                                agent_screen_model::user_activity::WAITING_SAMPLE_MS,
+                            ))
+                            .await;
+                        let _ = this.update(cx, |shell, cx| shell.drive_queue(cx));
+                    })
+                    .detach();
+                    return;
+                };
+                // The mode or the queue may have changed meanwhile.
+                let still = crate::autonomy::mode() == mode && {
+                    let input = &shell.core.read(cx).input_queue;
+                    input.queue.grant().is_none()
+                        && input.queue.pending_end().is_none()
+                        && input.queue.active().is_none()
+                        && input.mode_wanted()
+                };
+                if !still || shell.loan_running || shell.restoring {
+                    shell.drive_queue(cx);
+                    return;
+                }
+                if !armed_hold::start(mode) {
+                    return;
+                }
+                real_input::arm(true);
+                let opened = shell.core.update(cx, |core, cx| {
+                    let opened = core.input_queue.open_by_mode(mode);
+                    cx.notify();
+                    opened
+                });
+                if !opened {
+                    armed_hold::finish(None, true);
+                    real_input::arm(false);
+                    return;
+                }
+                log::info!(
+                    "autonomy: {} opened a grant (idle {} ms)",
+                    mode.as_str(),
+                    hands.idle_ms
+                );
+                shell.mode_waiting = None;
+                shell.real_saved = Some(saved);
+                shell.mode_opened = Some(Instant::now());
+                shell.drive_queue(cx);
+                shell.sync_card(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// A grant the mode opened ended: put the pointer, front app and
+    /// focused window back, touched or not, then send what the armed hold
+    /// kept, and let the next grant wait `HOLD_GAP_MS`.
+    fn end_mode_grant(
+        &mut self,
+        end: agent_screen_model::input_queue::GrantEnd,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::mac::{activity, armed_hold, real_input};
+        let touched = real_input::touched();
+        let saved = self.real_saved.take().filter(|_| end.restore);
+        self.mode_opened = None;
+        self.sync_bar(false, cx);
+        self.restoring = true;
+        self.sync_glow(cx);
+        let started = Instant::now();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .spawn(async move {
+                    let confirmed = saved.is_none_or(real_input::restore_by_mode);
+                    armed_hold::finish(saved.map(|s| s.pointer), confirmed);
+                    activity::hold_ended();
+                    if !touched {
+                        activity::completed_untouched();
+                    }
+                })
+                .await;
+            let _ = this.update(cx, |shell, cx| {
+                log::info!(
+                    "autonomy: the grant the mode opened ended{}",
+                    if touched { " at the user's touch" } else { "" }
+                );
+                shell.glow_restore = Some(started.elapsed());
+                shell.restoring = false;
+                shell.sync_glow(cx);
+                real_input::arm(false);
+                shell.core.update(cx, |core, cx| {
+                    core.input_queue.ended(end);
                     cx.notify();
                 });
                 shell.drive_queue(cx);

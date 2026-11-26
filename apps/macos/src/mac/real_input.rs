@@ -337,6 +337,30 @@ pub fn save() -> Saved {
 /// Put the pointer and front app back. Not after the user took control:
 /// that would undo what they just did.
 pub fn restore(saved: Saved) {
+    restore_with(saved, touched);
+}
+
+/// Put them back after a grant the Autonomy Mode opened, touched or not:
+/// the user's touch ended it, and their held input goes out once their
+/// pointer, front app and window are back (ADR 0025). Whether their
+/// focused window is key again.
+pub fn restore_by_mode(saved: Saved) -> bool {
+    restore_with(saved, || false);
+    let Some(front) = saved.front else {
+        return true;
+    };
+    // Agent Screen itself was in front, which nothing above brings back:
+    // the held keys go out only while it still is, never to the loan's app.
+    if front == std::process::id() as i32 {
+        return super::app::frontmost_pid() == Some(front);
+    }
+    match saved.window {
+        Some(window) => super::ax::focused_window_id(front) == Some(window),
+        None => super::app::frontmost_pid() == Some(front),
+    }
+}
+
+fn restore_with(saved: Saved, touched: fn() -> bool) {
     let now = CGEvent::new(None).map(|e| CGEvent::location(Some(&e)));
     log::info!(
         "input queue: restoring the pointer and front app; pointer at {:?}",

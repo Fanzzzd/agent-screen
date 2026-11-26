@@ -78,6 +78,10 @@ pub struct InputQueue {
     /// How long a front request waits before its display's card says so:
     /// `WAITING_LINE_MS`, shorter in scripts (`debugFrontWait`).
     line_ms: u64,
+    /// In Auto or YOLO, what a request waiting for the mode waits on, as
+    /// `waitingOn` (`autonomy::Busy::waiting_on`), from the last look at
+    /// the hands.
+    pub waiting_on: Option<&'static str>,
 }
 
 /// What a front request's background run came to: the reply's result, or
@@ -186,6 +190,15 @@ pub struct Click {
 }
 
 impl Plan {
+    /// The window the loan acts on first.
+    pub fn target(&self) -> WindowTarget {
+        match self {
+            Plan::Drag(d) => d.target,
+            Plan::MenuItem(m) => m.target,
+            Plan::Click(c) => c.target,
+        }
+    }
+
     /// Whether the loan acts on window `window`: a drag's start or drop,
     /// a menu item's window, a click's window.
     pub fn touches(&self, window: u32) -> bool {
@@ -225,6 +238,7 @@ impl Default for InputQueue {
             outcomes: BTreeMap::new(),
             hold: None,
             line_ms: WAITING_LINE_MS,
+            waiting_on: None,
         }
     }
 }
@@ -276,7 +290,12 @@ impl InputQueue {
             ));
         }
         let now = self.now();
-        let id = self.queue.enqueue(owner, operation, reason.into(), now).map_err(|why| {
+        // Real input into a Protected App's window asks the user in every
+        // mode (ADR 0025).
+        let ask_only = plan
+            .as_ref()
+            .is_some_and(|p| crate::autonomy::protected_pid(p.target().pid));
+        let id = self.queue.enqueue_for(owner, operation, reason.into(), ask_only, now).map_err(|why| {
             match why {
                 EnqueueError::Full => "the input queue is full; use input_queue done when your session no longer needs its requests, or wait for other sessions to clear theirs",
                 EnqueueError::SessionFull => "this connection holds 64 input requests across its displays, including finished ones it has not cleared; use input_queue done on each display once it has read their results, then request again",
@@ -839,10 +858,36 @@ impl InputQueue {
     pub fn asks(&self, id: RequestId) -> bool {
         self.queue.grant().is_none()
             && !self.approved.contains(&id)
+            && self.queue.request(id).is_some_and(|r| {
+                r.status == Status::Queued && (r.ask_only || !crate::autonomy::mode().acts())
+            })
+    }
+
+    /// In Auto or YOLO, a runnable request waiting for the mode to open a
+    /// grant: no card, and the call keeps waiting.
+    pub fn mode_waits(&self, id: RequestId) -> bool {
+        crate::autonomy::mode().acts()
+            && self.queue.grant().is_none()
+            && self.plans.contains_key(&id)
             && self
                 .queue
                 .request(id)
-                .is_some_and(|r| r.status == Status::Queued)
+                .is_some_and(|r| r.status == Status::Queued && !r.front && !r.ask_only)
+    }
+
+    /// Whether any request waits for the mode.
+    pub fn mode_wanted(&self) -> bool {
+        self.queue
+            .waiting()
+            .any(|r| self.mode_waits(r.id) && r.attached)
+    }
+
+    /// The mode opens a grant: no card, no Allow.
+    pub fn open_by_mode(&mut self, mode: agent_screen_model::autonomy::Mode) -> bool {
+        let opened = self.queue.open_by_mode(mode, self.now());
+        self.waiting_on = None;
+        self.tick();
+        opened
     }
 
     /// Whether a call waiting on `id` should keep waiting: for the user's
@@ -856,7 +901,7 @@ impl InputQueue {
             Status::Queued if paused => false,
             Status::Queued if r.front => r.attached,
             Status::Queued if self.queue.grant().is_some() => self.plans.contains_key(&id),
-            Status::Queued => self.asks(id),
+            Status::Queued => self.asks(id) || self.mode_waits(id),
             Status::Running | Status::Stopping(_) => true,
             _ => false,
         }
@@ -970,6 +1015,8 @@ impl InputQueue {
                         || self.fronts.contains_key(&request.id),
                     "elapsedSeconds": seconds(request.times.elapsed_ms(self.now())),
                     "timing": self.timing(request.id, &request.times),
+                    "waitingOn": (state == "queued" && self.mode_waits(request.id))
+                        .then(|| self.waiting_on.unwrap_or("userActive")),
                 })
             })
             .collect();
@@ -1001,6 +1048,34 @@ mod tests {
             title: "Queue".into(),
             connection,
         }
+    }
+
+    /// Ask's reference for crossing (d), from 0.1.44: a request asks for
+    /// the user's Allow, never waits for a mode, and its grant is the
+    /// user's, which a touch ends without restoring (ADR 0013).
+    #[test]
+    fn in_ask_a_request_asks_and_no_mode_opens_a_grant() {
+        assert_eq!(
+            crate::autonomy::mode(),
+            agent_screen_model::autonomy::Mode::Ask
+        );
+        let mut input = InputQueue::default();
+        input.register(1, &display_owner(1));
+        let owner = input.owner(1, 1).unwrap();
+        let id = input
+            .submit(owner.clone(), "drag".into(), "Move a card".into(), None)
+            .unwrap();
+        assert!(input.asks(id));
+        assert!(!input.mode_waits(id));
+        assert!(!input.mode_wanted());
+        assert!(input.status(&owner, Some(id), false)["requests"][0]["waitingOn"].is_null());
+        assert!(input.approve(input.queue.approval()));
+        assert_eq!(input.queue.mode_grant(), None);
+        input.revoke();
+        assert_eq!(
+            input.queue.pending_end().map(|end| end.restore),
+            Some(false)
+        );
     }
 
     #[test]

@@ -809,6 +809,19 @@ fn debug_autonomy(core: &Entity<Core>, cx: &mut AsyncApp) -> Value {
         reply["protected"] = json!(a.protected_list());
         reply["clients"] = json!(crate::autonomy::clients());
         reply["tracker"] = crate::mac::activity::debug_json();
+        use crate::mac::armed_hold;
+        reply["armedHold"] = json!({
+            "armed": armed_hold::armed(),
+            "held": armed_hold::held(),
+            "last": armed_hold::last().map(|s| json!({
+                "events": s.events,
+                "keyDowns": s.key_downs,
+                "ms": s.ms,
+                "sent": s.sent,
+                "discarded": s.discarded,
+            })),
+        });
+        reply["grant"] = json!(c.input_queue.queue.mode_grant().map(|m| m.as_str()));
         reply
     })
 }

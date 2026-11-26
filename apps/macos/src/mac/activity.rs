@@ -7,7 +7,6 @@
 //! Also here: the lock, sleep and session observers that end YOLO, and the
 //! e2e instance's override of the sample (`debugActivity`).
 // The crossings that read it arrive in the next commits.
-#![allow(dead_code)]
 
 use agent_screen_model::autonomy::YoloEnd;
 use agent_screen_model::user_activity::{Hands, SAMPLE_MS, Sample, Tracker, WAITING_SAMPLE_MS};
@@ -202,11 +201,6 @@ pub fn pressed_on(window: u32) -> bool {
 /// Since `window` was last used, as far as the monitor knows.
 pub fn unused_ms(window: u32) -> Option<u64> {
     state().tracker.unused_ms(window, now_ms())
-}
-
-/// Forget the windows that closed.
-pub fn forget_closed(open: &BTreeSet<u32>) {
-    state().tracker.forget_closed(open);
 }
 
 /// `debugActivity`: set fields of the sample, or clear the override with

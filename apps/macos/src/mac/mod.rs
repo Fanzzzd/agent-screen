@@ -4,6 +4,7 @@ pub mod activity;
 pub mod aerospace;
 pub mod alerts;
 pub mod app;
+pub mod armed_hold;
 pub mod assist;
 pub mod ax;
 pub mod capture;
