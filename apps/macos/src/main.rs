@@ -5,6 +5,7 @@
 // First, so `tf!` is in scope in every module below.
 #[macro_use]
 mod i18n;
+mod autonomy;
 mod control;
 mod core;
 mod dismissal;

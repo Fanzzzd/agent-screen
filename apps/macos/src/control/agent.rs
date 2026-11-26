@@ -405,6 +405,7 @@ async fn handle_one(
     let result: Result<Value, ControlError> = match method {
         "createDisplay" => {
             let mut reply = create_display(&core, connection, &p, cx).await?;
+            reply["autonomyMode"] = json!(crate::autonomy::mode().as_str());
             // "Displays have separate Spaces" off: the agent hears it with
             // each display, and the user once, on a card (spaces).
             if off(cx, crate::mac::spaces::shared).await {
@@ -748,7 +749,11 @@ async fn handle_one(
                 })
                 .chain(away_json)
                 .collect();
-            let mut reply = json!({ "windows": list, "scale": scale });
+            let mut reply = json!({
+                "windows": list,
+                "scale": scale,
+                "autonomyMode": crate::autonomy::mode().as_str(),
+            });
             // list_windows shows the reply as it is: the note says it.
             let mut notes = Vec::new();
             if let Some(given) = add_given(&core, id, &mut reply, cx) {
@@ -4002,11 +4007,7 @@ async fn hand_over(
     // A window off screen, minimized, comes home where it would have
     // shown, and back into the Dock (#221).
     let bounds = window.bounds;
-    let by = match (&authority, &words) {
-        (Authority::User, _) => "user",
-        (_, Some(_)) => "chat",
-        _ => "grant",
-    };
+    let by = authority.name(words.is_some());
     let home = off(cx, move || {
         crate::dismissal::home_of(target, None)
             .or_else(|| crate::dismissal::home_of(target, Some(bounds)))
@@ -4088,6 +4089,12 @@ async fn hand_over(
     Ok(Map::from_iter([
         ("handedOver".into(), Value::Bool(true)),
         ("by".into(), json!(by)),
+        // The route, as `by`; and the mode it was decided in.
+        ("authority".into(), json!(by)),
+        (
+            "autonomyMode".into(),
+            json!(crate::autonomy::mode().as_str()),
+        ),
         // Which of the app's windows came, and from where.
         ("windowId".into(), json!(target.window_id)),
         ("title".into(), json!(title)),

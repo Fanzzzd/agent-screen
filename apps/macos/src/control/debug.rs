@@ -357,6 +357,7 @@ pub(super) async fn handle(
         "debugIcon" => debug_icon(cx),
         "debugShow" => debug_show(core, connection, p, cx).await,
         "debugGlow" => debug_glow(p, cx).await,
+        "debugAutonomy" => Ok(debug_autonomy(core, cx)),
         _ => return None,
     };
     Some(result)
@@ -785,6 +786,22 @@ fn debug_card(cx: &mut AsyncApp) -> Result<Value, ControlError> {
     }))
 }
 
+/// The Autonomy Mode as it is: the setting, whether the Stop chord is
+/// registered, the Kept Windows, the Protected Apps resolved and the
+/// clients' apps, and the monitor's tracker.
+fn debug_autonomy(core: &Entity<Core>, cx: &mut AsyncApp) -> Value {
+    core.read_with(cx, |c, _| {
+        let a = &c.autonomy;
+        let mut reply = a.json();
+        reply["hotkey"] = json!(false);
+        reply["kept"] = json!(a.kept.ids().collect::<Vec<_>>());
+        reply["protected"] = json!(a.protected_list());
+        reply["clients"] = json!(crate::autonomy::clients());
+        reply["tracker"] = Value::Null;
+        reply
+    })
+}
+
 fn debug_icon(cx: &mut AsyncApp) -> Result<Value, ControlError> {
     let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
     let (state, asking_count) = shell
@@ -1003,6 +1020,24 @@ async fn debug_show(
             Ok(())
         })?;
     }
+    // The mode, as the user would change it, on the e2e instance only:
+    // a test never changes the developer's mode (ADR 0025).
+    if let Some(change) = autonomy_surface(&surface) {
+        if agent_screen_mcp::endpoint::instance().as_deref() != Some("e2e") {
+            return Err(ControlError::invalid(
+                "autonomy previews require the isolated e2e instance",
+            ));
+        }
+        use crate::autonomy::Source;
+        use agent_screen_model::autonomy::YoloEnd;
+        let changed = core.update(cx, |c, cx| match change {
+            AutonomyChange::Choose(mode) => c.choose_autonomy(mode, Source::Debug, cx),
+            AutonomyChange::Stop => c.stop_autonomy(Source::Debug, cx),
+            AutonomyChange::Lock => c.end_yolo(YoloEnd::Locked, cx),
+            AutonomyChange::Sleep => c.end_yolo(YoloEnd::Slept, cx),
+        });
+        return Ok(json!({ "changed": changed, "mode": crate::autonomy::mode().as_str() }));
+    }
     // Allow itself, through the shell, comes after this.
     if matches!(surface.as_str(), "input-queue" | "input-queue-approved") {
         core.update(cx, |c, cx| -> Result<(), ControlError> {
@@ -1078,6 +1113,28 @@ async fn debug_show(
         .timer(Duration::from_millis(900))
         .await;
     Ok(json!({}))
+}
+
+/// A debugShow surface that changes the Autonomy Mode as the user would.
+#[derive(Clone, Copy)]
+enum AutonomyChange {
+    Choose(agent_screen_model::autonomy::Mode),
+    Stop,
+    Lock,
+    Sleep,
+}
+
+fn autonomy_surface(surface: &str) -> Option<AutonomyChange> {
+    use agent_screen_model::autonomy::Mode;
+    Some(match surface {
+        "autonomy-ask" => AutonomyChange::Choose(Mode::Ask),
+        "autonomy-auto" => AutonomyChange::Choose(Mode::Auto),
+        "autonomy-yolo-confirm" => AutonomyChange::Choose(Mode::Yolo),
+        "autonomy-stop" => AutonomyChange::Stop,
+        "autonomy-lock" => AutonomyChange::Lock,
+        "autonomy-sleep" => AutonomyChange::Sleep,
+        _ => return None,
+    })
 }
 
 /// The Red Glow as it is: its state and preview, and per user screen its

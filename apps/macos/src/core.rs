@@ -72,6 +72,8 @@ pub struct Spare {
 pub struct Core {
     pub displays: Displays<VirtualDisplay>,
     pub input_queue: crate::input_queue::InputQueue,
+    /// The user's Autonomy Mode and the Kept Windows (ADR 0025).
+    pub autonomy: crate::autonomy::Autonomy,
     forwarders: HashMap<DisplayId, Forwarder>,
     /// The numbered elements of each window an agent has looked at, by
     /// display. Dropped with the display.
@@ -161,6 +163,7 @@ impl Core {
         Core {
             displays,
             input_queue: Default::default(),
+            autonomy: crate::autonomy::Autonomy::load(),
             forwarders: HashMap::new(),
             elements: HashMap::new(),
             closed: HashSet::new(),
@@ -1184,6 +1187,54 @@ impl Core {
     /// The user takes the display over: by their first input in the
     /// Viewer, Take Over, or by telling the agent in chat. The agent's
     /// input stops and Window Access pauses. False when nothing changed.
+    /// The user picked an Autonomy Mode, in Settings or the menu: Ask or
+    /// Auto at once, YOLO from the confirmation only (ADR 0025).
+    pub fn choose_autonomy(
+        &mut self,
+        mode: agent_screen_model::autonomy::Mode,
+        source: crate::autonomy::Source,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let changed = self.autonomy.choose(mode, source);
+        if changed {
+            self.autonomy_changed(cx);
+        }
+        changed
+    }
+
+    /// Stop in Auto or YOLO: the chord, the Input Bar's Stop or the menu's.
+    /// The mode goes to Ask.
+    pub fn stop_autonomy(
+        &mut self,
+        source: crate::autonomy::Source,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let changed = self.autonomy.stop(source);
+        if changed {
+            self.autonomy_changed(cx);
+        }
+        changed
+    }
+
+    /// The Mac locked or slept, or the session was switched out: YOLO
+    /// ends, and the stored mode applies.
+    pub fn end_yolo(
+        &mut self,
+        why: agent_screen_model::autonomy::YoloEnd,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let ended = self.autonomy.end_yolo(why);
+        if ended {
+            self.autonomy_changed(cx);
+        }
+        ended
+    }
+
+    /// What a change of mode does to work in progress.
+    fn autonomy_changed(&mut self, cx: &mut Context<Self>) {
+        cx.notify();
+    }
+
     pub fn take_over(&mut self, id: DisplayId, cx: &mut Context<Self>) -> bool {
         let effects = self.displays.begin_takeover(id);
         let changed = !effects.is_empty();

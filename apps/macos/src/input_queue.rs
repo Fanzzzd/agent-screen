@@ -975,6 +975,7 @@ impl InputQueue {
             .collect();
         json!({
             "executorAvailable": EXECUTOR_AVAILABLE,
+            "mode": crate::autonomy::mode().as_str(),
             "grantActive": self.queue.grant().is_some(),
             "elapsedSeconds": self.elapsed_seconds(),
             "waiting": self.queue.waiting().count(),

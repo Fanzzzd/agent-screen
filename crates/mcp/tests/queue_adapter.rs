@@ -4,6 +4,19 @@
 
 use agent_screen_model::model;
 
+/// The app's Autonomy Mode, which reads OS state there: Ask here, and no
+/// Protected App, so the coordinator decides as 0.1.44 did.
+#[allow(dead_code)]
+mod autonomy {
+    pub fn mode() -> agent_screen_model::autonomy::Mode {
+        agent_screen_model::autonomy::Mode::Ask
+    }
+
+    pub fn protected_pid(_pid: i32) -> bool {
+        false
+    }
+}
+
 #[path = "../../../apps/macos/src/input_queue.rs"]
 mod app_input_queue;
 

@@ -413,6 +413,13 @@ async fn accept(stream: tokio::net::UnixStream, connection: u64, shared: Arc<Sha
                     if hello.resumed { ", resumed" } else { "" }
                 );
                 identified(&shared, connection, peer);
+                // The client's app is a Protected App while the pipe lives
+                // (ADR 0025).
+                let parent = i32::try_from(hello.parent_pid).unwrap_or(0);
+                let _ = tokio::task::spawn_blocking(move || {
+                    crate::autonomy::client_connected(connection, parent)
+                })
+                .await;
                 if writer
                     .write_all(&agent_screen_mcp::pipe::accept_line())
                     .await
@@ -436,6 +443,7 @@ async fn accept(stream: tokio::net::UnixStream, connection: u64, shared: Arc<Sha
                     }
                     let _ = close.send(true);
                 }
+                crate::autonomy::client_closed(connection);
             }
             FirstLine::Refused(reply) => {
                 let _ = writer.write_all(&reply).await;
@@ -571,6 +579,7 @@ async fn serve<R, W>(
             // Why the last displays ended, from memory the main thread
             // doesn't hold (#326).
             reply["result"]["endedDisplays"] = crate::lifecycle::recent_ends();
+            reply["result"]["autonomy"] = crate::autonomy::diagnostics();
             let mut bytes = serde_json::to_vec(&reply).unwrap_or_default();
             bytes.push(b'\n');
             let _ = lines.send(bytes);
